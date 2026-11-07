@@ -28,7 +28,8 @@ async function fixture() {
     resolveRepositoryNpmCli: async () => '/fixtures/npm/bin/npm-cli.js',
     providerProcessEnvironment: (source: NodeJS.ProcessEnv) => source, providerHintFromEnvironment: () => null,
     parseSelectedProviderIds: (values: string[]) => values.length ? values : null,
-    resolveRepositoryProviderDirectory: async () => '/fixtures/codex/bin',
+    resolveRepositoryProviderDirectory: async () => '/fixtures/codex/bin', providersHoldingInstalledBundle: async () => [],
+    saveWorkspaceRecord: async () => {},
     withRelayStartupMutation: async (operation: () => Promise<unknown>) => { calls.push('lock'); return operation(); },
     upgradeRelayRuntime: async (_input: unknown, hooks: { assertStopped(): Promise<void>; inspectStartup(): Promise<unknown> }) => {
       await hooks.assertStopped(); await hooks.inspectStartup(); return { state: 'planned' };
@@ -77,13 +78,15 @@ test('actual upgrade caller blocks running relay and named service before mutati
 });
 
 test('actual upgrade caller binds the reviewed recorded-runtime verifier without bypassing identity checks', async () => {
-  const f = await fixture();
-  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: { verifyPriorLaunchers: unknown }) => {
-    assert.equal(hooks.verifyPriorLaunchers, verifyRecordedRepositoryLaunchers);
+  const f = await fixture(), bound: unknown[] = [];
+  f.deps.verifyRecordedRepositoryLaunchers = async (...input: unknown[]) => { bound.push(input); return false; };
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: { verifyPriorLaunchers(version: string, launchers: unknown): Promise<boolean> }) => {
+    assert.equal(await hooks.verifyPriorLaunchers('0.2.116', {shell: 'fixture'}), false);
     return { state: 'planned' };
   };
   await f.run()(f.flags);
   assert.deepEqual(f.calls, ['lock']);
+  assert.deepEqual(JSON.parse(JSON.stringify(bound)), [['0.2.116', {shell: 'fixture'}, {platform: 'linux', nodePath: '/fixtures/node/bin/node'}]]);
 });
 
 test('actual Linux upgrade records npm while rollback does not require a replacement npm installation', async () => {
@@ -340,4 +343,47 @@ test('actual upgrade resolves the bin directory of --provider, else the onboarde
     await f.run()(f.flags);
     assert.deepEqual(requested, [expected]);
   }
+});
+
+// PR #425 review (2): a 0.2.223 record names no provider, so upgrade took the caller's environment and never saved it.
+test('actual upgrade of a record without providers prefers the provider holding a bundle and saves it on apply', async () => {
+  for (const [apply, holders, hint, expected] of [
+    [true, ['claude'], 'codex', 'claude'], [false, ['claude'], 'codex', 'claude'],
+    [true, ['codex', 'claude'], 'claude', 'claude'], [true, [], 'claude', 'claude'],
+  ] as const) {
+    const f = await fixture(), requested: string[] = [], saved: Record<string, unknown>[] = [];
+    f.deps.providerHintFromEnvironment = () => hint;
+    f.deps.providersHoldingInstalledBundle = async () => [...holders];
+    f.deps.saveWorkspaceRecord = async (item: Record<string, unknown>) => { saved.push(item); };
+    f.deps.resolveRepositoryProviderDirectory = async (input: {provider: string}) => {requested.push(input.provider); return undefined;};
+    if (apply) f.flags.set('apply', true);
+    await f.run()(f.flags);
+    assert.deepEqual(requested, [expected]);
+    assert.deepEqual(JSON.parse(JSON.stringify(saved.map(item => item.providerIds))), apply ? [[expected]] : []);
+  }
+});
+
+// PR #425 review (4): verification checked the first provider in the recorded directory, not the set-up one.
+test('actual upgrade binds the set-up provider into prior and recovery launcher verification', async () => {
+  const f = await fixture(), verified: unknown[] = [];
+  const selected = (f.deps.selectDeviceWorkspace as () => Record<string, unknown>)();
+  f.deps.selectDeviceWorkspace = () => ({...selected, providerIds: ['claude']});
+  f.deps.verifyRecordedRepositoryLaunchers = async (_version: string, _launchers: unknown, runtime: {provider?: string}) => {
+    verified.push(['prior', runtime.provider]); return true; };
+  f.deps.verifyRollbackRepositoryLaunchers = async (_version: string, _launchers: unknown, provider?: string) => {
+    verified.push(['recovery', provider]); return true; };
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {verifyPriorLaunchers(version: string, launchers: unknown): Promise<boolean>;
+    verifyRecoveryLaunchers(version: string, launchers: unknown): Promise<boolean>}) => {
+    await hooks.verifyPriorLaunchers('0.2.118', {}); await hooks.verifyRecoveryLaunchers('0.2.118', {});
+    return {state: 'planned'};
+  };
+  await f.run()(f.flags);
+  assert.deepEqual(verified, [['prior', 'claude'], ['recovery', 'claude']]);
+});
+
+test('relay upgrade usage and the unsafe PATH error name --provider', async () => {
+  const {CLI_USAGE} = await import('./usage.js');
+  assert.match(CLI_USAGE, /relay upgrade --workspace <owned-checkout> \[--provider <codex\|claude\|agy\|hermes>\]/);
+  const source = await readFile(fileURLToPath(new URL('../src/repositoryLaunchers.ts', import.meta.url)), 'utf8');
+  assert.match(source, /const unsafeProviderOnPath = [^;]*--provider/);
 });

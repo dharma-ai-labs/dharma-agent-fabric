@@ -2181,11 +2181,18 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
   };
   return withRelayStartupMutation(async () => {
     const npmCliPath = process.platform === 'linux' && !flags.has('rollback') ? await resolveRepositoryNpmCli() : undefined;
+    // A record written before onboard kept its providers names none. Then the provider already holding the
+    // installed bundle decides before the calling agent, and an applied upgrade records it.
+    const requested = parseSelectedProviderIds(typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : [])?.[0];
+    const holders = requested || selected.providerIds ? [] : await providersHoldingInstalledBundle(selected);
+    const hint = providerHintFromEnvironment();
+    const known = requested ?? selected.providerIds?.[0] ?? (hint && holders.includes(hint) ? hint : holders[0]) ?? hint ?? undefined;
+    const provider = known ?? 'codex';
     const providerDirectory = !flags.has('rollback')
-      // A record written before onboard kept its providers names none, so --provider or the calling agent decides.
-      ? await resolveRepositoryProviderDirectory({provider: parseSelectedProviderIds(typeof flags.get('provider') === 'string'
-        ? [String(flags.get('provider'))] : [])?.[0] ?? selected.providerIds?.[0] ?? providerHintFromEnvironment() ?? 'codex',
-        searchPath: providerProcessEnvironment(process.env).PATH}) : undefined;
+      ? await resolveRepositoryProviderDirectory({provider, searchPath: providerProcessEnvironment(process.env).PATH}) : undefined;
+    if (known && !selected.providerIds && flags.has('apply') && !flags.has('rollback')) {
+      await saveWorkspaceRecord({ ...selected, providerIds: [provider] });
+    }
     const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
     const receipt = await upgrade({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
@@ -2231,9 +2238,11 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
           ...(providerDirectory === undefined ? {} : {providerDirectory}) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
-      verifyPriorLaunchers: verifyRecordedRepositoryLaunchers,
+      // Recorded launchers are checked for the set-up provider; with none known, any protected provider command passes.
+      verifyPriorLaunchers: (version, contents) => verifyRecordedRepositoryLaunchers(version, contents,
+        { platform: process.platform, nodePath: process.execPath, ...(known === undefined ? {} : {provider: known}) }),
       recordNextLaunchers: process.platform === 'linux',
-      verifyRecoveryLaunchers: verifyRollbackRepositoryLaunchers,
+      verifyRecoveryLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents, known),
       configureStartup: (version, restore) => enableRelayAutostart({ ...startupOptions, workspace,
         launcher: startup.launcher, policy: startup.policy, version,
         ...(restore ? {restoreCodexHome: restore.codexHome}
@@ -5087,17 +5096,21 @@ export function scopedRelayProviderIds(providerIds: ProviderId[] | undefined, in
   return providerIds ? LOCAL_PROVIDER_IDS.filter(provider => providerIds.includes(provider) || installed.includes(provider)) : null;
 }
 
-async function relayProviderIds(workspace: WorkspaceRecord): Promise<ProviderId[] | null> {
-  if (!workspace.providerIds) return null;
+async function providersHoldingInstalledBundle(workspace: WorkspaceRecord, skip: readonly ProviderId[] = []): Promise<ProviderId[]> {
   const installed: ProviderId[] = [];
   for (const provider of LOCAL_PROVIDER_IDS) {
-    if (workspace.providerIds.includes(provider)) continue;
+    if (skip.includes(provider)) continue;
     // An unreadable native tree keeps the provider served, as before this scope existed.
     const holdsBundle = await nativeSkillDirectoryForWorkspace({ provider, workspaceId: workspace.workspaceId, workspace: workspace.path })
       .then(root => pathExists(resolve(root, '.dharma-managed', 'workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE')), () => true);
     if (holdsBundle) installed.push(provider);
   }
-  return scopedRelayProviderIds(workspace.providerIds, installed);
+  return installed;
+}
+
+async function relayProviderIds(workspace: WorkspaceRecord): Promise<ProviderId[] | null> {
+  if (!workspace.providerIds) return null;
+  return scopedRelayProviderIds(workspace.providerIds, await providersHoldingInstalledBundle(workspace, workspace.providerIds));
 }
 
 export async function receiptAwareProviderCapabilities(
@@ -6133,6 +6146,11 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
   const synchronized = await syncWorkspacePolicy(fabric, item, required(flags, 'policy-revision'), true, [provider]);
   item = reconcileWorkspaceRegistration(await registry(), item, synchronized);
   item = await bindRepositoryAgent(fabric, item, bindingId);
+  // As onboard does, so the joined relay registers and installs only this provider.
+  if (canonicalize(item.providerIds ?? null) !== canonicalize([provider])) {
+    item = { ...item, providerIds: [provider] };
+    await saveWorkspaceRecord(item);
+  }
   if (item.repositoryPackage?.state !== 'published' || !item.repositoryAgentId || !item.endpointId) {
     return { ok: false, stage: 'shared_repository_pending', code: 'repository_join_package_unavailable',
       workspaceId: item.workspaceId, sharedRepositoryReady: false };
@@ -9504,7 +9522,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
       if (result.taskId) tasksCompleted += 1;
       if (typeof result.failureCategory === 'string') lastProviderFailureCategory = result.failureCategory;
       if (!stopping && !result.taskId && performance.now() >= nextSkillActivationAt) {
-        for (const adapter of selectedProviderAdapters(await relayProviderIds(canonicalWorkspace))) {
+        const scopedProviders = await relayProviderIds(canonicalWorkspace);
+        for (const adapter of selectedProviderAdapters(scopedProviders)) {
           let activating: NonNullable<Awaited<ReturnType<typeof prepareSkillUpdate>>> | null = null;
           const record = (result: Omit<SkillActivationResult, 'at' | 'rolloutId' | 'bundleId'>) => {
             if (!isLocalProviderId(adapter.providerId)) return;
@@ -9514,7 +9533,13 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
           };
           try {
             const capability = await adapter.capability();
-            if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) continue;
+            if (!isLocalProviderId(adapter.providerId)) continue;
+            if (capability.skillInstall === 'unavailable') {
+              // A provider this workspace serves, for setup or for rollback of its bundle, but whose executable
+              // is not on the relay PATH: say so to setup and status instead of skipping it without a word.
+              if (scopedProviders) record({ outcome: 'failed', errorCode: 'provider_unreachable' });
+              continue;
+            }
             const provider = adapter.providerId;
             await withWorkspaceSkillActivationLock(canonicalWorkspace.workspaceId, provider, async () => {
               await withSkillPreparationTransaction({ home: dharmaHome(), workspaceId: canonicalWorkspace.workspaceId,

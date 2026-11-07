@@ -76,14 +76,15 @@ export function requireActiveSkillInstall(status: unknown): void {
 
 /**
  * An empty poll after an activation means the installed release is current, not that none was offered.
- * An empty poll after a failure carries no newer reason, so the failure stays the reported one.
+ * An empty poll after a failure carries no newer reason, so the failure stays the reported one, with the time
+ * it was observed: a readiness wait that began later must not report it as current.
  */
 export function nextSkillActivationResult(previous: SkillActivationResult | undefined,
   attempt: SkillActivationResult): SkillActivationResult {
   if (attempt.outcome === 'no_rollout' && (previous?.outcome === 'activated' || previous?.outcome === 'up_to_date')) {
     return { ...previous, at: attempt.at, outcome: 'up_to_date' };
   }
-  if (attempt.outcome === 'no_rollout' && previous?.outcome === 'failed') return { ...previous, at: attempt.at };
+  if (attempt.outcome === 'no_rollout' && previous?.outcome === 'failed') return previous;
   return attempt;
 }
 

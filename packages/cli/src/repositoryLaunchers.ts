@@ -10,7 +10,8 @@ type LauncherRuntime = {platform: NodeJS.Platform; nodeDirectory: string; npmCli
 const PROVIDER_COMMANDS = ['codex', 'claude', 'agy', 'hermes'] as const;
 export type ProviderCommand = typeof PROVIDER_COMMANDS[number];
 const unsafeProviderOnPath = (provider: ProviderCommand) => `relay_startup_${provider}_path_invalid: the first ${provider} on PATH `
-  + `belongs to another user or is not protected. Put your own ${provider} first on PATH, or remove the other one from PATH.`;
+  + `belongs to another user or is not protected. Put your own ${provider} first on PATH, or remove the other one from PATH.`
+  + ` If you set up another provider, pass --provider <${PROVIDER_COMMANDS.join('|')}>.`;
 
 function providerDirectoryPath(value: string) {
   if (!value || value.length > 4096 || !posix.isAbsolute(value) || value === '/'
@@ -195,12 +196,12 @@ export async function resolveRepositoryProviderDirectory(options: {provider?: Pr
   return undefined;
 }
 
-// A recorded launcher names only the directory, so verify it for the first provider executable it holds.
-async function recordedProviderCommand(directory: string): Promise<ProviderCommand> {
-  for (const provider of PROVIDER_COMMANDS) {
-    try {await lstat(join(directory, provider)); return provider;} catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
+// A recorded launcher names only the directory. Verify it for the set-up provider; when none is known,
+// accept the directory once any provider command in it passes.
+async function protectedRecordedProviderDirectory(directory: string, provider: ProviderCommand | undefined, nodePath: string) {
+  if (provider) return protectedProviderDirectory(directory, provider, nodePath);
+  for (const command of PROVIDER_COMMANDS) {
+    try {return await protectedProviderDirectory(directory, command, nodePath);} catch {}
   }
   throw Error();
 }
@@ -225,18 +226,22 @@ async function protectedBinaryHash(path: string, platform: NodeJS.Platform) {
   } finally { await file.close(); }
 }
 
+type VerifiedRuntime = {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string; provider?: ProviderCommand};
+
 export async function verifyRecordedRepositoryLaunchers(version: string, launchers: Launchers,
-  runtime: {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string} = { platform: process.platform, nodePath: process.execPath }): Promise<boolean> {
+  runtime: VerifiedRuntime = { platform: process.platform, nodePath: process.execPath }): Promise<boolean> {
   return verifyRecordedRuntime(version, launchers, runtime, 'active');
 }
 
 // Recovery compares stored bytes but never executes the recorded replacement launcher.
-export async function verifyRollbackRepositoryLaunchers(version: string, launchers: Launchers): Promise<boolean> {
-  return verifyRecordedRuntime(version, launchers, {platform: process.platform, nodePath: process.execPath}, 'recorded');
+export async function verifyRollbackRepositoryLaunchers(version: string, launchers: Launchers,
+  provider?: ProviderCommand): Promise<boolean> {
+  return verifyRecordedRuntime(version, launchers, {platform: process.platform, nodePath: process.execPath,
+    ...(provider === undefined ? {} : {provider})}, 'recorded');
 }
 
 async function verifyRecordedRuntime(version: string, launchers: Launchers,
-  runtime: {platform: NodeJS.Platform; nodePath: string; npmCliPath?: string}, npmContext: 'active' | 'recorded'): Promise<boolean> {
+  runtime: VerifiedRuntime, npmContext: 'active' | 'recorded'): Promise<boolean> {
   const recorded = recordedRuntime(version, launchers, runtime.platform);
   if (!recorded) return false;
   const directory = recorded.nodeDirectory;
@@ -244,8 +249,7 @@ async function verifyRecordedRuntime(version: string, launchers: Launchers,
   const node = join(directory, runtime.platform === 'win32' ? 'node.exe' : 'node');
   try {
     if (recorded.providerDirectory !== undefined) {
-      await protectedProviderDirectory(recorded.providerDirectory,
-        await recordedProviderCommand(recorded.providerDirectory), runtime.nodePath);
+      await protectedRecordedProviderDirectory(recorded.providerDirectory, runtime.provider, runtime.nodePath);
     }
     if (recorded.npmCliPath !== undefined) {
       const activeNpm = npmContext === 'recorded' ? await protectedNpmCli(recorded.npmCliPath, runtime.platform)

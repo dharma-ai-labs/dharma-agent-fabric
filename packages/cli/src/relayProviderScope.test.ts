@@ -51,7 +51,7 @@ test('actual relay policy sync, preparation pump and activation loop use the wor
   const relay = between(text, 'async function relayWorkspaceLoop(', 'export async function run(');
   assert.match(relay, /await syncWorkspacePolicy\(fabric, canonicalWorkspace, policy\.revision, true,\s*await relayProviderIds\(canonicalWorkspace\)\)/);
   assert.match(relay, /prepareProvidersIndependently\(selectedProviderAdapters\(await relayProviderIds\(canonicalWorkspace\)\), assertRunning/);
-  assert.match(relay, /for \(const adapter of selectedProviderAdapters\(await relayProviderIds\(canonicalWorkspace\)\)\) \{/);
+  assert.match(relay, /for \(const adapter of selectedProviderAdapters\(scopedProviders\)\) \{/);
   assert.doesNotMatch(relay, /prepareProvidersIndependently\(providerAdapters,/);
   assert.doesNotMatch(relay, /for \(const adapter of providerAdapters\)/);
 });
@@ -98,5 +98,27 @@ test('actual setup and relay upgrade put the set-up provider bin directory on th
   const installer = between(text, 'async function installStableRepositoryLauncher(', "return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };");
   assert.match(installer, /resolveRepositoryProviderDirectory\(\{provider, searchPath: providerProcessEnvironment\(process\.env\)\.PATH\}\)/);
   const upgrade = between(text, 'async function relayUpgrade(', 'const upgrade=maintenance?');
-  assert.match(upgrade, /provider: parseSelectedProviderIds\(typeof flags\.get\('provider'\) === 'string'\s*\? \[String\(flags\.get\('provider'\)\)\] : \[\]\)\?\.\[0\] \?\? selected\.providerIds\?\.\[0\] \?\? providerHintFromEnvironment\(\) \?\? 'codex'/);
+  assert.match(upgrade, /resolveRepositoryProviderDirectory\(\{provider, searchPath: providerProcessEnvironment\(process\.env\)\.PATH\}\)/);
+});
+
+// PR #425 review (5): a provider kept only for rollback has no bin directory on the launcher PATH, and the relay
+// skipped it as unavailable without a word, so its rollback and clear silently stopped.
+test('actual relay activation records a scoped provider it cannot reach instead of skipping it silently', async () => {
+  const text = await source();
+  const relay = between(text, 'async function relayWorkspaceLoop(', 'export async function run(');
+  assert.match(relay, /const scopedProviders = await relayProviderIds\(canonicalWorkspace\);\s*for \(const adapter of selectedProviderAdapters\(scopedProviders\)\) \{/);
+  assert.match(relay, /if \(capability\.skillInstall === 'unavailable'\) \{\s*(?:\/\/.*\s*)*if \(scopedProviders\) record\(\{ outcome: 'failed', errorCode: 'provider_unreachable' \}\);\s*continue;\s*\}/);
+  const { parseRelaySkillActivationState } = await import('./skillActivationResult.js');
+  assert.ok(parseRelaySkillActivationState({ schema: 'dharma.relay-skill-activation/v1', workspaceId: 'w', updatedAt: '2026-11-06T06:30:00.000Z',
+    counters: { preparationsCompleted: 0, preparationFailures: 0, activationsCompleted: 0, activationFailures: 0 },
+    providers: { codex: { at: '2026-11-06T06:30:00.000Z', outcome: 'failed', rolloutId: null, bundleId: null,
+      errorCode: 'provider_unreachable' } } }, 'w'), 'setup and status can read the recorded reason');
+});
+
+test('actual upgrade and the relay share one reader of providers that hold an installed bundle', async () => {
+  const text = await source();
+  const relay = between(text, 'async function relayProviderIds(', 'export async function receiptAwareProviderCapabilities(');
+  assert.match(relay, /providersHoldingInstalledBundle\(workspace, workspace\.providerIds\)/);
+  const upgrade = between(text, 'async function relayUpgrade(', 'const upgrade=maintenance?');
+  assert.match(upgrade, /await providersHoldingInstalledBundle\(selected\)/);
 });

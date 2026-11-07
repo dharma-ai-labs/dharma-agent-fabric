@@ -103,7 +103,7 @@ test('Codex startup resolution is protected and does not skip an unsafe first ex
     /relay_startup_codex_path_invalid/);
   await chmod(unsafe, 0o777);
   await assert.rejects(resolveRepositoryProviderDirectory({searchPath: unsafe + ':' + good}),
-    /^Error: relay_startup_codex_path_invalid: .*Put your own codex first on PATH, or remove the other one from PATH\.$/);
+    /^Error: relay_startup_codex_path_invalid: .*Put your own codex first on PATH, or remove the other one from PATH\. If you set up another provider, pass --provider <codex\|claude\|agy\|hermes>\.$/);
   await chmod(binary, 0o722);
   await assert.rejects(resolveRepositoryProviderDirectory({searchPath: good}), /relay_startup_codex_path_invalid/);
   await chmod(binary, 0o700);
@@ -304,7 +304,7 @@ test('startup resolution selects the set-up provider and ignores an unsafe Codex
       /^Error: relay_startup_codex_path_invalid: .*Put your own codex first on PATH/);
     await chmod(join(own, 'claude'), 0o722);
     await assert.rejects(resolveProvider({provider: 'claude', searchPath: own}),
-      /^Error: relay_startup_claude_path_invalid: .*Put your own claude first on PATH, or remove the other one from PATH\.$/);
+      /^Error: relay_startup_claude_path_invalid: .*Put your own claude first on PATH, or remove the other one from PATH\. If you set up another provider, pass --provider <codex\|claude\|agy\|hermes>\.$/);
   } finally {await chmod(join(root, 'foreign'), 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
 });
 
@@ -332,6 +332,33 @@ test('actual Linux service-style startup finds the set-up Claude provider with a
     assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after), true);
     await chmod(join(providerDirectory, 'claude'), 0o722);
     assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after), false);
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// PR #425 review (4): a directory holding both codex and claude was verified for codex, the first command in it.
+test('recorded-launcher verification checks the set-up provider, else accepts any protected provider command', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-shared-bin-')));
+  try {
+    const nodeDirectory = join(root, 'node'), npmDirectory = join(root, 'npm'), providerDirectory = join(root, 'bin');
+    for (const directory of [nodeDirectory, npmDirectory, providerDirectory]) await mkdir(directory, {recursive: true, mode: 0o700});
+    await copyFile(process.execPath, join(nodeDirectory, 'node')); await chmod(join(nodeDirectory, 'node'), 0o700);
+    const npmCliPath = join(npmDirectory, 'bin', 'npm-cli.js'); await mkdir(dirname(npmCliPath), {mode: 0o700});
+    await writeFile(join(npmDirectory, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+    await writeFile(npmCliPath, 'synthetic npm entry', {mode: 0o600});
+    await writeFile(join(providerDirectory, 'codex'), '#!/bin/sh\nprintf "group-writable-codex\\n"\n', {mode: 0o700});
+    await chmod(join(providerDirectory, 'codex'), 0o722);
+    await writeFile(join(providerDirectory, 'claude'), '#!/bin/sh\nprintf "own-claude\\n"\n', {mode: 0o700});
+    const after = stableLauncher(launchers, {platform: 'linux', nodeDirectory, npmCliPath, providerDirectory});
+    const verify = (provider?: string) => launchers.verifyRecordedRepositoryLaunchers('0.2.224', after,
+      {platform: 'linux', nodePath: process.execPath, npmCliPath, ...(provider ? {provider} : {})});
+    assert.equal(await verify('claude'), true);
+    assert.equal(await verify('codex'), false);
+    assert.equal(await verify(), true, 'with no set-up provider known, a protected provider command is enough');
+    assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after, 'claude'), true);
+    assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after, 'codex'), false);
+    await chmod(join(providerDirectory, 'claude'), 0o722);
+    assert.equal(await verify(), false);
   } finally {await rm(root, {recursive: true, force: true});}
 });
 

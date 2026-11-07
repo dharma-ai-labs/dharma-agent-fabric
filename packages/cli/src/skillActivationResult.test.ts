@@ -96,15 +96,25 @@ test('an empty poll after an activation stays recorded as the installed release'
 test('an empty poll after a failure keeps the last concrete reason until a newer result carries one', () => {
   const empty: SkillActivationResult = { at: '2026-11-06T06:31:00.000Z', outcome: 'no_rollout',
     rolloutId: null, bundleId: null, errorCode: null };
-  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), empty),
-    { ...failed('approval_required'), at: '2026-11-06T06:31:00.000Z' });
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), empty), failed('approval_required'));
   const newer = failed('skill_bundle_expired', '2026-11-06T06:32:00.000Z');
   assert.deepEqual(nextSkillActivationResult(failed('approval_required'), newer), newer);
   const activated: SkillActivationResult = { at: '2026-11-06T06:33:00.000Z', outcome: 'activated',
     rolloutId: ROLLOUT, bundleId: BUNDLE, errorCode: null };
   assert.deepEqual(nextSkillActivationResult(failed('approval_required'), activated), activated);
   assert.equal(repositoryReadinessPendingCode(state({ claude: nextSkillActivationResult(failed('approval_required'), empty) }),
-    'claude', Date.parse('2026-11-06T06:31:00.000Z')), 'approval_required');
+    'claude', Date.parse('2026-11-06T06:30:00.000Z')), 'approval_required');
+});
+
+// PR #425 review (3): a carried-forward failure took the empty poll's time, so a wait that began after the
+// failure (or a relay seeded from an older run) reported a stale reason as current.
+test('a carried-forward failure keeps the time it was observed, so a later wait does not report it', () => {
+  const empty: SkillActivationResult = { at: '2026-11-06T06:31:00.000Z', outcome: 'no_rollout',
+    rolloutId: null, bundleId: null, errorCode: null };
+  const carried = nextSkillActivationResult(failed('approval_required'), empty);
+  assert.equal(carried.at, '2026-11-06T06:30:00.000Z');
+  assert.equal(repositoryReadinessPendingCode(state({ claude: carried }), 'claude', Date.parse('2026-11-06T06:30:30.000Z')),
+    'skill_activation_not_observed');
 });
 
 test('the readiness wait reports the recorded reason for the waiting provider', () => {

@@ -10,6 +10,7 @@ import ts from 'typescript';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
 import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
+import { scopedRelayProviderIds } from './index.js';
 
 type Row = Record<string, any>;
 type Join = (flags: Map<string, string | boolean>, binding: string, fingerprint: string) => Promise<Row>;
@@ -227,4 +228,18 @@ test('knowledge join refuses a foreign connection on resume without overwriting 
   await assert.rejects(f.run(), /repository_join_connection_scope_conflict/);
   assert.equal(await fs.readFile(path, 'utf8'), bytes);
   assert.equal(f.calls.includes('bootstrap_fixture'), false);
+});
+
+// PR #425 review (1): join never recorded providerIds, so the joined relay stayed unscoped and ran another user's codex.
+test('a Claude knowledge join records its provider, so the joined relay scope excludes codex', async t => {
+  const f = await fixture(t); f.flags.set('provider', 'claude');
+  f.dependencies.isLocalProviderId = (provider: string) => ['codex', 'claude'].includes(provider);
+  f.dependencies.syncWorkspacePolicy = async (_fabric: unknown, item: Row, _revision: string, _apply: boolean, providers: string[]) => {
+    assert.equal(providers.join(','), 'claude');
+    return { ok: true, organizationId: f.config.organizationId, workspace: { id: item.workspaceId, status: 'active' } };
+  };
+  const result = await f.run();
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.rows[0]!.providerIds)), ['claude']);
+  assert.deepEqual(scopedRelayProviderIds(f.rows[0]!.providerIds as never, ['hermes']), ['claude', 'hermes']);
 });
