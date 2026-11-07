@@ -12,7 +12,7 @@ not an assertion that OpenAI has approved or published the plugin.
 - [x] High-risk actions require confirmation and idempotency keys.
 - [ ] Reviewer organization seeded exactly as `REVIEWER_SEED_PLAN.md` describes, and the seed receipt recorded privately.
 - [ ] R-OAI-1 (first OpenAI rejection, incomplete privacy policy): the revised privacy policy, with the Agent Fabric data categories, content synchronization (`customer_authorized_content` and `native_provider_payload`), recipients and retention, is approved by the owner and published at `https://www.dharma-ai.io/privacy`, and `DATA_AND_SECURITY.md` matches the published text. The items below that depend on the policy stay open until then.
-- [ ] Privacy policy published in its revised form (terms and support routes are already published).
+- [x] Privacy policy published in its revised form, policy version `2026-10-31`, at `https://www.dharma-ai.io/privacy` since 2026-10-31 (terms and support routes are already published).
 - [ ] Data retention and deletion behavior documented in the revised privacy policy, and the production retention job shown to run (a recent retention receipt recorded privately).
 - [x] Final security review completed after GitHub App credential rotation and revocation proof.
 - [x] Linux, Windows, and macOS CI validation passed at release commit `adb5e2105e73b91151d198e928332c5786abcdf4`.
@@ -23,7 +23,7 @@ not an assertion that OpenAI has approved or published the plugin.
 - [x] `mcp-tool-catalog.json` matches `live-mcp-tools.snapshot.json`, and the submission tool declarations match the catalog's ChatGPT profile (`npm run mcp:catalog:verify`).
 - [ ] A fresh hosted `tools/list` capture compares `compatible` with the catalog (`node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`). Once the ChatGPT filter ships, a capture made with the ChatGPT OAuth client lists exactly the declared profile.
 - [ ] Every submitted test case and negative case observed on ChatGPT web and ChatGPT mobile with the expected output, in both orders, as `REVIEWER_SEED_PLAN.md` describes. Every submitted case is a single turn that calls one read-only tool.
-- [ ] Placeholders substituted from the private seed receipt in the copy pasted into the OpenAI form; the substituted copy is not committed.
+- [ ] Placeholders substituted from the private seed receipt in the copy pasted into the OpenAI form, and `node scripts/openai-app-submission-filled.mjs <substituted-copy.json>` passes on that copy; the substituted copy is not committed. `{{REVIEWER_ORG_ID}}` stays a placeholder in the repository until the reviewer organization exists.
 - [x] Mutation tools return audit correlation IDs.
 - [x] Public description matches the bounded Codex and Claude adapter support.
 - [x] Reviewer OAuth installation and staging reviewer script recorded; production proof is the post-deploy gate.
@@ -34,7 +34,10 @@ reported test cases that did not produce the documented results. The earlier
 prompts named no organization ID, which every tool requires, and one case
 called `fabric_rollout_skill`, which the hosted server no longer registers.
 The privacy items were reopened because the first OpenAI review found the
-privacy policy incomplete, and that fix is not yet published.
+privacy policy incomplete. The revised policy, version `2026-10-31`, is now
+published. R-OAI-1 stays open until the owner approves `DATA_AND_SECURITY.md`
+against it, and the retention item until a production retention receipt is
+recorded.
 
 ## Deferred and external gates
 
