@@ -15,56 +15,6 @@ if (args.length > 0) {
   snapshotManifestPath = resolve(args[1]);
 }
 
-const expectedTools = [
-  'fabric_get_identity',
-  'fabric_list_devices',
-  'fabric_list_agents',
-  'fabric_list_repository_agents',
-  'fabric_get_instructions',
-  'fabric_create_agent',
-  'fabric_bind_local_endpoint',
-  'fabric_bind_runtime_endpoint',
-  'fabric_list_workspaces',
-  'fabric_list_trajectories',
-  'fabric_get_trajectory_evidence',
-  'fabric_request_trajectory_evidence',
-  'fabric_list_failure_atlas',
-  'fabric_list_remediations',
-  'fabric_advance_remediation',
-  'fabric_list_tasks',
-  'fabric_list_a2a',
-  'fabric_list_skills',
-  'fabric_list_evals',
-  'fabric_list_usage',
-  'fabric_dispatch_task',
-  'fabric_dispatch_a2a',
-  'fabric_run_analysis',
-  'fabric_release_skill',
-  'fabric_rollout_skill',
-  'fabric_control_agent_list_sessions',
-  'fabric_control_agent_create_session',
-  'fabric_control_agent_send_message',
-  'fabric_control_agent_list_events',
-  'fabric_control_agent_decide_tool',
-];
-
-const confirmationTools = new Set([
-  'fabric_get_trajectory_evidence',
-  'fabric_create_agent',
-  'fabric_bind_local_endpoint',
-  'fabric_bind_runtime_endpoint',
-  'fabric_request_trajectory_evidence',
-  'fabric_dispatch_task',
-  'fabric_dispatch_a2a',
-  'fabric_run_analysis',
-  'fabric_release_skill',
-  'fabric_rollout_skill',
-  'fabric_advance_remediation',
-  'fabric_control_agent_create_session',
-  'fabric_control_agent_send_message',
-  'fabric_control_agent_decide_tool',
-]);
-
 const removedSpeculativeTools = [
   'create_evaluation',
   'cancel_task',
@@ -73,35 +23,68 @@ const removedSpeculativeTools = [
   'estimate_cost',
 ];
 
-const root = resolve(import.meta.dirname, '..');
-const path = resolve(root, 'plugins/dharma-agent-fabric/openai-app/mcp-tool-catalog.json');
-const catalog = JSON.parse(await readFile(path, 'utf8'));
-const submission = JSON.parse(await readFile(
-  resolve(root, 'plugins/dharma-agent-fabric/openai-app/chatgpt-app-submission.json'),
-  'utf8',
-));
-const actualTools = catalog.tools.map((tool) => tool.name);
+// Names the hosted server no longer registers. They must not reappear in the
+// catalog, the submission or its test cases.
+const removedLegacyTools = [
+  'fabric_rollout_skill',
+  'fabric_advance_remediation',
+  'fabric_control_agent_decide_tool',
+];
 
-assert.deepEqual(actualTools, expectedTools, 'public MCP catalog must match the HQ registration order');
-assert.deepEqual(Object.keys(submission.tools), expectedTools, 'OpenAI submission tool declarations must match the public catalog');
+const root = resolve(import.meta.dirname, '..');
+const appDir = resolve(root, 'plugins/dharma-agent-fabric/openai-app');
+const catalog = JSON.parse(await readFile(resolve(appDir, 'mcp-tool-catalog.json'), 'utf8'));
+const snapshot = JSON.parse(await readFile(resolve(appDir, catalog.snapshot), 'utf8'));
+const submission = JSON.parse(await readFile(resolve(appDir, 'chatgpt-app-submission.json'), 'utf8'));
+const actualTools = catalog.tools.map((tool) => tool.name);
+const snapshotTools = new Map(snapshot.tools.map((tool) => [tool.name, tool]));
+const submissionHints = (annotations) => ({
+  readOnlyHint: annotations.readOnlyHint,
+  openWorldHint: annotations.openWorldHint,
+  destructiveHint: annotations.destructiveHint,
+});
+
+assert.equal(snapshot.schema, 'dharma.mcp-live-tool-snapshot/v1');
+assert.equal(snapshot.toolCount, snapshot.tools.length);
+assert.equal(catalog.toolCount, catalog.tools.length);
+assert.deepEqual(actualTools, snapshot.tools.map((tool) => tool.name), 'public MCP catalog must match the live tool snapshot order');
+// The submission declares only the ChatGPT profile. AGENTS.md forbids direct
+// merge or deployment authority, so the profile holds no merge, signed skill
+// release, rollout or remediation release tool.
+const profileTools = catalog.tools.filter((tool) => tool.chatgptProfile).map((tool) => tool.name);
+assert.deepEqual(Object.keys(submission.tools), profileTools, 'OpenAI submission tool declarations must match the ChatGPT profile');
+assert.deepEqual(profileTools.filter((name) => /merge|release|rollout|rollback|expand/.test(name)), [], 'ChatGPT profile must not declare merge or deployment tools');
 assert.deepEqual(catalog.oauthScopes, ['openid', 'user:org:read']);
 assert.equal(catalog.resource, 'https://mcp.dharma-ai.io/mcp');
+assert.equal(snapshot.resource, catalog.resource);
 
 for (const tool of catalog.tools) {
-  assert.equal(tool.confirmation, confirmationTools.has(tool.name), `${tool.name} confirmation policy drifted`);
-  assert.match(tool.backendScope, /^(fabric:devices|agents:(read|run)|evals:(read|run)|traces:read|skills:(read|write)|usage:read)$/);
-  assert.deepEqual(submission.tools[tool.name]?.annotations, tool.annotations, `${tool.name} submission annotations drifted`);
+  const live = snapshotTools.get(tool.name);
+  assert.equal(tool.title, live.title, `${tool.name} title drifted from the live snapshot`);
+  assert.equal(tool.confirmation, live.confirmation, `${tool.name} confirmation policy drifted`);
+  assert.equal(tool.outputSchema, live.outputSchema, `${tool.name} output schema flag drifted`);
+  assert.deepEqual(tool.annotations, live.annotations, `${tool.name} annotations drifted from the live snapshot`);
+  assert.equal(tool.confirmation, live.inputRequired.includes('confirmed'), `${tool.name} confirmation must match its required input`);
+  assert.match(tool.backendScope, /^(membership|fabric:devices|agents:(read|run)|evals:(read|run)|traces:read|skills:(read|write)|usage:read)$/);
+  assert.match(tool.mode, /^(read|sensitive_read|write|paid_write|destructive_write)$/);
+  assert.equal(typeof tool.adminOnly, 'boolean');
+  assert.equal(typeof tool.chatgptProfile, 'boolean');
+  assert.equal(tool.mode === 'read' || tool.mode === 'sensitive_read', tool.annotations.readOnlyHint, `${tool.name} mode contradicts readOnlyHint`);
+  if (tool.chatgptProfile) {
+    assert.deepEqual(submission.tools[tool.name]?.annotations, submissionHints(tool.annotations), `${tool.name} submission annotations drifted`);
+  }
 }
 
-for (const name of removedSpeculativeTools) {
-  assert.equal(actualTools.includes(name), false, `speculative MCP tool ${name} must not be published`);
+for (const name of [...removedSpeculativeTools, ...removedLegacyTools, ...catalog.forbiddenTools]) {
+  assert.equal(actualTools.includes(name), false, `MCP tool ${name} must not be published`);
 }
 
 assert.ok(catalog.forbiddenTools.includes('run_arbitrary_shell'));
 assert.ok(catalog.forbiddenTools.includes('retrieve_secret'));
+const confirmationCount = catalog.tools.filter((tool) => tool.confirmation).length;
 
 if (snapshotManifestPath === null) {
-  process.stdout.write(`${JSON.stringify({ ok: true, toolCount: actualTools.length, confirmationCount: confirmationTools.size })}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, toolCount: actualTools.length, confirmationCount })}\n`);
 } else {
   let manifest;
   try {
