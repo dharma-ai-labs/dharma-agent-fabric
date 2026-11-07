@@ -13,6 +13,7 @@ import {Ajv2020} from 'ajv/dist/2020.js';
 import type {FormatsPlugin} from 'ajv-formats';
 import ts from 'typescript';
 import {signCanonicalObject} from '@dharma-ai-labs/agent-fabric-contracts';
+import {createSystemSecureStore} from '@dharma-ai-labs/agent-fabric-secure-store';
 import {applyServerEvidencePolicy, materializeWorkspacePolicy, run} from './index.js';
 import {workspaceIdForDevice} from './onboardingWorkspace.js';
 import {currentRelayChildFailure, relayChildExitReceipt, relayChildFailureCode, relayStartFailureReceipt} from './relayChildFailure.js';
@@ -218,7 +219,9 @@ test('status gives a one-line remedy when the relay cannot open its device ident
   const f = await runningRelayHome(t);
   const windows = 'Device credentials cannot be read. If the Windows password was reset by an administrator, '
     + 'restore the previous password or re-enroll this device.';
-  const win32 = process.platform === 'win32';
+  // WSL reads the Windows vault, so it gets the Windows text too.
+  const win32 = await createSystemSecureStore().then(store => store.backend === 'windows-credential-manager',
+    () => process.platform === 'win32');
   const remedies: Record<string, string> = {
     connection_identity_requires_recovery: win32 ? windows
       : 'Device credentials cannot be read from the OS keychain. Unlock it for this user or re-enroll this device.',

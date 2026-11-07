@@ -134,8 +134,10 @@ const openFailures: Array<[string, () => Error]> = [
     {code: 'read_helper_closed'})],
   ['connection_identity_store_busy', () => Object.assign(Error('Windows Credential Manager fresh read failed: read_helper_unavailable.'),
     {code: 'read_helper_unavailable'})],
-  ['connection_identity_store_unavailable', () => Object.assign(Error('Windows Credential Manager fresh read failed: secure_store_unreadable.'),
-    {code: 'secure_store_unreadable'})],
+  ['connection_identity_store_unavailable', () => Object.assign(Error('Windows Credential Manager fresh read failed: read_response_too_large.'),
+    {code: 'read_response_too_large'})],
+  // WSL has no fresh reader: an undecryptable vault entry comes back as this fixed helper message.
+  ['connection_identity_store_unavailable', () => Error('Windows Credential Manager failed: Credential read unavailable.')],
   // The code decides, not the text around it.
   ['connection_identity_store_unavailable', () => Object.assign(Error('C:/Users/someone/.secret sk_live_token_value'),
     {code: 'read_response_invalid'})],

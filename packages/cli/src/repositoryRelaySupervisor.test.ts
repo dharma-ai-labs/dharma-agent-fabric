@@ -292,8 +292,8 @@ async function failedSessionOpenStarts(errorFor: (attempt: number) => Error, att
   return starts.slice(1).map((at, index) => at - starts[index]!);
 }
 const identityLost = () => Error('relay_host_device_identity_unavailable');
-const storeUnreadable = () => Object.assign(Error('Windows Credential Manager fresh read failed: secure_store_unreadable.'),
-  { code: 'secure_store_unreadable' });
+const storeUnreadable = () => Object.assign(Error('Windows Credential Manager fresh read failed: read_response_invalid.'),
+  { code: 'read_response_invalid' });
 
 test('five consecutive device identity or store failures back the retry off to ten minutes', async () => {
   const gaps = await failedSessionOpenStarts(attempt => attempt % 2 ? identityLost() : storeUnreadable(), 7);
@@ -321,4 +321,14 @@ test('a store that does not answer keeps the short retry however often it repeat
   const identity = await failedSessionOpenStarts(identityLost, 6);
   assert.ok(identity.slice(0, 4).every(gap => gap <= 60_000) && identity.slice(4).every(gap => gap >= 600_000),
     `identity failures still wait ten minutes after five: ${identity}`);
+});
+
+test('an unreadable WSL vault entry backs off like any unreadable store', async () => {
+  const wslUnreadable = () => Error('Windows Credential Manager failed: Credential read unavailable.');
+  const alone = await failedSessionOpenStarts(wslUnreadable, 6);
+  assert.ok(alone.slice(0, 4).every(gap => gap <= 60_000) && alone.slice(4).every(gap => gap >= 600_000), `WSL unreadable: ${alone}`);
+  const mixed = await failedSessionOpenStarts(attempt => attempt % 2 ? wslUnreadable() : identityLost(), 6);
+  assert.ok(mixed.slice(4).every(gap => gap >= 600_000), `WSL unreadable with identity loss: ${mixed}`);
+  const otherText = await failedSessionOpenStarts(() => Error('Windows Credential Manager failed: Credential write unavailable.'), 7);
+  assert.ok(otherText.every(gap => gap <= 60_000), `other helper text stays busy: ${otherText}`);
 });
