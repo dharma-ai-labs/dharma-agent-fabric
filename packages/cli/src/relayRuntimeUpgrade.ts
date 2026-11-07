@@ -18,6 +18,9 @@ export type RelayUpgradeDependencies = {
   assertStopped(): Promise<void>;
   inspectStartup(): Promise<{ version: string; workspace: string; codexHome?: string }>;
   configureStartup(version: string, restore?: {codexHome: string | null}): Promise<unknown>;
+  // Runs once the launcher and startup are in place and before the relay starts, so the started relay loads
+  // whatever record the caller keeps alongside them; 'rollback' runs before the previous relay starts again.
+  beforeStart?(phase: 'upgrade' | 'rollback'): Promise<void>;
   start(): Promise<unknown>;
   stop(): Promise<unknown>;
   verify(version: string, since: string): Promise<void>;
@@ -193,6 +196,7 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
       await installLaunchers(input.workspace, journal.previous);
       await deps.configureStartup(journal.previousVersion, journal.schema !== 'dharma.local-relay-upgrade/v1'
         ? {codexHome: journal.previousCodexHome!} : {codexHome: null});
+      await deps.beforeStart?.('rollback');
       const since = new Date().toISOString();
       await deps.start(); await deps.verify(journal.previousVersion, since);
       await save('rolled_back');
@@ -210,6 +214,7 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
     await installLaunchers(input.workspace, nextLaunchers(journal, deps));
     await deps.configureStartup(input.version);
     await save('installed');
+    await deps.beforeStart?.('upgrade');
     const since = new Date().toISOString();
     await deps.start(); await deps.verify(input.version, since);
     await save('completed');

@@ -7,7 +7,7 @@ import test from 'node:test';
 import { signCanonicalObject, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import { calculateBundleHash, type SkillBundle } from '@dharma-ai-labs/agent-fabric-skill-manager';
 import { saveDeviceEnrollmentAnchor, type AgentFabricClient, type DeviceConfig, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-relay-client';
-import { applyServerEvidencePolicy, materializeWorkspacePolicy, prepareSkillUpdate } from './index.js';
+import { applyServerEvidencePolicy, materializeWorkspacePolicy, nativeSkillDirectoryForWorkspace, prepareSkillUpdate } from './index.js';
 import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot } from './skillPreparationTransaction.js';
 
@@ -177,6 +177,35 @@ test('actual clear-only preparation ignores an offered install and still prepare
     await rm(prepared!.sourceRoot, { recursive: true, force: true });
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
+    await rm(f.home, { recursive: true, force: true });
+  }
+});
+
+// PR #425 review round 3 (4): a server rollback offers an install bundle the holder had before. Clear-only
+// dropped it, so a provider that still held a bad release kept it active.
+test('actual clear-only preparation accepts a rollback to an install bundle the holder held before', async () => {
+  const f = await fixture();
+  const previous = { home: process.env.DHARMA_HOME, codex: process.env.CODEX_HOME };
+  process.env.DHARMA_HOME = f.home;
+  process.env.CODEX_HOME = join(f.home, 'codex-home');
+  const fabric = { pollSkill: async () => ({ ok: true, organizationId: 'org_test', rollout: { id: 'rollback', bundle: f.bundle } }),
+    signedGet: async () => { throw new Error('Unexpected package transport.'); } } as unknown as AgentFabricClient;
+  try {
+    const operation = () => prepareSkillUpdate({ workspaceId: WORKSPACE, provider: 'codex', policyPath: f.policyPath,
+      fabric, store: f.store, automatic: true, clearOnly: true });
+    assert.equal(await operation(), null, 'an install the holder never had is still ignored');
+    const destination = await nativeSkillDirectoryForWorkspace({ provider: 'codex', workspaceId: WORKSPACE });
+    assert.ok(destination.startsWith(f.home));
+    const release = join(destination, '.dharma-managed', 'workspaces', WORKSPACE, 'releases', f.bundle.bundleId);
+    await mkdir(release, { recursive: true });
+    await writeFile(join(release, 'BUNDLE.json'), JSON.stringify({ bundleId: f.bundle.bundleId, workspaceId: WORKSPACE,
+      skillIds: ['verifier'] }));
+    const prepared = await operation();
+    assert.equal(prepared?.bundle.bundleId, f.bundle.bundleId, 'the release it held before is prepared');
+    await rm(prepared!.sourceRoot, { recursive: true, force: true });
+  } finally {
+    if (previous.home === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous.home;
+    if (previous.codex === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous.codex;
     await rm(f.home, { recursive: true, force: true });
   }
 });

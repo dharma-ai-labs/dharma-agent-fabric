@@ -331,7 +331,7 @@ test('actual maintenance finish checks newer verified trust and the same protect
 // F13 C1 (2026-11-06): an existing install gets the provider bin directory through relay upgrade.
 test('actual upgrade resolves the bin directory of --provider, else the onboarded provider, else the calling agent', async () => {
   for (const [flag, recorded, hint, expected] of [
-    ['claude', ['codex'], 'codex', 'claude'], [undefined, ['claude'], 'codex', 'claude'],
+    ['claude', undefined, 'codex', 'claude'], [undefined, ['claude'], 'codex', 'claude'],
     [undefined, undefined, 'claude', 'claude'], [undefined, undefined, null, 'codex'],
   ] as const) {
     const f = await fixture(), requested: string[] = [];
@@ -356,7 +356,10 @@ test('actual upgrade of a record without providers prefers the provider holding 
     f.deps.providersHoldingInstalledBundle = async () => [...holders];
     f.deps.saveWorkspaceRecord = async (item: Record<string, unknown>) => { saved.push(item); };
     f.deps.resolveRepositoryProviderDirectory = async (input: {provider: string}) => {requested.push(input.provider); return undefined;};
-    f.deps.upgradeRelayRuntime = async () => ({state: apply ? 'completed' : 'planned'});
+    f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {beforeStart?(phase: string): Promise<void>}) => {
+      if (apply) await hooks.beforeStart?.('upgrade');
+      return {state: apply ? 'completed' : 'planned'};
+    };
     if (apply) f.flags.set('apply', true);
     await f.run()(f.flags);
     assert.deepEqual(requested, [expected]);
@@ -387,34 +390,85 @@ test('actual upgrade binds the set-up provider only into verification of the lau
 
 // PR #425 review round 2 (2): with the hint naming a bundle holder, upgrade saved that provider before the
 // upgrade ran, then checked the old launcher for it, so it failed and every retry failed the same way.
-test('actual upgrade of a record without providers saves the chosen provider only after a completed upgrade', async () => {
-  for (const state of ['completed', 'rolled_back', 'rollback_failed'] as const) {
-    const f = await fixture(), order: string[] = [], saved: unknown[] = [];
+// Round 3 (1): it then saved a pre-upgrade snapshot after the new relay had started and loaded its record, so
+// that relay still served every provider, its own saves were rolled back, and its guarded saves failed.
+function memoryRegistry(f: Awaited<ReturnType<typeof fixture>>, initial: Record<string, unknown>) {
+  let rows = [JSON.parse(JSON.stringify(initial)) as Record<string, unknown>];
+  const row = () => rows.find(item => item.workspaceId === initial.workspaceId)!;
+  f.deps.registry = async () => JSON.parse(JSON.stringify(rows));
+  f.deps.selectDeviceWorkspace = (items: Record<string, unknown>[]) => items.find(item => item.workspaceId === initial.workspaceId);
+  f.deps.saveWorkspaceRecord = async (entry: Record<string, unknown>, guard?: {expected: unknown}) => {
+    if (guard && JSON.stringify(row()) !== JSON.stringify(guard.expected)) throw new Error('workspace_registry_compare_and_swap_failed');
+    rows = [...rows.filter(item => item.workspaceId !== entry.workspaceId), JSON.parse(JSON.stringify(entry))];
+  };
+  return row;
+}
+
+test('actual upgrade records the provider before the new relay starts, into the current record, and restores it on rollback', async () => {
+  for (const outcome of ['completed', 'rolled_back', 'rollback_failed'] as const) {
+    const f = await fixture();
+    const row = memoryRegistry(f, {workspaceId: 'workspace', organizationId: 'org_fixture', deviceId: 'device',
+      path: '/fixtures/repository'});
     f.deps.providerHintFromEnvironment = () => 'claude';
     f.deps.providersHoldingInstalledBundle = async () => ['codex', 'claude'];
-    f.deps.saveWorkspaceRecord = async (item: Record<string, unknown>) => { order.push('save'); saved.push(item.providerIds); };
-    f.deps.upgradeRelayRuntime = async () => { order.push('upgrade'); return {state}; };
+    let loaded: unknown = 'not started';
+    f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {
+      configureStartup(version: string, restore?: {codexHome: string | null}): Promise<unknown>;
+      beforeStart?(phase: string): Promise<void>;
+    }) => {
+      await hooks.configureStartup('0.2.118');
+      await hooks.beforeStart?.('upgrade');
+      // The new relay loads its record at start, then saves its recovered baseline guarded by what it loaded.
+      const record = row();
+      loaded = record.providerIds;
+      await (f.deps.saveWorkspaceRecord as (entry: unknown, guard: unknown) => Promise<void>)(
+        {...record, repositoryPackage: {state: 'absent'}}, {expected: record});
+      if (outcome === 'rolled_back') {
+        await hooks.configureStartup('0.2.116', {codexHome: null});
+        await hooks.beforeStart?.('rollback');
+      }
+      return {state: outcome};
+    };
     f.flags.set('apply', true);
     await f.run()(f.flags);
-    assert.deepEqual(order, state === 'completed' ? ['upgrade', 'save'] : ['upgrade'], state);
-    assert.deepEqual(JSON.parse(JSON.stringify(saved)), state === 'completed' ? [['claude']] : [], state);
+    assert.deepEqual(loaded, ['claude'], `${outcome}: the new relay loads the recorded provider`);
+    assert.deepEqual(row().repositoryPackage, {state: 'absent'}, `${outcome}: the relay's own save is kept`);
+    assert.deepEqual(row().providerIds, outcome === 'completed' ? ['claude'] : undefined, outcome);
+    assert.equal(Object.hasOwn(row(), 'providerIds'), outcome === 'completed', outcome);
   }
 });
 
-// PR #425 review round 2 (3): --provider that differs from the record wrote a launcher the record disagreed with.
-test('actual upgrade with --provider records that provider once the upgrade completes', async () => {
-  for (const [flag, state, expected] of [
-    ['codex', 'completed', [['codex']]], ['codex', 'rolled_back', []], [undefined, 'completed', []], ['claude', 'completed', []],
-  ] as const) {
+test('actual upgrade without --apply or with --rollback never records a provider', async () => {
+  for (const flag of ['dry-run', 'rollback']) {
     const f = await fixture(), saved: unknown[] = [];
+    f.deps.providerHintFromEnvironment = () => 'claude';
+    f.deps.saveWorkspaceRecord = async (item: Record<string, unknown>) => { saved.push(item.providerIds); };
+    f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {beforeStart?(phase: string): Promise<void>}) => {
+      await hooks.beforeStart?.('upgrade'); await hooks.beforeStart?.('rollback'); return {state: 'planned'};
+    };
+    f.flags.set(flag, true);
+    await f.run()(f.flags);
+    assert.deepEqual(saved, [], flag);
+  }
+});
+
+// PR #425 review round 3 (2): --provider replaced the provider a record names, so that provider became
+// clear-only, against the usage text. --provider chooses only for a record that names no provider.
+test('actual upgrade refuses a --provider the record does not name and never rewrites a record that names providers', async () => {
+  for (const [flag, refused] of [['codex', true], ['claude', false], [undefined, false]] as const) {
+    const f = await fixture(), saved: unknown[] = [], upgraded: string[] = [];
     const selected = (f.deps.selectDeviceWorkspace as () => Record<string, unknown>)();
     f.deps.selectDeviceWorkspace = () => ({...selected, providerIds: ['claude']});
     f.deps.saveWorkspaceRecord = async (item: Record<string, unknown>) => { saved.push(item.providerIds); };
-    f.deps.upgradeRelayRuntime = async () => ({state});
+    f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {beforeStart?(phase: string): Promise<void>}) => {
+      upgraded.push('upgrade'); await hooks.beforeStart?.('upgrade'); return {state: 'completed'};
+    };
     f.flags.set('apply', true);
     if (flag) f.flags.set('provider', flag);
-    await f.run()(f.flags);
-    assert.deepEqual(JSON.parse(JSON.stringify(saved)), expected, `${flag} ${state}`);
+    if (refused) await assert.rejects(f.run()(f.flags), /relay_upgrade_provider_conflict/);
+    else await f.run()(f.flags);
+    assert.deepEqual(upgraded, refused ? [] : ['upgrade'], String(flag));
+    assert.deepEqual(saved, [], String(flag));
   }
 });
 

@@ -639,3 +639,26 @@ test('upgrade from a codex-directory launcher to a claude one passes, and rollba
   await assert.rejects(upgradeRelayRuntime(wrong.f.input, wrong.deps), /relay_upgrade_launcher_conflict/,
     'the launcher this run writes must still carry the set-up provider');
 });
+
+// PR #425 review round 3 (1): the caller recorded the provider only after the new relay had started and
+// loaded its record, so the relay never served it and its own saves were overwritten or failed.
+test('upgrade runs beforeStart after the launcher and startup are written and before each start', async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  for (const failFirstVerify of [false, true]) {
+    const f = await fixture();
+    let verified = 0;
+    const deps = {...f.deps,
+      beforeStart: async (phase: string) => {
+        f.calls.push(`before_start:${phase}`);
+        if (phase === 'upgrade') assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'),
+          contents('0.2.118').shell);
+      },
+      verify: async (next: string) => { f.calls.push(`verify:${next}`); if (failFirstVerify && verified++ === 0) throw new Error('down'); },
+    };
+    const receipt = await upgradeRelayRuntime(f.input, deps);
+    assert.equal(receipt.state, failFirstVerify ? 'rolled_back' : 'completed');
+    const forward = ['stopped', 'stopped', 'configure:0.2.118', 'before_start:upgrade', 'start', 'verify:0.2.118'];
+    assert.deepEqual(f.calls, failFirstVerify
+      ? [...forward, 'stop', 'stopped', 'configure:0.2.116', 'before_start:rollback', 'start', 'verify:0.2.116'] : forward);
+  }
+});

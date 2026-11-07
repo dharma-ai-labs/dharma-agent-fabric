@@ -2184,10 +2184,28 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     // A record written before onboard kept its providers names none. Then the provider already holding the
     // installed bundle decides before the calling agent, and an applied upgrade records it.
     const requested = parseSelectedProviderIds(typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : [])?.[0];
+    // --provider chooses only for a record that names no provider; it never replaces a set-up provider.
+    if (requested && selected.providerIds && !selected.providerIds.includes(requested)) {
+      throw new Error('relay_upgrade_provider_conflict');
+    }
     const holders = requested || selected.providerIds ? [] : await providersHoldingInstalledBundle(selected);
     const hint = providerHintFromEnvironment();
     const known = requested ?? selected.providerIds?.[0] ?? (hint && holders.includes(hint) ? hint : holders[0]) ?? hint ?? undefined;
     const provider = known ?? 'codex';
+    // The chosen provider is recorded once its launcher is written and before the new relay starts, so that relay
+    // loads it. Only providerIds changes on the current row; rollback, or a failed upgrade, removes it again.
+    const recordsProvider = Boolean(known && !selected.providerIds && flags.has('apply') && !flags.has('rollback') && !maintenance);
+    let providerRecorded = false;
+    const recordProvider = async (record: boolean) => {
+      if (!recordsProvider || providerRecorded === record) return;
+      const current = (await registry()).find(item => item.workspaceId === selected.workspaceId);
+      if (!current) throw new Error('relay_upgrade_workspace_unregistered');
+      const { providerIds: _recorded, ...unrecorded } = current;
+      await saveWorkspaceRecord(record ? { ...unrecorded, providerIds: [known!] } : unrecorded, { expected: current });
+      providerRecorded = record;
+    };
+    // A rollback that could not finish still removes the record it added; the receipt reports the failure.
+    const unrecordProvider = () => recordProvider(false).catch(() => {});
     const providerDirectory = !flags.has('rollback')
       ? await resolveRepositoryProviderDirectory({provider, searchPath: providerProcessEnvironment(process.env).PATH}) : undefined;
     const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
@@ -2246,6 +2264,7 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         launcher: startup.launcher, policy: startup.policy, version,
         ...(restore ? {restoreCodexHome: restore.codexHome}
           : {codexHome: process.platform === 'linux' ? process.env.CODEX_HOME : undefined}) }),
+      beforeStart: phase => recordProvider(phase === 'upgrade'),
       start: () => startRelayAutostart(startupOptions),
       stop: async () => {
         await assertSessionsStopped();
@@ -2280,17 +2299,12 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
         }
         throw new Error('relay_upgrade_receiver_unconfirmed');
       },
-    });
+    }).catch(async (error: unknown) => { await unrecordProvider(); throw error; });
+    if (receipt.state !== 'completed') await unrecordProvider();
     const validation = await validateContract(resolve(fileURLToPath(new URL('.', import.meta.url)), 'schemas'),
       maintenance?'https://schemas.dharma-ai.io/local-signing-maintenance-upgrade/v1'
         :'https://schemas.dharma-ai.io/local-relay-upgrade/v1', receipt);
     if (!validation.ok) throw new Error('relay_upgrade_receipt_invalid');
-    // Record the provider only once its launcher is live, so a failed upgrade leaves the record as it was and
-    // the record names the provider the launcher carries.
-    if (known && !selected.providerIds?.includes(known) && receipt.state === 'completed'
-      && flags.has('apply') && !flags.has('rollback')) {
-      await saveWorkspaceRecord({ ...selected, providerIds: [known] });
-    }
     return receipt;
   });
 }
@@ -5111,6 +5125,18 @@ async function providersHoldingInstalledBundle(workspace: WorkspaceRecord, skip:
     if (holdsBundle) installed.push(provider);
   }
   return installed;
+}
+
+/** The bundle a provider has active for the workspace and when it became active, for status only. */
+async function activeSkillBundle(workspace: WorkspaceRecord, provider: ProviderId): Promise<{ bundleId: string; at: string } | null> {
+  try {
+    const root = await nativeSkillDirectoryForWorkspace({ provider, workspaceId: workspace.workspaceId, workspace: workspace.path });
+    const pointer = resolve(root, '.dharma-managed', 'workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE');
+    const [bundleId, metadata] = await Promise.all([readFile(pointer, 'utf8'), stat(pointer)]);
+    return { bundleId: bundleId.trim(), at: metadata.mtime.toISOString() };
+  } catch {
+    return null;
+  }
 }
 
 async function relayProviderIds(workspace: WorkspaceRecord,
@@ -8725,6 +8751,12 @@ export function parseSkillRolloutResponse(response: unknown, organizationId: str
   return rollout as { id: string; bundle: unknown; repositoryPackage?: unknown };
 }
 
+/** Whether this provider installed the bundle before; its release directory stays after a later install. */
+async function heldSkillRelease(nativeSkillDirectory: string, workspaceId: string, bundleId: unknown): Promise<boolean> {
+  if (typeof bundleId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bundleId)) return false;
+  return pathExists(resolve(nativeSkillDirectory, '.dharma-managed', 'workspaces', workspaceId, 'releases', bundleId, 'BUNDLE.json'));
+}
+
 export async function prepareSkillUpdate(input: {
   workspaceId: string; provider: ProviderId; policyPath: string;
   fabric?: AgentFabricClient; store?: SecureSecretStore;
@@ -8780,8 +8812,10 @@ export async function prepareSkillUpdate(input: {
   assertRunning();
   const rollout = parseSkillRolloutResponse(response, config.organizationId);
   if (!rollout) return null;
-  // Nothing is installed from an ignored offer, so it is dropped before any package download.
-  if (input.clearOnly && (rollout.bundle as SkillBundle).operation !== 'clear') return null;
+  // Nothing is installed from an ignored offer, so it is dropped before any package download. A holder still takes
+  // a rollback to an install bundle it held before, so a bad release does not stay active on it.
+  if (input.clearOnly && (rollout.bundle as SkillBundle).operation !== 'clear'
+    && !await heldSkillRelease(destination, workspaceId, (rollout.bundle as SkillBundle).bundleId)) return null;
   let bundle = rollout.bundle as SkillBundle;
   if (bundle.organizationId !== policy.organizationId || !Array.isArray(bundle.skills)
     || (bundle.operation === 'install' && bundle.skills.length === 0)
@@ -9545,11 +9579,12 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
         });
         for (const adapter of selectedProviderAdapters(scopedProviders)) {
           let activating: NonNullable<Awaited<ReturnType<typeof prepareSkillUpdate>>> | null = null;
-          const record = (result: Omit<SkillActivationResult, 'at' | 'rolloutId' | 'bundleId'>) => {
+          const record = (result: Omit<SkillActivationResult, 'at' | 'rolloutId' | 'bundleId'>,
+            installed?: Awaited<ReturnType<typeof activeSkillBundle>>) => {
             if (!isLocalProviderId(adapter.providerId)) return;
             skillActivationResults[adapter.providerId] = nextSkillActivationResult(skillActivationResults[adapter.providerId],
               { at: new Date().toISOString(), rolloutId: activating?.rollout.id ?? null,
-                bundleId: activating?.bundle.bundleId ?? null, ...result });
+                bundleId: activating?.bundle.bundleId ?? null, ...result }, installed);
           };
           try {
             const capability = await adapter.capability();
@@ -9561,7 +9596,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
               continue;
             }
             const provider = adapter.providerId;
-            // A provider served only because it holds a bundle takes a clear on rollback, never a new release.
+            // A provider served only because it holds a bundle takes a clear or a rollback to a bundle it held,
+            // never a new release.
             const clearOnly = Boolean(scopedProviders && !canonicalWorkspace.providerIds?.includes(provider));
             await withWorkspaceSkillActivationLock(canonicalWorkspace.workspaceId, provider, async () => {
               await withSkillPreparationTransaction({ home: dharmaHome(), workspaceId: canonicalWorkspace.workspaceId,
@@ -9579,7 +9615,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                 skillActivationsCompleted += 1;
               });
             });
-            record({ outcome: activating ? 'activated' : 'no_rollout', errorCode: null });
+            // An empty poll after a failure clears it only once the provider's active bundle shows a current install.
+            const installed = !activating && skillActivationResults[provider]?.outcome === 'failed'
+              ? await activeSkillBundle(canonicalWorkspace, provider) : null;
+            record({ outcome: activating ? 'activated' : 'no_rollout', errorCode: null }, installed);
           } catch (error) {
             skillActivationFailures += 1;
             skillActivationFailuresByProvider[adapter.providerId] = (skillActivationFailuresByProvider[adapter.providerId] || 0) + 1;
