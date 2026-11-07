@@ -266,8 +266,8 @@ test('trajectory IDs are recorded per seed build, so a rebuild or a second organ
   const evidence = testCaseById('TC-4');
   assert.match(evidence.user_prompt, /\{\{REVIEWER_T1_ID\}\}/);
   assert.match(evidence.expected_output, /trajectoryId \{\{REVIEWER_T1_ID\}\}/);
-  assert.match(seedPlan, /new random[^.]*UUID[^.]*every seed build/i, 'each seed build generates new trajectory IDs');
-  assert.match(seedPlan, /own (organi[sz]ation|seed build)[^.]*own placeholder values/i, 'a guided-check copy is a separate seed build with its own values');
+  assert.match(seedPlan, /new random[^.]*UUID[^.]*every\s+seed\s+build/i, 'each seed build generates new trajectory IDs');
+  assert.match(seedPlan, /own\s+(organi[sz]ation|seed\s+build)[^.]*own\s+placeholder\s+values/i, 'a guided-check copy is a separate seed build with its own values');
 });
 
 test('every declared write tool has a run-order rule and a reset, and TC-6 does not depend on the reviewer never writing', () => {
