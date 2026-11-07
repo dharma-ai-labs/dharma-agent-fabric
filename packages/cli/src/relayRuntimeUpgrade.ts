@@ -13,9 +13,14 @@ export type RelayUpgradeDependencies = {
   verifyPriorLaunchers?(version: string, contents: Launchers): Promise<boolean>;
   recordNextLaunchers?: boolean;
   verifyRecoveryLaunchers?(version: string, contents: Launchers): Promise<boolean>;
+  // The launcher this run writes; a recorded launcher was written for whichever provider was known then.
+  verifyNextLaunchers?(version: string, contents: Launchers): Promise<boolean>;
   assertStopped(): Promise<void>;
   inspectStartup(): Promise<{ version: string; workspace: string; codexHome?: string }>;
   configureStartup(version: string, restore?: {codexHome: string | null}): Promise<unknown>;
+  // Runs once the launcher and startup are in place and before the relay starts, so the started relay loads
+  // whatever record the caller keeps alongside them; 'rollback' runs before the previous relay starts again.
+  beforeStart?(phase: 'upgrade' | 'rollback'): Promise<void>;
   start(): Promise<unknown>;
   stop(): Promise<unknown>;
   verify(version: string, since: string): Promise<void>;
@@ -61,12 +66,12 @@ async function expectedPrevious(journal: Journal, deps: RelayUpgradeDependencies
     || Boolean(deps.verifyPriorLaunchers && await deps.verifyPriorLaunchers(journal.previousVersion, journal.previous));
 }
 
-async function expectedNext(journal: Journal, deps: RelayUpgradeDependencies) {
+async function expectedNext(journal: Journal, deps: RelayUpgradeDependencies, verify = deps.verifyRecoveryLaunchers) {
   const next = journal.next;
   return Boolean(next && typeof next === 'object' && !Array.isArray(next) && Object.keys(next).length === 2
     && typeof next.shell === 'string' && next.shell.length <= 16384
     && typeof next.windows === 'string' && next.windows.length <= 16384 && journal.nextHash === hash(next)
-    && deps.verifyRecoveryLaunchers && await deps.verifyRecoveryLaunchers(journal.version, next));
+    && verify && await verify(journal.version, next));
 }
 
 const nextLaunchers = (journal: Journal, deps: RelayUpgradeDependencies) =>
@@ -162,7 +167,7 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
       previous, previousHash: hash(previous), previousCodexHome: startup.codexHome ?? null,
       ...(next ? {next, nextHash: hash(next)} : {}) };
     if (!await expectedPrevious(journal, deps)) fail('launcher_conflict');
-    if (next && !await expectedNext(journal, deps)) fail('launcher_conflict');
+    if (next && !await expectedNext(journal, deps, deps.verifyNextLaunchers ?? deps.verifyRecoveryLaunchers)) fail('launcher_conflict');
   }
   const receipt = (state: State | 'planned') => ({ ok: state === 'completed' || state === 'planned',
     schema: 'dharma.local-relay-upgrade/v1', upgradeId: journal.upgradeId, organizationId: input.organizationId,
@@ -191,6 +196,7 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
       await installLaunchers(input.workspace, journal.previous);
       await deps.configureStartup(journal.previousVersion, journal.schema !== 'dharma.local-relay-upgrade/v1'
         ? {codexHome: journal.previousCodexHome!} : {codexHome: null});
+      await deps.beforeStart?.('rollback');
       const since = new Date().toISOString();
       await deps.start(); await deps.verify(journal.previousVersion, since);
       await save('rolled_back');
@@ -208,6 +214,7 @@ export async function upgradeRelayRuntime(input: Input, deps: RelayUpgradeDepend
     await installLaunchers(input.workspace, nextLaunchers(journal, deps));
     await deps.configureStartup(input.version);
     await save('installed');
+    await deps.beforeStart?.('upgrade');
     const since = new Date().toISOString();
     await deps.start(); await deps.verify(input.version, since);
     await save('completed');

@@ -87,10 +87,85 @@ test('an empty poll after an activation stays recorded as the installed release'
     rolloutId: null, bundleId: null, errorCode: null };
   assert.deepEqual(nextSkillActivationResult(activated, empty),
     { at: '2026-11-06T06:31:00.000Z', outcome: 'up_to_date', rolloutId: ROLLOUT, bundleId: BUNDLE, errorCode: null });
-  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), empty), empty);
   assert.deepEqual(nextSkillActivationResult(undefined, empty), empty);
   const failure = failed('repository_package_access_denied', '2026-11-06T06:32:00.000Z');
   assert.deepEqual(nextSkillActivationResult(activated, failure), failure);
+});
+
+// PR #424 review (6): an empty poll after a failure overwrote the failure, so setup lost the reason it was pending.
+test('an empty poll after a failure keeps the last concrete reason until a newer result carries one', () => {
+  const empty: SkillActivationResult = { at: '2026-11-06T06:31:00.000Z', outcome: 'no_rollout',
+    rolloutId: null, bundleId: null, errorCode: null };
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), empty), failed('approval_required'));
+  const newer = failed('skill_bundle_expired', '2026-11-06T06:32:00.000Z');
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), newer), newer);
+  const activated: SkillActivationResult = { at: '2026-11-06T06:33:00.000Z', outcome: 'activated',
+    rolloutId: ROLLOUT, bundleId: BUNDLE, errorCode: null };
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), activated), activated);
+  assert.equal(repositoryReadinessPendingCode(state({ claude: nextSkillActivationResult(failed('approval_required'), empty) }),
+    'claude', Date.parse('2026-11-06T06:30:00.000Z')), 'approval_required');
+});
+
+// PR #425 review (3): a carried-forward failure took the empty poll's time, so a wait that began after the
+// failure (or a relay seeded from an older run) reported a stale reason as current.
+test('a carried-forward failure keeps the time it was observed, so a later wait does not report it', () => {
+  const empty: SkillActivationResult = { at: '2026-11-06T06:31:00.000Z', outcome: 'no_rollout',
+    rolloutId: null, bundleId: null, errorCode: null };
+  const carried = nextSkillActivationResult(failed('approval_required'), empty);
+  assert.equal(carried.at, '2026-11-06T06:30:00.000Z');
+  assert.equal(repositoryReadinessPendingCode(state({ claude: carried }), 'claude', Date.parse('2026-11-06T06:30:30.000Z')),
+    'skill_activation_not_observed');
+});
+
+// PR #425 review round 3 (3): a failure never cleared on later empty polls, even after the provider became
+// reachable or the bundle was installed another way, and a wait that began later blamed a stopped relay.
+test('an empty poll clears a failure once a current bundle is active or the provider is reachable again', () => {
+  const empty: SkillActivationResult = { at: '2026-11-06T06:31:00.000Z', outcome: 'no_rollout',
+    rolloutId: null, bundleId: null, errorCode: null };
+  const current = (bundleId: string): SkillActivationResult => ({ at: empty.at, outcome: 'up_to_date',
+    rolloutId: null, bundleId, errorCode: null });
+  const OTHER = 'fbe79f65-0000-4000-8000-000000000003';
+  const failedBundle: SkillActivationResult = { at: '2026-11-06T06:30:00.000Z', outcome: 'failed',
+    rolloutId: ROLLOUT, bundleId: BUNDLE, errorCode: 'install_failed:rolled_back' };
+  assert.deepEqual(nextSkillActivationResult(failedBundle, empty, { bundleId: BUNDLE, at: '2026-11-06T06:30:30.000Z' }),
+    current(BUNDLE), 'the failed bundle is now active');
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), empty,
+    { bundleId: OTHER, at: '2026-11-06T06:30:30.000Z' }), current(OTHER), 'a bundle activated after the failure is current');
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), empty,
+    { bundleId: OTHER, at: '2026-11-06T06:20:00.000Z' }), failed('approval_required'), 'an older active bundle keeps the reason');
+  assert.deepEqual(nextSkillActivationResult(failedBundle, empty, null), failedBundle);
+  for (const errorCode of ['provider_unreachable', 'provider_unsafe_path']) {
+    assert.deepEqual(nextSkillActivationResult(failed(errorCode), empty, null), empty, errorCode);
+    assert.deepEqual(nextSkillActivationResult(failed(errorCode), empty, { bundleId: OTHER, at: '2026-11-06T06:00:00.000Z' }),
+      current(OTHER), errorCode);
+  }
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), empty, { bundleId: '../x', at: empty.at }),
+    failed('approval_required'), 'an unreadable pointer is not reported');
+});
+
+// PR #425 fix round 1 (1): every failure was carried across empty polls, so a transient poll or network error stayed
+// the provider's reported failure indefinitely; on main the next successful empty poll cleared it.
+test('a transient poll error clears on the next successful empty poll; only server decisions are carried', () => {
+  const empty: SkillActivationResult = { at: '2026-11-06T06:31:00.000Z', outcome: 'no_rollout',
+    rolloutId: null, bundleId: null, errorCode: null };
+  for (const errorCode of ['preparation_failed', 'preparation_failed:econnreset', 'install_failed', 'install_failed:eacces',
+    'http_503', 'skill_bundle_expired']) {
+    assert.deepEqual(nextSkillActivationResult(failed(errorCode), empty, null), empty, errorCode);
+  }
+  for (const errorCode of ['approval_required', 'repository_package_expired', 'repository_package_superseded',
+    'install_failed:failed', 'install_failed:rolled_back', 'install_failed:unknown']) {
+    const carried = nextSkillActivationResult(failed(errorCode), empty, null);
+    assert.deepEqual(carried, failed(errorCode), errorCode);
+    assert.equal(carried.at, '2026-11-06T06:30:00.000Z', `${errorCode} keeps the time it was observed`);
+  }
+});
+
+test('a wait that began after a carried failure, while the relay kept polling, reports no rollout offered', () => {
+  const carried = state({ claude: failed('approval_required') });
+  carried.updatedAt = '2026-11-06T06:31:00.000Z';
+  assert.equal(repositoryReadinessPendingCode(carried, 'claude', Date.parse('2026-11-06T06:30:30.000Z')), 'rollout_not_offered');
+  assert.equal(repositoryReadinessPendingCode(carried, 'claude', Date.parse('2026-11-06T06:32:00.000Z')),
+    'skill_activation_not_observed');
 });
 
 test('the readiness wait reports the recorded reason for the waiting provider', () => {

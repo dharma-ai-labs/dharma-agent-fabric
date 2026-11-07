@@ -10,6 +10,7 @@ import ts from 'typescript';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { selectDeviceWorkspace, workspaceIdForDevice } from './onboardingWorkspace.js';
 import { installRepositoryJoinConnection } from './repositoryJoinConnection.js';
+import { recordedProviderIds, scopedRelayProviderIds } from './index.js';
 
 type Row = Record<string, any>;
 type Join = (flags: Map<string, string | boolean>, binding: string, fingerprint: string) => Promise<Row>;
@@ -49,7 +50,9 @@ async function fixture(t: test.TestContext) {
     saveWorkspaceRecord: save,
     gitValue: prohibited, execFileAsync: prohibited, setupClaimSourceRegistration: prohibited,
     preflightBootstrapWorkspaceIdentity: prohibited, captureWorkspaceEvidence: prohibited,
-    isLocalProviderId: (provider: string) => provider === 'codex',
+    isLocalProviderId: (provider: string) => provider === 'codex', recordedProviderIds,
+    providersHoldingInstalledBundle: async () => [], resolveRepositoryProviderDirectory: async () => undefined,
+    providerProcessEnvironment: (env: NodeJS.ProcessEnv) => env, process: { env: { PATH: '/fixture/bin' } },
     client: async () => ({
       connectRepositoryAgent: async (input: Row) => {
         calls.push('connect');
@@ -102,6 +105,9 @@ async function fixture(t: test.TestContext) {
     const nodes = source.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
     assert.equal(nodes.length, 1); return nodes[0]!.getText(source).replace(/^export\s+/, '');
   });
+  // The provider-recording helpers run as written; the bundle and PATH readers they call are fixtures.
+  bodies.push(...source.statements.filter(node => ts.isFunctionDeclaration(node)
+    && ['protectedBundleHolders', 'setUpProviderIds'].includes(node.name?.text ?? '')).map(node => node.getText(source)));
   const compiled = ts.transpileModule(bodies.join('\n'), { compilerOptions: {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None }, reportDiagnostics: true });
   assert.equal(compiled.diagnostics?.filter(row => row.category === ts.DiagnosticCategory.Error).length, 0);
@@ -227,4 +233,38 @@ test('knowledge join refuses a foreign connection on resume without overwriting 
   await assert.rejects(f.run(), /repository_join_connection_scope_conflict/);
   assert.equal(await fs.readFile(path, 'utf8'), bytes);
   assert.equal(f.calls.includes('bootstrap_fixture'), false);
+});
+
+// PR #425 review (1): join never recorded providerIds, so the joined relay stayed unscoped and ran another user's codex.
+test('a Claude knowledge join records its provider, so the joined relay scope excludes codex', async t => {
+  const f = await fixture(t); f.flags.set('provider', 'claude');
+  f.dependencies.isLocalProviderId = (provider: string) => ['codex', 'claude'].includes(provider);
+  f.dependencies.syncWorkspacePolicy = async (_fabric: unknown, item: Row, _revision: string, _apply: boolean, providers: string[]) => {
+    assert.equal(providers.join(','), 'claude');
+    return { ok: true, organizationId: f.config.organizationId, workspace: { id: item.workspaceId, status: 'active' } };
+  };
+  const result = await f.run();
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.rows[0]!.providerIds)), ['claude']);
+  assert.deepEqual(scopedRelayProviderIds(f.rows[0]!.providerIds as never, ['hermes']), ['claude', 'hermes']);
+});
+
+// PR #425 fix round 2 (1): a join on a record written before providers were recorded narrowed it to the joining
+// provider, so a provider that already held the joined bundle got no further release.
+test('a join on a record without providers keeps the protected holders of its bundle', async t => {
+  for (const [codexProtected, recorded] of [[true, ['codex', 'claude']], [false, ['claude']]] as const) {
+    const f = await fixture(t); await f.run();
+    delete f.rows[0]!.providerIds;
+    f.flags.set('provider', 'claude');
+    f.dependencies.isLocalProviderId = (provider: string) => ['codex', 'claude'].includes(provider);
+    f.dependencies.syncWorkspacePolicy = async (_fabric: unknown, item: Row) =>
+      ({ ok: true, organizationId: f.config.organizationId, workspace: { id: item.workspaceId, status: 'active' } });
+    f.dependencies.providersHoldingInstalledBundle = async () => ['codex'];
+    f.dependencies.resolveRepositoryProviderDirectory = async (input: { provider: string }) => {
+      if (!codexProtected) throw new Error(`relay_startup_${input.provider}_path_invalid`);
+      return undefined;
+    };
+    assert.equal((await f.run()).ok, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.rows[0]!.providerIds)), recorded, `codex protected: ${codexProtected}`);
+  }
 });

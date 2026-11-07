@@ -11,6 +11,7 @@ import { bootstrapGrantMode } from './privateGrantInput.js';
 import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
 import { assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost } from './bootstrapHostScope.js';
 import {parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
+import { recordedProviderIds, repositoryAfterReadiness, setupProviderSharedReady } from './index.js';
 
 type Onboarding = Record<string, unknown>;
 type Caller = (...args: unknown[]) => Promise<Record<string, unknown>>;
@@ -81,6 +82,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     UUID_PATTERN: /^[0-9a-f-]{36}$/i,
     installStableRepositoryLauncher: async () => { await record('launcher');
       return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' }; },
+    registry: async () => [], recordedProviderIds,
     dharmaHome: () => '/fixture-home',
     VERSION: '0.2.102',
     relayAutostartStatus: async () => ({ state: 'disabled', backend: null }),
@@ -100,7 +102,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
     },
     runOrganizationCommand: async () => ({ ok: true }),
     requireCompletedBootstrapEvidence: () => undefined,
-    summarizeBootstrapOrganizationApi: () => ({ ok: true }),
+    summarizeBootstrapOrganizationApi: () => ({ ok: true }), repositoryAfterReadiness,
     loadAgentFabricOnboardingContract: async () => ({ markdown: '# fixture', sha256: 'a'.repeat(64) }),
     namedSessionCommand: async (action: string, flags: Map<string, string | boolean>) => {
       await record(`named_session:${action}`);
@@ -330,7 +332,8 @@ test('joining an existing package registers only a managed knowledge endpoint', 
     installAvailableNativeAgentFabricBootstraps: async () => { calls.push('native_bootstrap'); return { installed: ['codex'], failures: [] }; },
     startRelayDaemon: async () => ({ state: 'running' }),
     repositorySharedReady: async () => true,
-    isLocalProviderId: (value: string) => value === 'codex',
+    isLocalProviderId: (value: string) => value === 'codex', recordedProviderIds,
+    setUpProviderIds: async (entry: {providerIds?: string[]}, added: string[]) => recordedProviderIds(entry.providerIds as never, added as never),
     basename,
   };
   const result = await (await caller('joinExistingRepository', dependencies))(
@@ -1020,4 +1023,45 @@ test('canonical registration cannot bypass signed-policy verification or bind af
     bindRepositoryAgent: async () => { bound = true; return {}; },
   }))(fabric, f.requested, 'policy_fixture', ['codex']), /signature invalid/);
   assert.equal(bound, false);
+});
+
+// F13 C1 (2026-11-06): only codex received bundle 3604b630, yet a Claude setup reported complete,
+// and its inner repository block still said shared_repository_pending.
+test('bootstrap returns an inner repository block that agrees with the readiness wait', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'shared_repository_pending', localStage: 'ready',
+    sharedRepositoryReady: false, workspaceId: 'workspace_fixture',
+    sharedRepository: { authority: 'local_inventory_not_signed', publication: 'published', activation: false } });
+  f.dependencies.waitForRepositoryReadiness = async () => ({ outcome: 'ready', state: 'published',
+    ready: true, candidateId: 'candidate_fixture', attempts: 3 });
+  const actual = await (await caller('bootstrap', f.dependencies))(bootstrapFlags(true));
+  assert.equal(actual.stage, 'complete');
+  const repository = actual.repository as Record<string, unknown>;
+  assert.equal(repository.stage, 'ready');
+  assert.equal(repository.sharedRepositoryReady, actual.sharedRepositoryReady);
+  assert.deepEqual(repository.sharedRepository, { authority: 'signed_repository_release', publication: 'published', activation: true });
+});
+
+test('a release installed only for codex leaves a Claude setup at shared_repository_pending', async () => {
+  const f = bootstrapDependencies({ ok: true, stage: 'shared_repository_pending', localStage: 'ready',
+    sharedRepositoryReady: false, workspaceId: 'workspace_fixture' });
+  const record = { workspaceId: 'workspace_fixture', organizationId: 'org_fixture', path: '/fixture-repository',
+    repositoryPackage: { state: 'published', candidateId: 'candidate_fixture' } };
+  const codexOnly = async (_workspace: unknown, provider?: string) => !provider || provider === 'codex' ? { installed: true } : null;
+  const probed: unknown[] = [];
+  Object.assign(f.dependencies, {
+    isLocalProviderId: (provider: string) => ['codex', 'claude'].includes(provider), claudeSignInPreflight: async () => null,
+    registry: async () => [record],
+    repositorySharedReady: async (item: unknown) => Boolean(await codexOnly(item)),
+    setupProviderSharedReady: (item: never, provider: never) => setupProviderSharedReady(item, provider, codexOnly as never),
+    waitForRepositoryReadiness: async (probe: () => Promise<{ ready: boolean; state: string }>) => {
+      const observed = await probe(); probed.push(observed);
+      return { ...observed, outcome: observed.ready ? 'ready' : 'pending', attempts: 1, code: 'skill_activation_not_observed' };
+    },
+  });
+  const flags = bootstrapFlags(true); flags.set('provider', 'claude');
+  const actual = await (await caller('bootstrap', f.dependencies))(flags);
+  assert.deepEqual(JSON.parse(JSON.stringify(probed)), [{ state: 'published', ready: false, candidateId: 'candidate_fixture' }]);
+  assert.equal(actual.sharedRepositoryReady, false);
+  assert.equal(actual.stage, 'shared_repository_pending');
+  assert.equal((actual.repository as Record<string, unknown>).stage, 'shared_repository_pending');
 });

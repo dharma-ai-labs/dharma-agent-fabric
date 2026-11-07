@@ -52,7 +52,7 @@ test('actual relay starts independent staging and stops it before closing resour
 test('actual provider staging uses independently isolated failures', async () => {
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const relay = source.slice(source.indexOf('async function relayStart('), source.indexOf('export async function run('));
-  assert.match(relay, /await prepareProvidersIndependently\(providerAdapters, assertRunning/);
+  assert.match(relay, /await prepareProvidersIndependently\(selectedProviderAdapters\(canonicalWorkspace\.providerIds \?\? null\), assertRunning/);
 });
 
 test('actual relay consumes a verified cache only after an idle task boundary and falls back to fresh preparation', async () => {

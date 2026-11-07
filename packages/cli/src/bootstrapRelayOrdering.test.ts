@@ -92,6 +92,7 @@ async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?
       return {ok: true, stage: 'shared_repository_pending', workspaceId: 'workspace', sharedRepositoryReady: false};
     },
     installStableRepositoryLauncher: async () => {effects.push('launcher'); return {shell: '.dharma/bin/dharma'};},
+    recordedProviderIds: (existing: string[] | undefined, added: string[]) => [...new Set([...(existing ?? []), ...added])],
     withOnboardingStage: async (_stage: unknown, _workspace: unknown, _resume: unknown, run: () => Promise<unknown>) => run(),
     withRelayStartupMutation: async (run: () => Promise<unknown>) => run(), dharmaHome: () => '/synthetic/device',
     relayAutostartStatus: async () => {

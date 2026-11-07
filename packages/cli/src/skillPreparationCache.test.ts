@@ -175,7 +175,7 @@ async function runPolicyRefreshActivation(f: Awaited<ReturnType<typeof fixture>>
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
       && node.expression.text === 'withSkillPreparationTransaction') {
       const callback = node.arguments[1];
-      if (callback && ts.isArrowFunction(callback) && callback.body.getText(ast).includes('const cached = await takeCachedSkillUpdate(')) {
+      if (callback && ts.isArrowFunction(callback) && callback.body.getText(ast).includes('const cached = clearOnly ? null : await takeCachedSkillUpdate(')) {
         callbacks.push(callback);
       }
     }
@@ -193,7 +193,7 @@ async function runPolicyRefreshActivation(f: Awaited<ReturnType<typeof fixture>>
   const fabric = Object.freeze({ fixture: true });
   const fresh = Object.freeze({ fixture: 'fresh-authorized-preparation', policy, config, workspace, fabric });
   const context: Record<string, unknown> = {
-      Map, Error, canonicalize, sha256, canonicalWorkspace: workspace,
+      Map, Error, canonicalize, sha256, canonicalWorkspace: workspace, clearOnly: false,
       provider: 'codex', policyPath: join(f.home, 'approved-policy.json'), fabric,
       skillPreparationsCompleted: 0, skillActivationsCompleted: 0,
       loadSkillSynchronizationPolicy: async () => ({ workspace, policy, config }),
@@ -373,6 +373,9 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       } }),
     rawLocalRetentionDays: () => 1,
     providerAdapters: [{ providerId: 'codex', capability: async () => ({ skillInstall: 'available' }) }],
+    relayProviderIds: async () => null,
+    selectedProviderAdapters: () => [{ providerId: 'codex', capability: async () => ({ skillInstall: 'available' }) }],
+    readRelaySkillActivationState: async () => null,
     isLocalProviderId: (provider: string) => provider === 'codex', prepareProvidersIndependently,
     withSkillPreparationTransaction: async (_input: unknown, operation: () => Promise<void>) => operation(),
     skillPreparationScopeRoot, serializeSkillPreparationRecord,

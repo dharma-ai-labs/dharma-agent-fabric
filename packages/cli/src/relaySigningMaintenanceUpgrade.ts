@@ -101,7 +101,7 @@ export async function upgradeRelayForSigningMaintenance(input:Input,deps:Depende
     if(input.finish)return fail('staged_upgrade_required');
     const previous=await launchers(input.workspace),next=deps.launcherContents(input.version);
     if(!version.test(startup.version)||!deps.verifyPriorLaunchers||!await deps.verifyPriorLaunchers(startup.version,previous)
-      ||!deps.verifyRecoveryLaunchers||!await deps.verifyRecoveryLaunchers(input.version,next))return fail('launcher_conflict');
+      ||!deps.verifyRecoveryLaunchers||!await (deps.verifyNextLaunchers??deps.verifyRecoveryLaunchers)(input.version,next))return fail('launcher_conflict');
     const before=startup.version.split('-')[0]!.split('.').map(Number),after=input.version.split('-')[0]!.split('.').map(Number);
     if(after[0]!<before[0]!||after[0]===before[0]&&(after[1]!<before[1]!||after[1]===before[1]&&after[2]!<=before[2]!))return fail('version_invalid');
     let archive:string|null=null;
