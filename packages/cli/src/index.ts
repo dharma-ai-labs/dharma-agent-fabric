@@ -102,6 +102,7 @@ import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js'
 import {classifyCodexSetupFailure, reportCodexSetupFailure, type CodexSetupFailureDiagnostic, type CodexSetupFailureObserver} from './codexSetupDiagnostic.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 import { openWithFirstAvailableOpener } from './verificationOpener.js';
+import { PROVIDER_UNSAFE_PATH, relayProviderCapability, relayProviderUnsafePath } from './relayProviderGuard.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
@@ -6020,7 +6021,7 @@ async function syncWorkspacePolicy(
 // of a policy sync. A slow CLI must not stall every signed request on this device.
 async function providerCapabilitiesForWorkspacePolicy(providerIds: ProviderId[] | null) {
   return receiptAwareProviderCapabilities(
-    await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
+    await Promise.all(selectedProviderAdapters(providerIds).map(async (adapter) => (await relayProviderCapability(adapter)).capability)),
   );
 }
 
@@ -7706,6 +7707,10 @@ async function executeOneTask(
     fabric,
   );
   assertTaskWorkspacePolicy({ task, workspace, policy: taskPolicy });
+  if (await relayProviderUnsafePath(task.target.provider)) {
+    await fabric.postTaskEvent(task.taskId, 'failed', { phase: 'preflight', code: PROVIDER_UNSAFE_PATH });
+    return { ok: false, taskId: task.taskId, code: PROVIDER_UNSAFE_PATH };
+  }
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const waitingHeartbeats: Promise<unknown>[] = [];
   const waitingHeartbeat = setInterval(() => {
@@ -9320,7 +9325,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     prepare: async assertRunning => {
       await prepareProvidersIndependently(providerAdapters, assertRunning, async adapter => {
         assertRunning();
-        const capability = await adapter.capability();
+        const capability = (await relayProviderCapability(adapter)).capability;
         assertRunning();
         if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) return;
         const provider = adapter.providerId;
@@ -9541,7 +9546,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                 bundleId: activating?.bundle.bundleId ?? null, ...result }, installed);
           };
           try {
-            const capability = await adapter.capability();
+            // Setup refuses a provider whose first executable on PATH is unsafe; the relay never runs it either.
+            const probed = await relayProviderCapability(adapter);
+            if (probed.unsafePath) { record({ outcome: 'failed', errorCode: PROVIDER_UNSAFE_PATH }); continue; }
+            const capability = probed.capability;
             if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) continue;
             const provider = adapter.providerId;
             await withWorkspaceSkillActivationLock(canonicalWorkspace.workspaceId, provider, async () => {

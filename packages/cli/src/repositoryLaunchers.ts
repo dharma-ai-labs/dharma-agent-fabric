@@ -158,28 +158,38 @@ export async function resolveRepositoryNpmCli(options: {npmExecPath?: string; se
   throw new Error('relay_startup_npm_unavailable');
 }
 
-async function protectedProviderDirectory(directory: string, provider: ProviderCommand, nodePath = process.execPath) {
+async function protectParents(path: string) {
+  for (let current = path; ; current = dirname(current)) {
+    const parent = await lstat(current);
+    // Root-owned sticky temporary roots cannot replace this user's child directories.
+    const stickyRoot = current !== path && parent.uid === 0 && (parent.mode & 0o1000);
+    if (!parent.isDirectory() || parent.isSymbolicLink() || ![0, process.getuid!()].includes(parent.uid)
+      || ((parent.mode & 0o022) && !stickyRoot)) throw Error();
+    if (dirname(current) === current) break;
+  }
+}
+
+// The provider bin directory and the executable it resolves to are owned by this user or root, and neither they
+// nor their parents can be written by anyone else.
+async function protectedProviderExecutable(directory: string, provider: ProviderCommand) {
   providerDirectoryPath(directory);
   if (await realpath(directory) !== directory) throw Error();
-  const protectParents = async (path: string) => {
-    for (let current = path; ; current = dirname(current)) {
-      const parent = await lstat(current);
-      // Root-owned sticky temporary roots cannot replace this user's child directories.
-      const stickyRoot = current !== path && parent.uid === 0 && (parent.mode & 0o1000);
-      if (!parent.isDirectory() || parent.isSymbolicLink() || ![0, process.getuid!()].includes(parent.uid)
-        || ((parent.mode & 0o022) && !stickyRoot)) throw Error();
-      if (dirname(current) === current) break;
-    }
-  };
   await protectParents(directory);
   const executable = await realpath(join(directory, provider));
   await protectParents(dirname(executable));
+  return executable;
+}
+
+async function protectedExecutableFile(executable: string) {
+  const stat = await lstat(executable);
+  if (!stat.isFile() || ![0, process.getuid!()].includes(stat.uid) || (stat.mode & 0o022)) throw Error();
+}
+
+async function protectedProviderDirectory(directory: string, provider: ProviderCommand, nodePath = process.execPath) {
+  const executable = await protectedProviderExecutable(directory, provider);
   if (provider === 'codex') await protectedBinaryHash(executable, 'linux');
-  else {
-    // A native Claude binary can exceed the hashing bound; its ownership and mode are what protect it.
-    const stat = await lstat(executable);
-    if (!stat.isFile() || ![0, process.getuid!()].includes(stat.uid) || (stat.mode & 0o022)) throw Error();
-  }
+  // A native Claude binary can exceed the hashing bound; its ownership and mode are what protect it.
+  else await protectedExecutableFile(executable);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
   let hasNode = true;
   try {await lstat(join(directory, 'node'));} catch (error) {
@@ -200,16 +210,36 @@ export async function resolveRepositoryProviderDirectory(options: {provider?: Pr
   platform?: NodeJS.Platform} = {}) {
   if ((options.platform ?? process.platform) !== 'linux') return undefined;
   const provider = options.provider ?? 'codex';
-  for (const directory of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
+  return firstProviderOnPath(provider, options.searchPath, directory => protectedProviderDirectory(directory, provider));
+}
+
+async function firstProviderOnPath<T>(provider: ProviderCommand, searchPath: string | undefined,
+  check: (directory: string) => Promise<T>): Promise<T | undefined> {
+  for (const directory of (searchPath ?? process.env.PATH ?? '').split(':')) {
     if (!directory) continue;
     try {await lstat(join(directory, provider));} catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw new Error(unsafeProviderOnPath(provider));
     }
     // Do not skip an unsafe first match and silently select a different executable.
-    try {return await protectedProviderDirectory(directory, provider);} catch {throw new Error(unsafeProviderOnPath(provider));}
+    try {return await check(directory);} catch {throw new Error(unsafeProviderOnPath(provider));}
   }
   return undefined;
+}
+
+/**
+ * Whether the first `provider` on PATH fails setup's ownership and mode rules, as on a shared host where it belongs
+ * to another user. Setup refuses such a provider; the relay, which writes no launcher, must not run it either. Only
+ * the launcher's own Node and hashing checks are left out. Linux only, as setup's check.
+ */
+export async function providerFirstOnPathUnsafe(provider: ProviderCommand,
+  options: {searchPath?: string; platform?: NodeJS.Platform} = {}): Promise<boolean> {
+  if ((options.platform ?? process.platform) !== 'linux') return false;
+  return firstProviderOnPath(provider, options.searchPath, async directory => {
+    const executable = await protectedProviderExecutable(directory, provider);
+    await protectedExecutableFile(executable);
+    if (!((await lstat(executable)).mode & 0o111)) throw Error();
+  }).then(() => false, () => true);
 }
 
 // A recorded launcher names only the directories. Verify each for one of the set-up providers; when none is known,
