@@ -297,3 +297,48 @@ test('the seed is rebuilt before capsule retention can change TC-4', () => {
   assert.ok(seedPlan.includes(`${retention}-day`), 'the seed plan names the capsule retention it works around');
   assert.match(seedPlan.slice(seedPlan.indexOf('## Reset')), /retention/i, 'the reset table covers the retention tombstone');
 });
+
+test('the submitted cases hold whatever order they run in, including after a declared write tool', () => {
+  // OpenAI receives the submitted cases, not REVIEWER_GUIDE.md, so a run-order
+  // rule in the guide does not protect a case. A control-agent message records
+  // a managed trajectory and a reviewer conversation appears in TC-6, so those
+  // two cases must tolerate both on their own.
+  for (const testCase of submission.test_cases) {
+    const id = testCase.description.split('.')[0];
+    assert.doesNotMatch(testCase.expected_output, /before any write tool/i, `${id} must not depend on no write having run`);
+    assert.doesNotMatch(testCase.expected_output, /list is empty/i, `${id} must not expect an empty list`);
+  }
+  const listing = testCaseById('TC-3');
+  assert.doesNotMatch(listing.user_prompt, /\b5 most recent\b/, 'TC-3 must not ask for only the newest 5 rows');
+  assert.doesNotMatch(listing.expected_output, /limit 5\b|exactly 5 trajectories/, 'a newer managed trajectory must not push T1 out of TC-3');
+  assert.match(listing.expected_output, /limit 50/, 'TC-3 lists up to 50 rows, so T1 to T5 stay in the list');
+  assert.match(listing.expected_output, /whether or not a write tool ran/i, 'TC-3 says in the submitted text that a prior write does not change it');
+  const sessions = testCaseById('TC-6');
+  assert.match(sessions.expected_output, /whether or not a write tool ran/i, 'TC-6 says in the submitted text that a prior write does not change it');
+  const tc3Guide = guide.slice(guide.indexOf('### TC-3 '), guide.indexOf('### TC-4 '));
+  assert.doesNotMatch(tc3Guide, /limit` 5|exactly 5 trajectories/, 'REVIEWER_GUIDE.md TC-3 matches the submitted case');
+  const tc6Guide = guide.slice(guide.indexOf('### TC-6 '), guide.indexOf('### Negative cases'));
+  assert.doesNotMatch(tc6Guide, /list is empty/, 'REVIEWER_GUIDE.md TC-6 matches the submitted case');
+  const reset = seedPlan.slice(seedPlan.indexOf('## Reset'));
+  assert.doesNotMatch(reset, /Rebuild before the next run of TC-3/, 'a control-agent message no longer breaks TC-3 within a round');
+  const acceptance = seedPlan.slice(seedPlan.indexOf('## Acceptance before submission'), seedPlan.indexOf('## Reset'));
+  assert.match(acceptance, /guided-check organization[^.]*TC-3 and TC-6/, 'acceptance observes TC-3 and TC-6 after writes, in the guided-check organization');
+});
+
+test('the pre-round check sees every conversation, including one the reviewer created', () => {
+  // A developer sees only its own conversations, but an org_admin sees all of
+  // them, so the operator readback catches a reviewer-created conversation.
+  const step7 = seedPlan.slice(seedPlan.indexOf('7. **Control agent.**'), seedPlan.indexOf('8. **Freeze the seed.**'));
+  assert.match(step7, /`fabric_control_agent_list_sessions`/, 'step 7 reads back the conversations as the operator');
+  assert.match(step7, /exactly one conversation[^.]*`Seed provisioning`/, 'the operator readback holds only the seeding conversation');
+  const preRound = paragraphStarting(seedPlan, 'Before every review round');
+  assert.match(preRound, /conversation/, 'the pre-round check repeats the conversation readback');
+});
+
+test('the seed capsules are default capsules, so the 90-day retention is the shortest that applies', () => {
+  // Synchronized content follows an admin retention of 1 to 365 days, which can
+  // be shorter than the seed age limit. The seed never turns that policy on.
+  assert.match(seedPlan, /\| Content disclosure policy \| Off[^|]*default capsule/, 'the required state keeps content synchronization off');
+  const step4 = seedPlan.slice(seedPlan.indexOf('4. **Trajectories.**'), seedPlan.indexOf('5. **Stop the relay.**'));
+  assert.match(step4, /content disclosure policy[^.]*off/i, 'both step-4 options run with content synchronization off');
+});
