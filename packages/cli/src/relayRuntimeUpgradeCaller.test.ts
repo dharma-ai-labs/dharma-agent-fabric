@@ -26,8 +26,9 @@ async function fixture() {
     lstat:async()=>{throw Object.assign(Error('absent fixture lock'),{code:'ENOENT'});},
     VERSION: '0.2.118', stableRepositoryLauncherContents: (version: string) => ({ version }),
     resolveRepositoryNpmCli: async () => '/fixtures/npm/bin/npm-cli.js',
-    providerProcessEnvironment: (source: NodeJS.ProcessEnv) => source,
-    resolveRepositoryCodexDirectory: async () => '/fixtures/codex/bin',
+    providerProcessEnvironment: (source: NodeJS.ProcessEnv) => source, providerHintFromEnvironment: () => null,
+    parseSelectedProviderIds: (values: string[]) => values.length ? values : null,
+    resolveRepositoryProviderDirectory: async () => '/fixtures/codex/bin',
     withRelayStartupMutation: async (operation: () => Promise<unknown>) => { calls.push('lock'); return operation(); },
     upgradeRelayRuntime: async (_input: unknown, hooks: { assertStopped(): Promise<void>; inspectStartup(): Promise<unknown> }) => {
       await hooks.assertStopped(); await hooks.inspectStartup(); return { state: 'planned' };
@@ -90,12 +91,12 @@ test('actual Linux upgrade records npm while rollback does not require a replace
   let resolutions = 0;
   let codexResolutions = 0;
   f.deps.resolveRepositoryNpmCli = async () => {resolutions++; return '/fixtures/npm/bin/npm-cli.js';};
-  f.deps.resolveRepositoryCodexDirectory = async () => {codexResolutions++; return '/fixtures/codex/bin';};
-  f.deps.stableRepositoryLauncherContents = (_version: string, runtime?: {npmCliPath?: string; codexDirectory?: string}) => ({runtime});
-  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {launcherContents(version: string): {runtime?: {npmCliPath?: string; codexDirectory?: string}}}) => {
+  f.deps.resolveRepositoryProviderDirectory = async () => {codexResolutions++; return '/fixtures/codex/bin';};
+  f.deps.stableRepositoryLauncherContents = (_version: string, runtime?: {npmCliPath?: string; providerDirectory?: string}) => ({runtime});
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {launcherContents(version: string): {runtime?: {npmCliPath?: string; providerDirectory?: string}}}) => {
     assert.equal(hooks.launcherContents('0.2.118').runtime?.npmCliPath,
       f.flags.has('rollback') ? undefined : '/fixtures/npm/bin/npm-cli.js');
-    assert.equal(hooks.launcherContents('0.2.118').runtime?.codexDirectory,
+    assert.equal(hooks.launcherContents('0.2.118').runtime?.providerDirectory,
       f.flags.has('rollback') ? undefined : '/fixtures/codex/bin');
     return {state: 'planned'};
   };
@@ -140,7 +141,7 @@ test('actual Linux caller and real runtime journal restore exact bytes on a fres
       readDeviceConfig: async () => ({organizationId: selected.organizationId, deviceId: selected.deviceId}),
       stableRepositoryLauncherContents, upgradeRelayRuntime,
       resolveRepositoryNpmCli: async () => {resolutions++; return npmCliPath;},
-      resolveRepositoryCodexDirectory: async () => undefined,
+      resolveRepositoryProviderDirectory: async () => undefined,
       enableRelayAutostart: async (input: {version: string}) => {f.startup.version = input.version;},
       startRelayAutostart: async () => {running = true;}, stopRelayAutostart: async () => {running = false;},
       relayStop: async () => ({ok: true}),
@@ -321,5 +322,22 @@ test('actual maintenance finish checks newer verified trust and the same protect
     if(failure==='none'){await f.run()(f.flags);assert.deepEqual(f.calls,['lock','anchor']);}
     else{await assert.rejects(f.run()(f.flags),/trust_not_recovered|anchor mismatch/);
       assert.deepEqual(f.calls,failure==='anchor'?['lock','anchor']:['lock']);}
+  }
+});
+
+// F13 C1 (2026-11-06): an existing install gets the provider bin directory through relay upgrade.
+test('actual upgrade resolves the bin directory of --provider, else the onboarded provider, else the calling agent', async () => {
+  for (const [flag, recorded, hint, expected] of [
+    ['claude', ['codex'], 'codex', 'claude'], [undefined, ['claude'], 'codex', 'claude'],
+    [undefined, undefined, 'claude', 'claude'], [undefined, undefined, null, 'codex'],
+  ] as const) {
+    const f = await fixture(), requested: string[] = [];
+    const selected = (f.deps.selectDeviceWorkspace as () => Record<string, unknown>)();
+    f.deps.selectDeviceWorkspace = () => ({...selected, ...(recorded ? {providerIds: [...recorded]} : {})});
+    f.deps.providerHintFromEnvironment = () => hint;
+    f.deps.resolveRepositoryProviderDirectory = async (input: {provider: string}) => {requested.push(input.provider); return undefined;};
+    if (flag) f.flags.set('provider', flag);
+    await f.run()(f.flags);
+    assert.deepEqual(requested, [expected]);
   }
 });

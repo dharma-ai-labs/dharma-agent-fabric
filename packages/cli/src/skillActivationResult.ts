@@ -74,12 +74,16 @@ export function requireActiveSkillInstall(status: unknown): void {
   throw new SkillActivationError(`install_failed:${suffix}`, 'Skill installation finished without an active bundle.');
 }
 
-/** An empty poll after an activation means the installed release is current, not that none was offered. */
+/**
+ * An empty poll after an activation means the installed release is current, not that none was offered.
+ * An empty poll after a failure carries no newer reason, so the failure stays the reported one.
+ */
 export function nextSkillActivationResult(previous: SkillActivationResult | undefined,
   attempt: SkillActivationResult): SkillActivationResult {
   if (attempt.outcome === 'no_rollout' && (previous?.outcome === 'activated' || previous?.outcome === 'up_to_date')) {
     return { ...previous, at: attempt.at, outcome: 'up_to_date' };
   }
+  if (attempt.outcome === 'no_rollout' && previous?.outcome === 'failed') return { ...previous, at: attempt.at };
   return attempt;
 }
 

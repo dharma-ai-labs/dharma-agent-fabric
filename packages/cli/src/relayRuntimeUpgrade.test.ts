@@ -550,3 +550,48 @@ test('receiver health requires live process identities, matching versions and a 
   assert.equal(relayRuntimeObservationReady({ ...valid, lastPoll: { ...valid.lastPoll, pid: undefined },
     allowLegacyPoll: true }), true);
 });
+
+// F13 C1 (2026-11-06): the fix carries the set-up provider's bin directory in the launcher, so the
+// startup unit and its receipt keep the schema the 0.2.223 reader (this unchanged module) accepts.
+test('rollback from a launcher carrying the Claude bin directory restores the 0.2.223 launcher, unit and receipt', {
+  skip: process.platform !== 'linux',
+}, async () => {
+  const {upgradeRelayRuntime} = await import(modulePath);
+  const launchers = await import('./repositoryLaunchers.js');
+  const f = await fixture('0.2.223', '0.2.224');
+  const providerDirectory = join(f.input.home, '.npm-global', 'bin');
+  await mkdir(providerDirectory, {recursive: true, mode: 0o700});
+  await writeFile(join(providerDirectory, 'claude'), '#!/bin/sh\nprintf "fixture-claude\n"\n', {mode: 0o700});
+  const runtime = {platform: 'linux' as const, nodeDirectory: join(process.execPath, '..')};
+  const before = launchers.stableRepositoryLauncherContents('0.2.223', runtime);
+  const after = launchers.stableRepositoryLauncherContents('0.2.224', {...runtime, providerDirectory});
+  await writeFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), before.shell);
+  await writeFile(join(f.input.workspace, '.dharma', 'bin', 'dharma.cmd'), before.windows);
+  const options = {home: f.input.home, userHome: f.input.home, workspace: f.input.workspace,
+    launcher: join(f.input.workspace, '.dharma', 'bin', 'dharma'), policy: join(f.input.workspace, '.dharma', 'approved-policy.json'),
+    version: '0.2.223', platform: 'linux' as const, wslHost: {context: async () => null},
+    run: async () => ({stdout: 'enabled\n'})};
+  await enableRelayAutostart(options);
+  const receiptPath = join(f.input.home, 'relay', 'autostart.json');
+  const unitPath = join(f.input.home, '.config', 'systemd', 'user', 'dharma-agent-fabric.service');
+  const receipt = await readFile(receiptPath, 'utf8'), unit = await readFile(unitPath, 'utf8');
+  const deps = {...f.deps, recordNextLaunchers: true,
+    launcherContents: (version: string) => version === '0.2.224' ? after : before,
+    verifyRecoveryLaunchers: launchers.verifyRollbackRepositoryLaunchers,
+    inspectStartup: () => inspectOwnedRelayAutostart(options),
+    configureStartup: (version: string, restore?: {codexHome: string | null}) => enableRelayAutostart({...options, version,
+      ...(restore ? {restoreCodexHome: restore.codexHome} : {})}),
+  };
+  assert.equal((await upgradeRelayRuntime(f.input, deps)).state, 'completed');
+  assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), after.shell);
+  assert.ok(after.shell.includes(`export PATH='${providerDirectory}':"$PATH"\n`));
+  assert.doesNotMatch(await readFile(unitPath, 'utf8'), /PATH=/, 'the unit itself is not changed by the provider fix');
+  assert.equal((await upgradeRelayRuntime({...f.input, rollback: true}, deps)).state, 'rolled_back');
+  assert.equal(await readFile(join(f.input.workspace, '.dharma', 'bin', 'dharma'), 'utf8'), before.shell);
+  assert.equal(await readFile(receiptPath, 'utf8'), receipt);
+  assert.equal(await readFile(unitPath, 'utf8'), unit);
+  const restored = JSON.parse(receipt);
+  assert.equal(restored.schema, 'dharma.relay-autostart/v1');
+  assert.deepEqual(Object.keys(restored).sort(), ['backend', 'launcher', 'policy', 'schema', 'taskName', 'version', 'workspace']);
+  assert.equal((await inspectOwnedRelayAutostart(options)).version, '0.2.223');
+});

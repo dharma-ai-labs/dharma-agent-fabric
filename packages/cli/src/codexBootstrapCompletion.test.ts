@@ -24,7 +24,8 @@ import {discoverRepositoryRoleMetadata} from './repositoryRoleMetadata.js';
 import {repositoryRelayObservationReady} from './repositoryRelaySupervisor.js';
 import {selectDeviceWorkspace, workspaceIdForDevice} from './onboardingWorkspace.js';
 import {startCodexSetupNativeHost} from './codexSetupNativeHost.js';
-import {applyServerEvidencePolicy, bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract, materializeWorkspacePolicy, parseCliOptions} from './index.js';
+import {applyServerEvidencePolicy, bootstrapFromCodexSetupScope, loadAgentFabricOnboardingContract, materializeWorkspacePolicy, parseCliOptions,
+  repositoryAfterReadiness} from './index.js';
 import {clearCodexSetupSessionPostCommitAcknowledgment, codexSetupSessionPolicyHash,
   originalCodexSetupSessionSender, withCodexSetupSessionSender} from './codexSetupSessionHandoff.js';
 import type {ScopedLocalVault} from '@dharma-ai-labs/agent-fabric-local-vault';
@@ -536,7 +537,7 @@ for (const disposition of ['complete', 'package-pending', 'foreign-recipient', '
       enableRelayAutostart: async () => effect('startup', {state: 'enabled', backend: 'systemd-user'}),
       verifyAgentFabricSkillInstallation: async () => effect('skill', {ready: true}),
       startRelayDaemon: async () => effect('relay', {state: 'running', probe: {connected: true}}),
-      waitForRepositoryReadiness: async () => ({outcome: 'blocked'}),
+      waitForRepositoryReadiness: async () => ({outcome: 'blocked'}), repositoryAfterReadiness,
       runOrganizationCommand: async () => effect('api', {organizationId: f.row.organizationId}),
       summarizeBootstrapOrganizationApi: () => ({ready: true}),
       namedSessionCommand: async (action: string) => {

@@ -87,10 +87,24 @@ test('an empty poll after an activation stays recorded as the installed release'
     rolloutId: null, bundleId: null, errorCode: null };
   assert.deepEqual(nextSkillActivationResult(activated, empty),
     { at: '2026-11-06T06:31:00.000Z', outcome: 'up_to_date', rolloutId: ROLLOUT, bundleId: BUNDLE, errorCode: null });
-  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), empty), empty);
   assert.deepEqual(nextSkillActivationResult(undefined, empty), empty);
   const failure = failed('repository_package_access_denied', '2026-11-06T06:32:00.000Z');
   assert.deepEqual(nextSkillActivationResult(activated, failure), failure);
+});
+
+// PR #424 review (6): an empty poll after a failure overwrote the failure, so setup lost the reason it was pending.
+test('an empty poll after a failure keeps the last concrete reason until a newer result carries one', () => {
+  const empty: SkillActivationResult = { at: '2026-11-06T06:31:00.000Z', outcome: 'no_rollout',
+    rolloutId: null, bundleId: null, errorCode: null };
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), empty),
+    { ...failed('approval_required'), at: '2026-11-06T06:31:00.000Z' });
+  const newer = failed('skill_bundle_expired', '2026-11-06T06:32:00.000Z');
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), newer), newer);
+  const activated: SkillActivationResult = { at: '2026-11-06T06:33:00.000Z', outcome: 'activated',
+    rolloutId: ROLLOUT, bundleId: BUNDLE, errorCode: null };
+  assert.deepEqual(nextSkillActivationResult(failed('approval_required'), activated), activated);
+  assert.equal(repositoryReadinessPendingCode(state({ claude: nextSkillActivationResult(failed('approval_required'), empty) }),
+    'claude', Date.parse('2026-11-06T06:31:00.000Z')), 'approval_required');
 });
 
 test('the readiness wait reports the recorded reason for the waiting provider', () => {

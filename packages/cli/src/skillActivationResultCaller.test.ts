@@ -50,3 +50,13 @@ test('actual diagnostic status shows each repository relay activation counters a
   const status = text.slice(text.indexOf("if (command === 'status') {"), text.indexOf("if (command === 'assistant')"));
   assert.match(status, /skillActivation: await readRelaySkillActivationState\(dharmaHome\(\), row\.workspaceId\)/);
 });
+
+// PR #424 review (6): the relay kept results only in memory, so a restart wrote an empty record over
+// the reason setup and `dharma status` were reporting.
+test('actual relay seeds activation results from the recorded file before its first activation tick', async () => {
+  const text = await source();
+  const relay = text.slice(text.indexOf('async function relayWorkspaceLoop('), text.indexOf('export async function run('));
+  const seeded = relay.search(/const skillActivationResults: Partial<Record<ProviderId, SkillActivationResult>> = \{\s*\.\.\.\(await readRelaySkillActivationState\(dharmaHome\(\), canonicalWorkspace\.workspaceId\)\)\?\.providers \};/);
+  assert.ok(seeded > 0, 'the in-memory results must start from skill-activation.json');
+  assert.ok(seeded < relay.indexOf('performance.now() >= nextSkillActivationAt'));
+});
