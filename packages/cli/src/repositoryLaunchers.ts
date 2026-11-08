@@ -294,7 +294,9 @@ async function firstProviderOnPath<T>(provider: ProviderCommand, searchPath: str
   check: (directory: string) => Promise<T>): Promise<T | undefined> {
   for (const directory of (searchPath ?? process.env.PATH ?? '').split(':')) {
     if (!directory) continue;
-    try {await lstat(join(directory, provider));} catch (error) {
+    // Probed as execvp finds it, at '<entry>/<provider>' resolved by the kernel: path.join drops a '..' part as text,
+    // and so missed a provider reached through a link (CLI 0.2.224 review S1).
+    try {await lstat(`${directory}/${provider}`);} catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw new Error(unsafeProviderOnPath(provider));
     }
@@ -334,7 +336,7 @@ export async function providerUnsafePathDiagnosis(provider: ProviderCommand,
   for (const directory of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
     if (!directory) continue;
     try {
-      try {await lstat(join(directory, provider));} catch (error) {
+      try {await lstat(`${directory}/${provider}`);} catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw error;
       }
