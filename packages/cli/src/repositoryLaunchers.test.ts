@@ -605,3 +605,31 @@ test('relay and setup refuse a provider found through a .. PATH entry that cross
     assert.equal((await launchers.providerUnsafePathDiagnosis('claude', {searchPath}))?.path, entry, 'status names the .. entry');
   } finally {await chmod(open, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
 });
+
+// CLI 0.2.224 review R5-1 (2x4=8): a PATH entry ahead of the provider that this user cannot search (EACCES, such as
+// /root/.local/bin in a devcontainer that runs as vscode) or that is a file (ENOTDIR) made the relay refuse claude,
+// agy and hermes and setup refuse them, although execvp skips such an entry and 0.2.223 had no check for it. Those
+// entries are now skipped for every provider but codex, which keeps the 0.2.223 rule and refuses them.
+test('relay and setup skip an unsearchable or file PATH entry ahead of claude, but not ahead of codex', {skip: process.platform !== 'linux'}, async t => {
+  if (process.getuid!() === 0) {t.skip('root can search a 0000 directory'); return;}
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-skipped-entry-')));
+  const closed = join(root, 'closed');
+  try {
+    await mkdir(closed, {mode: 0o700});
+    const file = join(root, 'file'); await writeFile(file, 'not a directory\n', {mode: 0o600});
+    const bin = join(root, 'bin'); await mkdir(bin, {mode: 0o700});
+    for (const provider of ['claude', 'codex']) await writeFile(join(bin, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+    await chmod(closed, 0o000);
+    const searchPath = `${closed}:${file}:${bin}`;
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath}), false, 'relay: claude after skipped entries');
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath}), bin, 'setup: claude after skipped entries');
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath}), null, 'status: claude after skipped entries');
+    for (const entry of [closed, file]) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe('codex', {searchPath: `${entry}:${bin}`}), true, `relay: codex after ${entry}`);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: `${entry}:${bin}`}),
+        /^Error: relay_startup_codex_path_invalid/, `setup: codex after ${entry}`);
+      assert.equal((await launchers.providerUnsafePathDiagnosis('codex', {searchPath: `${entry}:${bin}`}))?.path, entry, `status: codex after ${entry}`);
+    }
+  } finally {await chmod(closed, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
