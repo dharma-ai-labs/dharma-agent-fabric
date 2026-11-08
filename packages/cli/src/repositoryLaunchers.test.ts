@@ -670,28 +670,25 @@ test('relay and setup skip an unsearchable or file PATH entry ahead of claude, b
 
 // CLI 0.2.224 review R1: setup and relay upgrade rewrote the launcher with only the bundle holders and the provider
 // set up, so a first agent whose shared package was still pending (no ACTIVE_BUNDLE) dropped off the relay PATH.
-// 0.2.223 always carried codex. The directories the launcher being replaced carries are kept while they still pass.
-test('the launcher being replaced names its protected provider directories, from any agent-fabric version', {skip: process.platform !== 'linux'}, async () => {
+// 0.2.223 always carried codex. The directories this device recorded for the launcher are kept while they still pass.
+test('setup keeps the protected provider directories it recorded for the launcher being replaced', {skip: process.platform !== 'linux'}, async () => {
   const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
-  assert.equal(typeof launchers.protectedLauncherProviderDirectories, 'function');
   const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-current-launcher-')));
   try {
+    const home = join(root, 'home'), workspace = join(root, 'repo');
     const codexDirectory = join(root, 'npm-global', 'bin'), claudeDirectory = join(root, 'local', 'bin');
-    for (const directory of [codexDirectory, claudeDirectory]) await mkdir(directory, {recursive: true, mode: 0o700});
+    for (const directory of [home, workspace, codexDirectory, claudeDirectory]) await mkdir(directory, {recursive: true, mode: 0o700});
     await writeFile(join(codexDirectory, 'codex'), '#!/bin/sh\nprintf "own-codex"\n', {mode: 0o700});
     await writeFile(join(claudeDirectory, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
-    const runtime = {platform: 'linux' as const, nodeDirectory: dirname(process.execPath), npmCliPath: '/approved/npm/bin/npm-cli.js'};
-    const read = (contents: unknown) => launchers.protectedLauncherProviderDirectories(contents);
-    // The single-directory launcher 0.2.223 wrote for codex.
-    const codexOnly = launchers.stableRepositoryLauncherContents('0.2.223', {...runtime, providerDirectory: codexDirectory});
-    assert.deepEqual(await read(codexOnly), [{provider: 'codex', directory: codexDirectory}]);
-    const both = launchers.stableRepositoryLauncherContents('0.2.224', {...runtime, providerDirectory: [claudeDirectory, codexDirectory]});
-    assert.deepEqual(await read(both), [{provider: 'claude', directory: claudeDirectory}, {provider: 'codex', directory: codexDirectory}]);
-    assert.deepEqual(await read(launchers.stableRepositoryLauncherContents('0.2.224', runtime)), [], 'no provider directory');
-    assert.deepEqual(await read({...codexOnly, shell: codexOnly.shell + 'echo foreign\n'}), [], 'not a launcher setup wrote');
-    assert.deepEqual(await read(null), []);
+    const read = () => launchers.protectedSetUpProviderDirectories({home, workspace});
+    const record = (providerDirectory: string[]) => launchers.recordSetUpProviderDirectories({home, workspace, providerDirectory});
+    await record([claudeDirectory, codexDirectory]);
+    assert.deepEqual(await read(), [{provider: 'claude', directory: claudeDirectory}, {provider: 'codex', directory: codexDirectory}]);
+    await record([]);
+    assert.deepEqual(await read(), [], 'no provider directory');
+    await record([claudeDirectory, codexDirectory]);
     await chmod(join(codexDirectory, 'codex'), 0o722);
-    assert.deepEqual(await read(both), [{provider: 'claude', directory: claudeDirectory}], 'a directory that no longer passes is dropped');
+    assert.deepEqual(await read(), [{provider: 'claude', directory: claudeDirectory}], 'a directory that no longer passes is dropped');
   } finally {await rm(root, {recursive: true, force: true});}
 });
 
