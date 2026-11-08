@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory, providerDirectoriesInPathOrder, protectedLauncherProviderDirectories } from './repositoryLaunchers.js';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory, providerDirectoriesInPathOrder, protectedSetUpProviderDirectories, recordSetUpProviderDirectories } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -2091,12 +2091,12 @@ export function stableRepositoryLauncherContents(version = VERSION,
   return repositoryLauncherContents(version, runtime);
 }
 
-/** The protected provider directories the repository launcher being replaced carries; none when it is absent. */
+/**
+ * The protected provider directories this device recorded on the workspace's launcher; none when it recorded none. Never
+ * read from the launcher in the working tree, which the repository can commit (CLI 0.2.224 review K1).
+ */
 async function currentLauncherProviders(workspace: string) {
-  const read = (name: string) => readFile(resolve(workspace, '.dharma', 'bin', name), 'utf8');
-  const launchers = await Promise.all([read('dharma'), read('dharma.cmd')])
-    .then(([shell, windows]) => ({shell, windows}), () => null);
-  return launchers ? protectedLauncherProviderDirectories(launchers) : [];
+  return protectedSetUpProviderDirectories({home: dharmaHome(), workspace});
 }
 
 async function installStableRepositoryLauncher(workspace: string, providers: readonly ProviderId[]) {
@@ -2150,6 +2150,9 @@ async function installStableRepositoryLauncher(workspace: string, providers: rea
     await chmod(shellPath, 0o700);
     await writeFile(cmdPath, contents.windows, { mode: 0o600 });
   }
+  // The next setup or relay upgrade keeps these directories from this record, not from the working tree (K1).
+  const recordProviders = () => recordSetUpProviderDirectories({home: dharmaHome(), workspace, providerDirectory});
+  await (scope ? scope.step(recordProviders) : recordProviders());
   return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };
 }
 
@@ -2318,6 +2321,11 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       maintenance?'https://schemas.dharma-ai.io/local-signing-maintenance-upgrade/v1'
         :'https://schemas.dharma-ai.io/local-relay-upgrade/v1', receipt);
     if (!validation.ok) throw new Error('relay_upgrade_receipt_invalid');
+    // The launcher now carries these directories; the next setup or upgrade keeps them from this record (K1).
+    // A record that cannot be written leaves nothing kept next time; it never fails a completed upgrade.
+    if (!flags.has('rollback') && (receipt as {state?: unknown}).state === 'completed') {
+      await recordSetUpProviderDirectories({home, workspace, providerDirectory}).catch(() => {});
+    }
     return receipt;
   });
 }
