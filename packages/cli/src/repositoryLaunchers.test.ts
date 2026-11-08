@@ -384,7 +384,7 @@ test('Linux launcher carries the bin directory of every set-up provider, the fir
   assert.throws(() => launchers.stableRepositoryLauncherContents('0.2.224', {...runtime, providerDirectory: []}),
     /relay_startup_provider_path_invalid/);
   assert.equal(typeof launchers.providerDirectoriesInPathOrder, 'function');
-  assert.deepEqual(launchers.providerDirectoriesInPathOrder(['/b', undefined, '/a', '/b'], '/x:/a:/b'), ['/a', '/b'],
+  assert.deepEqual(await launchers.providerDirectoriesInPathOrder(['/b', undefined, '/a', '/b'], '/x:/a:/b'), ['/a', '/b'],
     'directories keep the order of the PATH each provider was resolved from');
 });
 
@@ -403,7 +403,7 @@ test('actual Linux launcher with two set-up providers reaches both and verifies 
     await writeFile(join(codexDirectory, 'codex'), '#!/bin/sh\nprintf "own-codex"\n', {mode: 0o700});
     const searchPath = `${claudeDirectory}:${codexDirectory}`;
     const resolved = await Promise.all(['codex', 'claude'].map(provider => launchers.resolveRepositoryProviderDirectory({provider, searchPath})));
-    const providerDirectory = launchers.providerDirectoriesInPathOrder(resolved, searchPath);
+    const providerDirectory = await launchers.providerDirectoriesInPathOrder(resolved, searchPath);
     assert.deepEqual(providerDirectory, [claudeDirectory, codexDirectory]);
     const after = launchers.stableRepositoryLauncherContents('0.2.224', {platform: 'linux', nodeDirectory, npmCliPath, providerDirectory});
     await writeFile(join(root, 'after.sh'), after.shell);
@@ -666,4 +666,391 @@ test('relay and setup skip an unsearchable or file PATH entry ahead of claude, b
       assert.equal((await launchers.providerUnsafePathDiagnosis('codex', {searchPath: `${entry}:${bin}`}))?.path, entry, `status: codex after ${entry}`);
     }
   } finally {await chmod(closed, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review R1: setup and relay upgrade rewrote the launcher with only the bundle holders and the provider
+// set up, so a first agent whose shared package was still pending (no ACTIVE_BUNDLE) dropped off the relay PATH.
+// 0.2.223 always carried codex. The directories this device recorded for the launcher are kept while they still pass.
+test('setup keeps the protected provider directories it recorded for the launcher being replaced', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-current-launcher-')));
+  try {
+    const home = join(root, 'home'), workspace = join(root, 'repo');
+    const codexDirectory = join(root, 'npm-global', 'bin'), claudeDirectory = join(root, 'local', 'bin');
+    for (const directory of [home, workspace, codexDirectory, claudeDirectory]) await mkdir(directory, {recursive: true, mode: 0o700});
+    await writeFile(join(codexDirectory, 'codex'), '#!/bin/sh\nprintf "own-codex"\n', {mode: 0o700});
+    await writeFile(join(claudeDirectory, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
+    const read = () => launchers.protectedSetUpProviderDirectories({home, workspace});
+    const record = (providerDirectory: string[]) => launchers.recordSetUpProviderDirectories({home, workspace, providerDirectory});
+    await record([claudeDirectory, codexDirectory]);
+    assert.deepEqual(await read(), [{provider: 'claude', directory: claudeDirectory}, {provider: 'codex', directory: codexDirectory}]);
+    await record([]);
+    assert.deepEqual(await read(), [], 'no provider directory');
+    await record([claudeDirectory, codexDirectory]);
+    await chmod(join(codexDirectory, 'codex'), 0o722);
+    assert.deepEqual(await read(), [{provider: 'claude', directory: claudeDirectory}], 'a directory that no longer passes is dropped');
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review K1 (3x8=24): the directories to keep came from the launcher in the repository working tree, which
+// a repository author can commit, so a planted launcher naming <workspace>/tools with a tracked tools/claude put
+// repository code first on the relay PATH. Only directories this device recorded in its own state are kept, and never
+// one whose real path is inside the workspace.
+test('setup keeps only provider directories this device recorded, never one inside the workspace', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  assert.equal(typeof launchers.protectedSetUpProviderDirectories, 'function');
+  assert.equal(typeof launchers.recordSetUpProviderDirectories, 'function');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-set-up-providers-')));
+  try {
+    const home = join(root, 'home'), workspace = join(root, 'repo'), other = join(root, 'other-repo');
+    const tools = join(workspace, 'tools'), own = join(root, 'local', 'bin');
+    for (const directory of [home, other, own]) await mkdir(directory, {recursive: true, mode: 0o700});
+    await mkdir(tools, {recursive: true, mode: 0o755});
+    for (const [directory, provider, mode] of [[tools, 'claude', 0o755], [own, 'codex', 0o700]] as const) {
+      await writeFile(join(directory, provider), `#!/bin/sh
+printf "${provider}"
+`); await chmod(join(directory, provider), mode);
+    }
+    const link = join(root, 'tools-link'); await symlink(tools, link);
+    const planted = launchers.stableRepositoryLauncherContents('0.2.223', {platform: 'linux', nodeDirectory: '/usr/bin',
+      providerDirectory: ['/workspaces/repo/tools', '/home/ubuntu/repo/tools', tools]});
+    await mkdir(join(workspace, '.dharma', 'bin'), {recursive: true, mode: 0o755});
+    await writeFile(join(workspace, '.dharma', 'bin', 'dharma'), planted.shell, {mode: 0o755});
+    await writeFile(join(workspace, '.dharma', 'bin', 'dharma.cmd'), planted.windows, {mode: 0o644});
+    const read = (path = workspace) => launchers.protectedSetUpProviderDirectories({home, workspace: path, searchPath: ''});
+    const record = (directories: string[], path = workspace) =>
+      launchers.recordSetUpProviderDirectories({home, workspace: path, providerDirectory: directories});
+    assert.deepEqual(await read(), [], 'nothing recorded: the committed launcher is not read');
+    await record([tools, link, own]);
+    assert.deepEqual(await read(), [{provider: 'codex', directory: own}], 'a directory inside the workspace is never kept');
+    assert.deepEqual(await read(other), [], 'another workspace has its own record');
+    await record([own], other);
+    assert.deepEqual(await read(other), [{provider: 'codex', directory: own}]);
+    await chmod(join(own, 'codex'), 0o722);
+    assert.deepEqual(await read(), [], 'a recorded directory that no longer passes is dropped');
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review K1 regression (2x3=6): since K1, only this device's record kept a provider directory. A 0.2.223
+// device has no record, so when its codex held no installed bundle the first 0.2.224 setup of another agent, or a relay
+// upgrade from inside that agent, dropped codex from the launcher; 0.2.223 always carried the codex on the setup PATH.
+// With no record for the workspace, that codex is kept when it passes, and left off when absent, unsafe or inside the
+// workspace, never failing; the launcher in the working tree is still never read.
+test('with no record yet, the protected codex first on the setup PATH is kept, and an absent or unsafe one left off', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-unrecorded-codex-')));
+  try {
+    const home = join(root, 'home'), workspace = join(root, 'repo'), codexDirectory = join(root, 'npm-global', 'bin');
+    const tools = join(workspace, 'tools'), elsewhere = join(root, 'elsewhere', 'bin');
+    for (const directory of [home, codexDirectory, tools, elsewhere]) await mkdir(directory, {recursive: true, mode: 0o700});
+    for (const directory of [codexDirectory, tools, elsewhere]) {
+      await writeFile(join(directory, 'codex'), '#!/bin/sh\nprintf "codex"\n', {mode: 0o700});
+    }
+    // A 0.2.223-format launcher naming another codex directory: it is never read.
+    const prior = launchers.stableRepositoryLauncherContents('0.2.223', {platform: 'linux', nodeDirectory: '/usr/bin',
+      providerDirectory: elsewhere});
+    await mkdir(join(workspace, '.dharma', 'bin'), {recursive: true, mode: 0o700});
+    await writeFile(join(workspace, '.dharma', 'bin', 'dharma'), prior.shell, {mode: 0o700});
+    const read = (searchPath: string) => launchers.protectedSetUpProviderDirectories({home, workspace, searchPath});
+    assert.deepEqual(await read(`${codexDirectory}:${elsewhere}`), [{provider: 'codex', directory: codexDirectory}],
+      'the codex first on the setup PATH is kept');
+    assert.deepEqual(await read(''), [], 'no codex on PATH: nothing, and the working-tree launcher is not read');
+    assert.deepEqual(await read(`${tools}:${codexDirectory}`), [], 'a codex inside the workspace is never kept');
+    await chmod(join(codexDirectory, 'codex'), 0o722);
+    assert.deepEqual(await read(`${codexDirectory}:${elsewhere}`), [], 'an unsafe codex is left off, never an error');
+    await chmod(join(codexDirectory, 'codex'), 0o700);
+    await launchers.recordSetUpProviderDirectories({home, workspace, providerDirectory: []});
+    assert.deepEqual(await read(codexDirectory), [], 'once a record exists, it alone decides');
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review R6-1 (2x4=8): the launcher puts every provider directory ahead of the recorded Node directory, and
+// npm exec starts the CLI through env node. Since R2 and N1, a claude, agy or hermes directory could hold a node other
+// than the setup Node, which then ran the supervisor, relay and sessions, and codex bootstrap failed closed with
+// setup_runtime_process_unconfirmed. A directory whose sibling node is not the setup Node is left off the launcher;
+// the relay guard still runs that provider.
+test('a provider directory whose node is not the setup Node is left off the launcher, and the relay still runs it', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-foreign-node-')));
+  try {
+    const home = join(root, 'home'), workspace = join(root, 'repo'), bin = join(root, 'claude-bin');
+    for (const directory of [home, workspace, bin]) await mkdir(directory, {mode: 0o700});
+    await writeFile(join(bin, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
+    // A protected node of another version, as an older nvm version's bin directory or /usr/bin behind an nvm Node holds.
+    await writeFile(join(bin, 'node'), '#!/bin/sh\necho FAKE-NODE\n'); await chmod(join(bin, 'node'), 0o755);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), false, 'relay: the provider still runs');
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin}), null, 'status: nothing unsafe');
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}), undefined,
+      'setup: left off the launcher');
+    await launchers.recordSetUpProviderDirectories({home, workspace, providerDirectory: [bin]});
+    assert.deepEqual(await launchers.protectedSetUpProviderDirectories({home, workspace}), [], 'a recorded one is not kept');
+    // The setup Node beside claude, as in the nvm or fnm bin directory setup runs from, keeps the directory.
+    await rm(join(bin, 'node')); await copyFile(process.execPath, join(bin, 'node')); await chmod(join(bin, 'node'), 0o700);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}), bin, 'setup: the setup Node');
+    assert.deepEqual(await launchers.protectedSetUpProviderDirectories({home, workspace}), [{provider: 'claude', directory: bin}]);
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review R2: claude, agy and hermes were held to codex's launcher rules (the PATH entry is its own real
+// path; a node there hash-equals the running one), so fnm's per-shell bin directory, a symlink, was refused. The real
+// directory is checked and recorded instead; it is refused only when another user owns it or others can write to it.
+test('a non-codex provider in a symlinked fnm-style bin directory resolves to its protected real directory', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-fnm-provider-')));
+  try {
+    const installation = join(root, 'fnm', 'node-versions', 'v22', 'installation'), real = join(installation, 'bin');
+    await mkdir(real, {recursive: true, mode: 0o700});
+    await copyFile(process.execPath, join(real, 'node')); await chmod(join(real, 'node'), 0o700);
+    await writeFile(join(real, 'claude'), '#!/bin/sh\nprintf "fnm-claude"\n', {mode: 0o700});
+    await writeFile(join(real, 'codex'), '#!/bin/sh\nprintf "fnm-codex"\n', {mode: 0o700});
+    const multishell = join(root, 'fnm_multishells', '4242_1762560000000');
+    await mkdir(dirname(multishell), {mode: 0o700}); await symlink(installation, multishell);
+    const entry = join(multishell, 'bin');
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry}), real);
+    // The link and every directory on the way to it are this user's and closed to others, so the relay accepts it.
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry}), false);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: `${real}:${entry}`}), false);
+    const after = launchers.stableRepositoryLauncherContents('0.2.224', {platform: 'linux', nodeDirectory: dirname(process.execPath),
+      providerDirectory: real});
+    assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after, 'claude'), true);
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: entry}),
+      /^Error: relay_startup_codex_path_invalid/, 'codex keeps the 0.2.223 rules');
+    await chmod(real, 0o777);
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry}),
+      /^Error: relay_startup_claude_path_invalid/, 'a world-writable real directory is refused');
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: real}), true);
+  } finally {await chmod(join(root, 'fnm', 'node-versions', 'v22', 'installation', 'bin'), 0o700).catch(() => {});
+    await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review round 2 (relay guard): the relay looks a provider the launcher does not carry up on PATH and runs
+// it through that PATH entry. A symlinked entry passed once its real directory was checked, but the link and the
+// directory holding it were not, so a link in a directory another user can write (fnm's /tmp/fnm_multishells made 0777
+// by someone else) could be repointed after the check. The relay keeps the 0.2.223 rule: the entry is its own real path.
+test('the relay refuses a symlinked provider PATH entry whose link another user can replace', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-relay-symlink-')));
+  const multishells = join(root, 'fnm_multishells');
+  try {
+    const installation = join(root, 'fnm', 'node-versions', 'v22', 'installation'), real = join(installation, 'bin');
+    await mkdir(real, {recursive: true, mode: 0o700});
+    await writeFile(join(real, 'agy'), '#!/bin/sh\nprintf "own-agy"\n', {mode: 0o700});
+    await mkdir(multishells, {mode: 0o700}); await chmod(multishells, 0o777);
+    const link = join(multishells, '4242_1762560000000'); await symlink(installation, link);
+    const entry = join(link, 'bin');
+    assert.equal(await launchers.providerFirstOnPathUnsafe('agy', {searchPath: entry}), true,
+      'the link sits in a directory others can write');
+    assert.equal((await launchers.providerUnsafePathDiagnosis('agy', {searchPath: entry}))?.path, multishells,
+      '`dharma status` names the directory that lets others repoint the entry (CLI 0.2.224 R2b)');
+    assert.equal(await launchers.providerFirstOnPathUnsafe('agy', {searchPath: `${real}:${entry}`}), false,
+      'the protected real directory first on PATH, as the launcher writes it, passes');
+    assert.equal(await launchers.providerUnsafePathDiagnosis('agy', {searchPath: `${real}:${entry}`}), null);
+  } finally {await chmod(multishells, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review R2b: the relay refused every symlinked PATH entry, so a protected one, such as a bin directory
+// that is a link owned by this user or root in directories only they can write, stopped a claude 0.2.223 ran. A link
+// is accepted when the link and every directory passed on the way to it and to its target are owned by this user or
+// root and closed to others, so no one else can repoint it after the check. codex keeps the 0.2.223 real-path rule.
+test('the relay accepts a symlinked provider entry only when no other user can repoint it', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-relay-protected-link-')));
+  const opened: string[] = [];
+  try {
+    // This user's primary group is not private to them here, so a group write bit counts as another user's.
+    const user = userInfo().username, uid = process.getuid!(), gid = process.getgid!();
+    await writeFile(join(root, 'group'), 'root:x:0:\nother:x:1:\n');
+    await writeFile(join(root, 'passwd'), `root:x:0:0:root:/root:/bin/sh\n${user}:x:${uid}:${gid}::${root}:/bin/sh\n`);
+    const accounts = {group: join(root, 'group'), passwd: join(root, 'passwd')};
+    const unsafe = (provider: string, searchPath: string) => launchers.providerFirstOnPathUnsafe(provider, {searchPath, accounts});
+    const real = join(root, 'opt', 'claude', 'bin');
+    await mkdir(real, {recursive: true, mode: 0o700});
+    for (const provider of ['claude', 'codex']) await writeFile(join(real, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+    const links = join(root, 'links'); await mkdir(links, {mode: 0o700});
+    const bin = join(links, 'bin'); await symlink(join('..', 'opt', 'claude', 'bin'), bin);
+    assert.equal(await unsafe('claude', bin), false, 'a protected linked bin directory');
+    assert.equal(await unsafe('codex', bin), true, 'codex keeps the 0.2.223 rule');
+    const installation = join(root, 'fnm', 'node-versions', 'v22', 'installation');
+    await mkdir(join(installation, 'bin'), {recursive: true, mode: 0o700});
+    await writeFile(join(installation, 'bin', 'claude'), '#!/bin/sh\nprintf "fnm-claude"\n', {mode: 0o700});
+    const multishells = join(root, 'fnm_multishells'); await mkdir(multishells, {mode: 0o700});
+    const entry = join(multishells, '4242_1762560000000', 'bin'); await symlink(installation, dirname(entry));
+    assert.equal(await unsafe('claude', entry), false, 'fnm multishell link, closed parents');
+    for (const [directory, mode, why] of [[multishells, 0o777, 'link in a world-writable directory'],
+      [multishells, 0o770, 'link in a group-writable directory'], [root, 0o777, 'a world-writable directory above the link'],
+      [links, 0o777, 'linked bin directory in a world-writable directory'],
+      [join(root, 'opt'), 0o777, 'a world-writable directory the link target passes']] as const) {
+      opened.push(directory); await chmod(directory, mode);
+      const searchPath = directory === links || directory === join(root, 'opt') ? bin : entry;
+      assert.equal(await unsafe('claude', searchPath), true, why);
+      await chmod(directory, 0o700);
+    }
+    // The existing diagnosis names the directory that lets another user repoint the link.
+    await chmod(multishells, 0o777);
+    const diagnosis = await launchers.providerUnsafePathDiagnosis('claude', {searchPath: entry, accounts});
+    assert.equal(diagnosis?.path, multishells);
+    assert.ok(diagnosis?.remedy.includes(`chmod go-w '${multishells}'`), diagnosis?.remedy);
+    await chmod(multishells, 0o700);
+  } finally {for (const directory of opened) await chmod(directory, 0o700).catch(() => {});
+    await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review round 2 (ordering): the real directory of a symlinked entry ranked after every directory on PATH,
+// so a later PATH directory holding the codex that was set up and a leftover claude came first on the relay PATH, and
+// the relay ran a claude setup never checked. Each directory keeps the place of the PATH entry it was resolved from.
+test('the real directory of a symlinked entry keeps the place on PATH of the entry it was resolved from', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-order-')));
+  try {
+    const nodeDirectory = join(root, 'node'), npmDirectory = join(root, 'npm'), local = join(root, 'local', 'bin');
+    const installation = join(root, 'fnm', 'node-versions', 'v22', 'installation'), real = join(installation, 'bin');
+    for (const directory of [nodeDirectory, npmDirectory, local, real]) await mkdir(directory, {recursive: true, mode: 0o700});
+    await copyFile(process.execPath, join(nodeDirectory, 'node')); await chmod(join(nodeDirectory, 'node'), 0o700);
+    const npmCliPath = join(npmDirectory, 'bin', 'npm-cli.js'); await mkdir(dirname(npmCliPath), {mode: 0o700});
+    await writeFile(join(npmDirectory, 'package.json'), JSON.stringify({name: 'npm', bin: {npm: 'bin/npm-cli.js'}}), {mode: 0o600});
+    await writeFile(npmCliPath, "process.stdout.write(require('node:child_process').spawnSync('claude',[],{encoding:'utf8'}).stdout);", {mode: 0o600});
+    await writeFile(join(real, 'claude'), '#!/bin/sh\nprintf "fnm-claude"\n', {mode: 0o700});
+    await writeFile(join(local, 'codex'), '#!/bin/sh\nprintf "own-codex"\n', {mode: 0o700});
+    await writeFile(join(local, 'claude'), '#!/bin/sh\nprintf "leftover-claude"\n', {mode: 0o700});
+    const multishell = join(root, 'fnm_multishells', '4242_1762560000000');
+    await mkdir(dirname(multishell), {mode: 0o700}); await symlink(installation, multishell);
+    const searchPath = `${join(multishell, 'bin')}:${local}`;
+    const resolved: (string | undefined)[] = [];
+    for (const provider of ['codex', 'claude']) resolved.push(await launchers.resolveRepositoryProviderDirectory({provider, searchPath}));
+    assert.deepEqual(resolved, [local, real]);
+    const providerDirectory = await launchers.providerDirectoriesInPathOrder(resolved, searchPath);
+    assert.deepEqual(providerDirectory, [real, local], 'claude keeps the first place its fnm entry has on PATH');
+    const after = launchers.stableRepositoryLauncherContents('0.2.224', {platform: 'linux', nodeDirectory, npmCliPath, providerDirectory});
+    await writeFile(join(root, 'after.sh'), after.shell);
+    const {stdout} = await promisify(execFile)('/bin/sh', [join(root, 'after.sh')], {env: {PATH: join(root, 'absent'), HOME: root}});
+    assert.equal(stdout, 'fnm-claude', 'the relay runs the claude setup checked');
+    const kept = join(root, 'kept', 'bin');
+    assert.deepEqual(await launchers.providerDirectoriesInPathOrder([kept, real, local], searchPath), [real, local, kept],
+      'a kept directory no PATH entry reaches follows');
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review F1 (2x8=16): the provider executable's own link chain was resolved with plain realpath and only
+// the final directory was checked, so a link on the way to the executable that sat in a directory another user can
+// write (bin/claude -> shared/claude -> real/claude, shared 0777) passed, and could be repointed after the check while
+// the relay runs the provider by name through PATH. codex's sibling node had the same gap. The executable, and codex's
+// node, are now resolved with the same component walk as the PATH entry, by both relay and setup.
+test('relay and setup refuse a provider executable whose link chain passes a directory others can write', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-link-chain-')));
+  const shared = join(root, 'shared');
+  try {
+    const bin = join(root, 'bin'), real = join(root, 'real');
+    for (const directory of [bin, real, shared]) await mkdir(directory, {mode: 0o700});
+    for (const provider of ['claude', 'codex']) {
+      await writeFile(join(real, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+      await symlink(join(real, provider), join(shared, provider));
+      await symlink(join('..', 'shared', provider), join(bin, provider));
+    }
+    await copyFile(process.execPath, join(real, 'node')); await chmod(join(real, 'node'), 0o700);
+    await symlink(join(real, 'node'), join(shared, 'node'));
+    const codexBin = join(root, 'codex-bin'); await mkdir(codexBin, {mode: 0o700});
+    await writeFile(join(codexBin, 'codex'), '#!/bin/sh\nprintf "own-codex"\n', {mode: 0o700});
+    await symlink(join('..', 'shared', 'node'), join(codexBin, 'node'));
+    // N1: a node beside claude is the env-node a node-script claude runs with, since the launcher and the relay put the
+    // provider directory before the recorded Node directory on PATH. Its link chain is checked as codex's node is.
+    const claudeBin = join(root, 'claude-bin'); await mkdir(claudeBin, {mode: 0o700});
+    await writeFile(join(claudeBin, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
+    await symlink(join('..', 'shared', 'node'), join(claudeBin, 'node'));
+    // Every link and directory on the way is this user's and closed to others: all pass.
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), false);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}), bin);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: codexBin}), codexBin);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: claudeBin}), false);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: claudeBin}), claudeBin);
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: claudeBin}), null);
+    await chmod(shared, 0o777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), true, 'relay: link in a 0777 directory');
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}),
+      /^Error: relay_startup_claude_path_invalid/, 'setup: claude link in a 0777 directory');
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: codexBin}),
+      /^Error: relay_startup_codex_path_invalid/, "setup: codex's node link in a 0777 directory");
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: claudeBin}), true,
+      "relay: claude's node link in a 0777 directory (N1)");
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: claudeBin}),
+      /^Error: relay_startup_claude_path_invalid/, "setup: claude's node link in a 0777 directory (N1)");
+    assert.equal((await launchers.providerUnsafePathDiagnosis('claude', {searchPath: claudeBin}))?.path, shared,
+      "status names the directory that lets others repoint claude's node (N1)");
+  } finally {await chmod(shared, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review N1b (2x4=8): the N1 check refused claude, agy and hermes when the node beside them was a dangling
+// link (~/.local/bin/node to a removed nvm version, beside the native claude) or a file without an exec bit, although
+// execvp skips such an entry and 0.2.223 ran that claude: relay provider_unsafe_path, setup
+// relay_startup_claude_path_invalid. A node that is missing from a directory no other user can write, or that no one
+// can run, is now treated as absent for those providers. codex keeps the 0.2.223 rule, and a node that others could
+// create or repoint stays refused.
+test('relay and setup accept a claude whose sibling node is a dangling link or not executable', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-absent-node-')));
+  const open = join(root, 'open');
+  try {
+    const versions = join(root, 'nvm', 'versions', 'node'), versionBin = join(versions, 'v18', 'bin');
+    await mkdir(versionBin, {recursive: true, mode: 0o700});
+    await mkdir(open, {mode: 0o700});
+    const providerBin = async (name: string, provider: string, node: (bin: string) => Promise<void>) => {
+      const bin = join(root, name); await mkdir(bin, {mode: 0o700});
+      await writeFile(join(bin, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+      await node(bin);
+      return bin;
+    };
+    // The link's target, and for nvm the whole version directory, is gone from directories closed to others.
+    const missingFile = await providerBin('missing-file', 'claude', bin => symlink(join(versionBin, 'node'), join(bin, 'node')));
+    const removedVersion = await providerBin('removed-version', 'claude',
+      bin => symlink(join(versions, 'v16', 'bin', 'node'), join(bin, 'node')));
+    const plainFile = await providerBin('plain-file', 'claude', bin => writeFile(join(bin, 'node'), '#!/bin/sh\n', {mode: 0o644}));
+    for (const bin of [missingFile, removedVersion, plainFile]) {
+      const name = relative(root, bin);
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), false, `relay: ${name}`);
+      assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}), bin, `setup: ${name}`);
+      assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin}), null, `status: ${name}`);
+    }
+    // codex's node is held to the launcher's Node, as in 0.2.223: a dangling or non-executable one stays refused.
+    for (const [name, node] of [['codex-missing', (bin: string) => symlink(join(versionBin, 'node'), join(bin, 'node'))],
+      ['codex-plain', (bin: string) => writeFile(join(bin, 'node'), '#!/bin/sh\n', {mode: 0o644})]] as const) {
+      const bin = await providerBin(name, 'codex', node);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: bin}),
+        /^Error: relay_startup_codex_path_invalid/, `setup: ${name}`);
+    }
+    // A missing node that another user could create, in a directory they can write, stays refused and is named.
+    const openTarget = await providerBin('open-target', 'claude', bin => symlink(join(open, 'node'), join(bin, 'node')));
+    await chmod(open, 0o777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: openTarget}), true, 'relay: node missing from a 0777 directory');
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: openTarget}),
+      /^Error: relay_startup_claude_path_invalid/, 'setup: node missing from a 0777 directory');
+    assert.equal((await launchers.providerUnsafePathDiagnosis('claude', {searchPath: openTarget}))?.path, open,
+      'status names the directory where others could create the node');
+  } finally {await chmod(open, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review R424-1 (2x4=8): an absolute PATH entry the shell resolves fine but written with a trailing '/',
+// a doubled '/' or a '.' part ('dir/', '//dir', '/./dir') made the provider check throw, so the relay refused claude,
+// agy and hermes (provider_unsafe_path) and setup refused them (relay_startup_claude_path_invalid). Each absolute
+// entry is now checked, and recorded, in its normal form. Relative entries, and '..' parts, which the kernel resolves
+// after links, stay refused.
+test('relay and setup accept a provider PATH entry written with a trailing or doubled slash', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-entry-form-')));
+  try {
+    const bin = join(root, 'bin'); await mkdir(bin, {mode: 0o700});
+    for (const provider of ['claude', 'codex']) await writeFile(join(bin, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+    for (const entry of [`${bin}/`, `/${bin}`, `${root}/./bin`, `${bin}//`]) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry}), false, `relay: ${entry}`);
+      assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: entry}), null, `status: ${entry}`);
+      for (const provider of ['claude', 'codex']) {
+        assert.equal(await launchers.resolveRepositoryProviderDirectory({provider, searchPath: entry}), bin, `setup ${provider}: ${entry}`);
+      }
+    }
+    for (const entry of [relative(process.cwd(), bin), `${bin}/../bin`]) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry}), true, `relay: ${entry}`);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry}),
+        /^Error: relay_startup_claude_path_invalid/, `setup: ${entry}`);
+      assert.notEqual(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: entry}), null, `status: ${entry}`);
+    }
+  } finally {await rm(root, {recursive: true, force: true});}
 });

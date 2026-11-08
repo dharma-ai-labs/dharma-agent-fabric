@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory, providerDirectoriesInPathOrder } from './repositoryLaunchers.js';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory, providerDirectoriesInPathOrder, protectedSetUpProviderDirectories, recordSetUpProviderDirectories } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -2095,6 +2095,15 @@ export function stableRepositoryLauncherContents(version = VERSION,
   return repositoryLauncherContents(version, runtime);
 }
 
+/**
+ * The protected provider directories this device recorded on the workspace's launcher. With no record yet, as on a
+ * 0.2.223 device, the protected codex first on `searchPath`, which 0.2.223 always carried; left off when absent or
+ * unsafe. Never read from the launcher in the working tree, which the repository can commit (CLI 0.2.224 review K1).
+ */
+async function currentLauncherProviders(workspace: string, searchPath: string | undefined) {
+  return protectedSetUpProviderDirectories({home: dharmaHome(), workspace, searchPath});
+}
+
 async function installStableRepositoryLauncher(workspace: string, providers: readonly ProviderId[]) {
   const scope = currentBootstrapHostScope();
   const launcherRoot = resolve(workspace, '.dharma', 'bin');
@@ -2117,7 +2126,11 @@ async function installStableRepositoryLauncher(workspace: string, providers: rea
     resolved.push(await (scope ? scope.step(() => resolveRepositoryProviderDirectory({provider, searchPath}))
       : resolveRepositoryProviderDirectory({provider, searchPath})));
   }
-  const providerDirectory = providerDirectoriesInPathOrder(resolved, searchPath);
+  // Keep each protected provider directory the launcher being replaced carries, so setting up another agent never
+  // drops one whose shared package is still pending (CLI 0.2.224 review R1).
+  const kept = await (scope ? scope.step(() => currentLauncherProviders(workspace, searchPath))
+    : currentLauncherProviders(workspace, searchPath));
+  const providerDirectory = await providerDirectoriesInPathOrder([...resolved, ...kept.map(item => item.directory)], searchPath);
   const contents = stableRepositoryLauncherContents(VERSION,
     { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
       ...(providerDirectory.length ? {providerDirectory} : {}) });
@@ -2143,6 +2156,9 @@ async function installStableRepositoryLauncher(workspace: string, providers: rea
     await chmod(shellPath, 0o700);
     await writeFile(cmdPath, contents.windows, { mode: 0o600 });
   }
+  // The next setup or relay upgrade keeps these directories from this record, not from the working tree (K1).
+  const recordProviders = () => recordSetUpProviderDirectories({home: dharmaHome(), workspace, providerDirectory});
+  await (scope ? scope.step(recordProviders) : recordProviders());
   return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };
 }
 
@@ -2194,14 +2210,28 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     // A holder never displaces the calling agent (PR #425 review round 5).
     const requested = parseSelectedProviderIds(typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : [])?.[0];
     const provider = requested ?? providerHintFromEnvironment() ?? 'codex';
-    const launcherProviders = [...new Set([...await protectedBundleHolders(selected), provider])];
-    // The launcher carries the bin directory of each of these providers.
+    const holders = await protectedBundleHolders(selected);
+    let launcherProviders: ProviderId[] = [...new Set([...holders, provider])];
+    // The launcher carries the bin directory of each of these providers, and keeps each protected one the current
+    // launcher carries, so an agent whose shared package is still pending stays on the relay PATH (CLI 0.2.224 R1).
     const searchPath = providerProcessEnvironment(process.env).PATH;
     const resolved: (string | undefined)[] = [];
     if (!flags.has('rollback')) {
-      for (const item of launcherProviders) resolved.push(await resolveRepositoryProviderDirectory({provider: item, searchPath}));
+      for (const item of launcherProviders) {
+        // A provider only guessed from the environment that fails the check is left off; it never fails the upgrade
+        // (CLI 0.2.224 review R2). A --provider the user named still does.
+        const guessed = item === provider && requested === undefined && !holders.includes(item);
+        try {resolved.push(await resolveRepositoryProviderDirectory({provider: item, searchPath}));}
+        catch (error) {
+          if (!guessed) throw error;
+          launcherProviders = launcherProviders.filter(entry => entry !== item);
+        }
+      }
+      const kept = await currentLauncherProviders(workspace, searchPath);
+      resolved.push(...kept.map(item => item.directory));
+      launcherProviders = [...new Set([...launcherProviders, ...kept.map(item => item.provider)])];
     }
-    const providerDirectory = providerDirectoriesInPathOrder(resolved, searchPath);
+    const providerDirectory = await providerDirectoriesInPathOrder(resolved, searchPath);
     const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
     const receipt = await upgrade({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
@@ -2297,6 +2327,11 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       maintenance?'https://schemas.dharma-ai.io/local-signing-maintenance-upgrade/v1'
         :'https://schemas.dharma-ai.io/local-relay-upgrade/v1', receipt);
     if (!validation.ok) throw new Error('relay_upgrade_receipt_invalid');
+    // The launcher now carries these directories; the next setup or upgrade keeps them from this record (K1).
+    // A record that cannot be written leaves nothing kept next time; it never fails a completed upgrade.
+    if (!flags.has('rollback') && (receipt as {state?: unknown}).state === 'completed') {
+      await recordSetUpProviderDirectories({home, workspace, providerDirectory}).catch(() => {});
+    }
     return receipt;
   });
 }

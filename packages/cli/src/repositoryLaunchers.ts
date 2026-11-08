@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, readdir, readFile, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, readlink, realpath, rename, writeFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, join, posix, win32 } from 'node:path';
 import { promisify } from 'node:util';
@@ -18,11 +18,26 @@ const unsafeProviderOnPath = (provider: ProviderCommand) => `relay_startup_${pro
   + `belongs to another user or is not protected. Put your own ${provider} first on PATH, or remove the other one from PATH.`
   + ` If you set up another provider, pass --provider <${PROVIDER_COMMANDS.join('|')}>.`;
 
-/** The resolved provider bin directories, once each, in the order of the PATH they were resolved from. */
-export function providerDirectoriesInPathOrder(directories: readonly (string | undefined)[], searchPath: string | undefined): string[] {
+/**
+ * The resolved provider bin directories, once each, in the order of the PATH they were resolved from. A symlinked
+ * entry's real directory takes that entry's place, so each provider stays first on PATH where setup found it (CLI
+ * 0.2.224 review round 2). One no PATH entry reaches, kept from the launcher being replaced, follows in the given order.
+ */
+export async function providerDirectoriesInPathOrder(directories: readonly (string | undefined)[],
+  searchPath: string | undefined): Promise<string[]> {
   const order = (searchPath ?? '').split(':');
-  return [...new Set(directories.filter((directory): directory is string => directory !== undefined))]
-    .sort((left, right) => order.indexOf(left) - order.indexOf(right));
+  const unique = [...new Set(directories.filter((directory): directory is string => directory !== undefined))];
+  let real: (string | undefined)[] | undefined;
+  const rank = new Map<string, number>();
+  for (const directory of unique) {
+    let index = order.indexOf(directory);
+    if (index < 0) {
+      real ??= await Promise.all(order.map(entry => posix.isAbsolute(entry) ? realpath(entry).catch(() => undefined) : undefined));
+      index = real.indexOf(directory);
+    }
+    rank.set(directory, index < 0 ? order.length : index);
+  }
+  return unique.sort((left, right) => rank.get(left)! - rank.get(right)!);
 }
 
 function providerDirectoryPath(value: string) {
@@ -214,6 +229,13 @@ async function ownPrivateGroups(accounts: AccountFiles = {}): Promise<PrivateGro
   return found;
 }
 
+// A path that ends at a name missing from a directory no other user can write: no one else can create it, so it stays
+// missing as execvp sees it (CLI 0.2.224 review N1b).
+class AbsentEntry extends Error {}
+
+// A provider directory whose sibling node is not the launcher's Node: it stays off the launcher (CLI 0.2.224 review R6-1).
+class ForeignSiblingNode extends Error {}
+
 // Names the entry a provider check refused, so `dharma status` can say which one and how to fix it.
 class UnsafeProviderEntry extends Error {
   constructor(readonly path: string, readonly writable: boolean, readonly group?: number) {
@@ -256,15 +278,64 @@ async function protectParents(path: string, privateGroups: PrivateGroups) {
   }
 }
 
+// Resolves an absolute path as realpath does, one component at a time. Every link followed and every directory passed
+// on the way, through link targets too, is owned by this user or root, and every such directory is closed to others
+// (a root-owned sticky directory above the end excepted), so no other user can repoint the path after the check. A
+// link's own mode is not checked: Linux ignores it. Protected links, such as a linked bin directory or fnm's per-shell
+// directory in the user's own state directory, pass; a link in a directory others can write does not (CLI 0.2.224 R2b).
+// With `file`, the path may end in a regular file, such as a provider executable, whose own checks follow (F1). A name
+// missing on the way throws AbsentEntry when its directory is closed to others, with no sticky exemption, and names
+// that directory as unsafe when it is not (N1b).
+async function protectedPathResolution(path: string, privateGroups: PrivateGroups, file = false) {
+  providerDirectoryPath(path);
+  const pending = path.split('/').filter(Boolean);
+  let resolved = '/', links = 0;
+  const protectedDirectory = async (directory: string, end: boolean) => {
+    const stat = await lstat(directory);
+    if (!stat.isDirectory()) throw new UnsafeProviderEntry(directory, false);
+    await protectedEntry(directory, stat, privateGroups, !end && stat.uid === 0 && (stat.mode & 0o1000) !== 0);
+  };
+  await protectedDirectory(resolved, !pending.length);
+  while (pending.length) {
+    const name = pending.shift()!;
+    if (name === '.') continue;
+    if (name === '..') {resolved = posix.dirname(resolved); continue;}
+    const next = posix.join(resolved, name);
+    let stat;
+    try {stat = await lstat(next);} catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await protectedEntry(resolved, await lstat(resolved), privateGroups);
+      throw new AbsentEntry();
+    }
+    if (stat.isSymbolicLink()) {
+      await protectedEntry(next, stat, privateGroups, true);
+      if (++links > 40) throw Error();
+      const target = await readlink(next);
+      if (target.startsWith('/')) resolved = '/';
+      pending.unshift(...target.split('/').filter(Boolean));
+      continue;
+    }
+    if (file && !pending.length && stat.isFile()) return next;
+    await protectedDirectory(next, !pending.length);
+    resolved = next;
+  }
+  return resolved;
+}
+
 // The provider bin directory and the executable it resolves to are owned by this user or root, and neither they
-// nor their parents can be written by anyone else; the user's own private group is not anyone else.
+// nor their parents can be written by anyone else; the user's own private group is not anyone else. A codex PATH
+// entry must be its own real path, as in 0.2.223. Another provider's entry may be a symlink, as fnm's per-shell bin
+// directory is: its real directory is checked and is the one the launcher records (CLI 0.2.224 review R2). The relay
+// and the launcher run the provider by name, so the kernel follows the executable's own link chain again at launch:
+// every link and directory on it is checked as well (F1).
 async function protectedProviderExecutable(directory: string, provider: ProviderCommand, privateGroups: PrivateGroups) {
   providerDirectoryPath(directory);
-  if (await realpath(directory) !== directory) throw Error();
-  await protectParents(directory, privateGroups);
-  const executable = await realpath(join(directory, provider));
+  const real = await realpath(directory);
+  if (real !== directory && (provider === 'codex' || providerDirectoryPath(real) !== real)) throw Error();
+  await protectParents(real, privateGroups);
+  const executable = await protectedPathResolution(join(real, provider), privateGroups, true);
   await protectParents(dirname(executable), privateGroups);
-  return executable;
+  return {directory: real, executable};
 }
 
 async function protectedExecutableFile(executable: string, privateGroups: PrivateGroups) {
@@ -273,24 +344,47 @@ async function protectedExecutableFile(executable: string, privateGroups: Privat
   await protectedEntry(executable, stat, privateGroups);
 }
 
-async function protectedProviderDirectory(directory: string, provider: ProviderCommand, nodePath: string,
+// The node beside a provider is the env-node a node-script provider, and npm's CLI child, run with: the launcher and
+// the relay put the provider directory before the recorded Node directory on PATH. When there is one, its own link
+// chain and file are checked as the provider executable's are, for every provider (CLI 0.2.224 review N1). Beside a
+// provider other than codex, a node that execvp skips, a link to a name missing from directories closed to others or
+// a protected file without an exec bit, counts as absent, as before 0.2.224; codex keeps the 0.2.223 rule and refuses
+// it (N1b).
+async function protectedSiblingNode(directory: string, provider: ProviderCommand, privateGroups: PrivateGroups) {
+  try {await lstat(join(directory, 'node'));} catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  let selected: string;
+  try {selected = await protectedPathResolution(join(directory, 'node'), privateGroups, true);} catch (error) {
+    if (provider !== 'codex' && error instanceof AbsentEntry) return undefined;
+    throw error;
+  }
+  await protectParents(dirname(selected), privateGroups);
+  await protectedExecutableFile(selected, privateGroups);
+  if (!((await lstat(selected)).mode & 0o111)) {
+    if (provider !== 'codex') return undefined;
+    throw Error();
+  }
+  return selected;
+}
+
+async function protectedProviderDirectory(path: string, provider: ProviderCommand, nodePath: string,
   privateGroups: PrivateGroups) {
-  const executable = await protectedProviderExecutable(directory, provider, privateGroups);
+  const {directory, executable} = await protectedProviderExecutable(path, provider, privateGroups);
   if (provider === 'codex') await protectedBinaryHash(executable, 'linux');
   // A native Claude binary can exceed the hashing bound; its ownership and mode are what protect it.
   else await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
-  let hasNode = true;
-  try {await lstat(join(directory, 'node'));} catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    hasNode = false;
-  }
-  // npm's CLI child uses env-node; provider priority must not replace its runtime.
-  if (hasNode) {
-    const selectedNode = await realpath(join(directory, 'node'));
-    await protectParents(dirname(selectedNode), privateGroups);
-    if (!((await lstat(selectedNode)).mode & 0o111)
-      || await protectedBinaryHash(selectedNode, 'linux') !== await protectedBinaryHash(nodePath, 'linux')) throw Error();
+  const selectedNode = await protectedSiblingNode(directory, provider, privateGroups);
+  // The launcher puts every provider directory before the recorded Node directory, and npm exec starts the CLI
+  // through env-node, so a node beside any provider must be the launcher's own Node: provider priority must not replace
+  // its runtime, as in 0.2.223 for codex. Beside claude, agy or hermes, another node, such as an older nvm version's or
+  // /usr/bin's behind an nvm Node, leaves the directory off the launcher; the relay guard still runs that provider
+  // (CLI 0.2.224 review R6-1). fnm's or nvm's bin directory holding the setup Node passes (R2).
+  if (selectedNode !== undefined && await protectedBinaryHash(selectedNode, 'linux').catch(() => undefined)
+    !== await protectedBinaryHash(nodePath, 'linux')) {
+    throw provider === 'codex' ? Error() : new ForeignSiblingNode();
   }
   return directory;
 }
@@ -301,7 +395,18 @@ export async function resolveRepositoryProviderDirectory(options: {provider?: Pr
   const provider = options.provider ?? 'codex';
   const privateGroups = await ownPrivateGroups(options.accounts);
   return firstProviderOnPath(provider, options.searchPath,
-    directory => protectedProviderDirectory(directory, provider, process.execPath, privateGroups));
+    directory => protectedProviderDirectory(directory, provider, process.execPath, privateGroups).catch(error => {
+      if (error instanceof ForeignSiblingNode) return undefined;
+      throw error;
+    }));
+}
+
+// An absolute PATH entry in its normal form: a trailing '/', a doubled '/' or a '.' part, which the shell resolves the
+// same way, are dropped, so 'dir/', '//dir' and '/./dir' are checked, and recorded, as '/dir' (CLI 0.2.224 review
+// R424-1). A '..' part stays, since the kernel resolves it after links, and the checks refuse it as a relative entry.
+function normalPathEntry(entry: string) {
+  if (!entry.startsWith('/')) return entry;
+  return `/${entry.split('/').filter(part => part && part !== '.').join('/')}`;
 }
 
 // execvp moves past an entry that holds no such provider (ENOENT), that this user cannot search (EACCES) or that is not
@@ -314,8 +419,9 @@ function skippedPathEntry(provider: ProviderCommand, error: unknown) {
 
 async function firstProviderOnPath<T>(provider: ProviderCommand, searchPath: string | undefined,
   check: (directory: string) => Promise<T>): Promise<T | undefined> {
-  for (const directory of (searchPath ?? process.env.PATH ?? '').split(':')) {
-    if (!directory) continue;
+  for (const entry of (searchPath ?? process.env.PATH ?? '').split(':')) {
+    if (!entry) continue;
+    const directory = normalPathEntry(entry);
     // Probed as execvp finds it, at '<entry>/<provider>' resolved by the kernel: path.join drops a '..' part as text,
     // and so missed a provider reached through a link (CLI 0.2.224 review S1).
     try {await lstat(`${directory}/${provider}`);} catch (error) {
@@ -342,9 +448,13 @@ export async function providerFirstOnPathUnsafe(provider: ProviderCommand,
 }
 
 async function relayProviderExecutable(directory: string, provider: ProviderCommand, privateGroups: PrivateGroups) {
-  const executable = await protectedProviderExecutable(directory, provider, privateGroups);
+  // The relay runs the provider through this entry, so no other user may be able to repoint it after the check
+  // (CLI 0.2.224 review round 2). The launcher writes each set-up provider's real directory first on the relay PATH.
+  await protectedPathResolution(directory, privateGroups);
+  const {directory: real, executable} = await protectedProviderExecutable(directory, provider, privateGroups);
   await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
+  await protectedSiblingNode(real, provider, privateGroups);
 }
 
 /**
@@ -355,8 +465,9 @@ export async function providerUnsafePathDiagnosis(provider: ProviderCommand,
   options: {searchPath?: string; platform?: NodeJS.Platform; accounts?: AccountFiles} = {}): Promise<{path: string; remedy: string} | null> {
   if ((options.platform ?? process.platform) !== 'linux') return null;
   const privateGroups = await ownPrivateGroups(options.accounts);
-  for (const directory of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
-    if (!directory) continue;
+  for (const entry of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
+    if (!entry) continue;
+    const directory = normalPathEntry(entry);
     try {
       try {await lstat(`${directory}/${provider}`);} catch (error) {
         if (skippedPathEntry(provider, error)) continue;
@@ -379,14 +490,71 @@ export async function providerUnsafePathDiagnosis(provider: ProviderCommand,
   return null;
 }
 
-// A recorded launcher names only the directories. Verify each for one of the set-up providers; when none is known,
-// accept a directory once any provider command in it passes.
+// A recorded launcher names only the directories, each written as its real path. Verify each for one of the set-up
+// providers; when none is known, accept a directory once any provider command in it passes. Returns that command.
 async function protectedRecordedProviderDirectory(directory: string, providers: ProviderCommand | readonly ProviderCommand[] | undefined,
-  nodePath: string, privateGroups: PrivateGroups) {
+  nodePath: string, privateGroups: PrivateGroups): Promise<ProviderCommand> {
   for (const command of providers === undefined ? PROVIDER_COMMANDS : typeof providers === 'string' ? [providers] : providers) {
-    try {return await protectedProviderDirectory(directory, command, nodePath, privateGroups);} catch {}
+    try {if (await protectedProviderDirectory(directory, command, nodePath, privateGroups) === directory) return command;} catch {}
   }
   throw Error();
+}
+
+const SET_UP_PROVIDERS = 'dharma.repository-launcher-providers/v1';
+// This device's record of the provider directories it wrote on a workspace's launcher, in its own state directory.
+const setUpProvidersPath = (home: string, workspace: string) => join(home, 'relay', 'launcher-providers',
+  `${createHash('sha256').update(workspace).digest('hex').slice(0, 32)}.json`);
+
+/** Records the provider directories setup or relay upgrade wrote on the workspace's launcher. Linux only. */
+export async function recordSetUpProviderDirectories(options: {home: string; workspace: string;
+  providerDirectory: readonly string[]; platform?: NodeJS.Platform}) {
+  if ((options.platform ?? process.platform) !== 'linux') return;
+  const path = setUpProvidersPath(options.home, options.workspace);
+  await mkdir(dirname(path), {recursive: true, mode: 0o700});
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify({schema: SET_UP_PROVIDERS, workspace: options.workspace,
+    providerDirectory: [...options.providerDirectory]})}
+`, {mode: 0o600, flag: 'wx'});
+  await rename(temporary, path);
+}
+
+/**
+ * The provider directories this device recorded for the workspace's launcher that still pass setup's check today,
+ * each with the provider command it passes for. Setup and relay upgrade keep them, so an agent whose shared package is
+ * still pending stays on the relay PATH (CLI 0.2.224 review R1). They come from this user's own state, never from the
+ * launcher in the working tree, which anyone who writes to the repository can commit, and none whose real path is
+ * inside the workspace is kept (K1). With no record yet for the workspace, as on a 0.2.223 device, the codex first on
+ * the setup or upgrade `searchPath` is kept when it passes the check, as 0.2.223 always carried it, and left off when it
+ * is absent or unsafe (K1 regression). Linux only.
+ */
+export async function protectedSetUpProviderDirectories(options: {home: string; workspace: string; searchPath?: string;
+  platform?: NodeJS.Platform}): Promise<{provider: ProviderCommand; directory: string}[]> {
+  if ((options.platform ?? process.platform) !== 'linux') return [];
+  const workspaces = [options.workspace, await realpath(options.workspace).catch(() => options.workspace)];
+  const inside = (path: string) => workspaces.some(workspace => path === workspace || path.startsWith(`${workspace}/`));
+  let record: {schema?: unknown; workspace?: unknown; providerDirectory?: unknown};
+  try {
+    const path = setUpProvidersPath(options.home, options.workspace), stat = await lstat(path);
+    if (!stat.isFile() || stat.uid !== process.getuid!() || (stat.mode & 0o077) || stat.size > 65536) return [];
+    record = JSON.parse(await readFile(path, 'utf8')) ?? {};
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return [];
+    const directory = await resolveRepositoryProviderDirectory({provider: 'codex', searchPath: options.searchPath})
+      .catch(() => undefined);
+    return directory === undefined || inside(directory) || inside(await realpath(directory).catch(() => directory)) ? []
+      : [{provider: 'codex', directory}];
+  }
+  if (record.schema !== SET_UP_PROVIDERS || record.workspace !== options.workspace
+    || !Array.isArray(record.providerDirectory) || record.providerDirectory.length > 16) return [];
+  const kept: {provider: ProviderCommand; directory: string}[] = [];
+  const privateGroups = await ownPrivateGroups();
+  for (const directory of record.providerDirectory) {
+    try {
+      if (typeof directory !== 'string' || inside(providerDirectoryPath(directory)) || inside(await realpath(directory))) continue;
+      kept.push({provider: await protectedRecordedProviderDirectory(directory, undefined, process.execPath, privateGroups), directory});
+    } catch {}
+  }
+  return kept;
 }
 
 async function protectedBinaryHash(path: string, platform: NodeJS.Platform) {
