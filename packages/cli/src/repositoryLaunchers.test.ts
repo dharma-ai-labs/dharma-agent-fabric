@@ -622,8 +622,8 @@ test('a non-codex provider in a symlinked fnm-style bin directory resolves to it
     await mkdir(dirname(multishell), {mode: 0o700}); await symlink(installation, multishell);
     const entry = join(multishell, 'bin');
     assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry}), real);
-    // The relay keeps the 0.2.223 rule; the launcher puts the recorded real directory first on its PATH.
-    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry}), true);
+    // The link and every directory on the way to it are this user's and closed to others, so the relay accepts it.
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry}), false);
     assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: `${real}:${entry}`}), false);
     const after = launchers.stableRepositoryLauncherContents('0.2.224', {platform: 'linux', nodeDirectory: dirname(process.execPath),
       providerDirectory: real});
@@ -661,6 +661,53 @@ test('the relay refuses a symlinked provider PATH entry whose link another user 
       'the protected real directory first on PATH, as the launcher writes it, passes');
     assert.equal(await launchers.providerUnsafePathDiagnosis('agy', {searchPath: `${real}:${entry}`}), null);
   } finally {await chmod(multishells, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review R2b: the relay refused every symlinked PATH entry, so a protected one, such as a bin directory
+// that is a link owned by this user or root in directories only they can write, stopped a claude 0.2.223 ran. A link
+// is accepted when the link and every directory passed on the way to it and to its target are owned by this user or
+// root and closed to others, so no one else can repoint it after the check. codex keeps the 0.2.223 real-path rule.
+test('the relay accepts a symlinked provider entry only when no other user can repoint it', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-relay-protected-link-')));
+  const opened: string[] = [];
+  try {
+    // This user's primary group is not private to them here, so a group write bit counts as another user's.
+    const user = userInfo().username, uid = process.getuid!(), gid = process.getgid!();
+    await writeFile(join(root, 'group'), 'root:x:0:\nother:x:1:\n');
+    await writeFile(join(root, 'passwd'), `root:x:0:0:root:/root:/bin/sh\n${user}:x:${uid}:${gid}::${root}:/bin/sh\n`);
+    const accounts = {group: join(root, 'group'), passwd: join(root, 'passwd')};
+    const unsafe = (provider: string, searchPath: string) => launchers.providerFirstOnPathUnsafe(provider, {searchPath, accounts});
+    const real = join(root, 'opt', 'claude', 'bin');
+    await mkdir(real, {recursive: true, mode: 0o700});
+    for (const provider of ['claude', 'codex']) await writeFile(join(real, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+    const links = join(root, 'links'); await mkdir(links, {mode: 0o700});
+    const bin = join(links, 'bin'); await symlink(join('..', 'opt', 'claude', 'bin'), bin);
+    assert.equal(await unsafe('claude', bin), false, 'a protected linked bin directory');
+    assert.equal(await unsafe('codex', bin), true, 'codex keeps the 0.2.223 rule');
+    const installation = join(root, 'fnm', 'node-versions', 'v22', 'installation');
+    await mkdir(join(installation, 'bin'), {recursive: true, mode: 0o700});
+    await writeFile(join(installation, 'bin', 'claude'), '#!/bin/sh\nprintf "fnm-claude"\n', {mode: 0o700});
+    const multishells = join(root, 'fnm_multishells'); await mkdir(multishells, {mode: 0o700});
+    const entry = join(multishells, '4242_1762560000000', 'bin'); await symlink(installation, dirname(entry));
+    assert.equal(await unsafe('claude', entry), false, 'fnm multishell link, closed parents');
+    for (const [directory, mode, why] of [[multishells, 0o777, 'link in a world-writable directory'],
+      [multishells, 0o770, 'link in a group-writable directory'], [root, 0o777, 'a world-writable directory above the link'],
+      [links, 0o777, 'linked bin directory in a world-writable directory'],
+      [join(root, 'opt'), 0o777, 'a world-writable directory the link target passes']] as const) {
+      opened.push(directory); await chmod(directory, mode);
+      const searchPath = directory === links || directory === join(root, 'opt') ? bin : entry;
+      assert.equal(await unsafe('claude', searchPath), true, why);
+      await chmod(directory, 0o700);
+    }
+    // The existing diagnosis names the directory that lets another user repoint the link.
+    await chmod(multishells, 0o777);
+    const diagnosis = await launchers.providerUnsafePathDiagnosis('claude', {searchPath: entry, accounts});
+    assert.equal(diagnosis?.path, multishells);
+    assert.ok(diagnosis?.remedy.includes(`chmod go-w '${multishells}'`), diagnosis?.remedy);
+    await chmod(multishells, 0o700);
+  } finally {for (const directory of opened) await chmod(directory, 0o700).catch(() => {});
+    await rm(root, {recursive: true, force: true});}
 });
 
 // CLI 0.2.224 review round 2 (ordering): the real directory of a symlinked entry ranked after every directory on PATH,
