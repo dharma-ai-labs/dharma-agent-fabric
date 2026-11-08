@@ -695,6 +695,45 @@ test('the launcher being replaced names its protected provider directories, from
   } finally {await rm(root, {recursive: true, force: true});}
 });
 
+// CLI 0.2.224 review K1 (3x8=24): the directories to keep came from the launcher in the repository working tree, which
+// a repository author can commit, so a planted launcher naming <workspace>/tools with a tracked tools/claude put
+// repository code first on the relay PATH. Only directories this device recorded in its own state are kept, and never
+// one whose real path is inside the workspace.
+test('setup keeps only provider directories this device recorded, never one inside the workspace', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  assert.equal(typeof launchers.protectedSetUpProviderDirectories, 'function');
+  assert.equal(typeof launchers.recordSetUpProviderDirectories, 'function');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-set-up-providers-')));
+  try {
+    const home = join(root, 'home'), workspace = join(root, 'repo'), other = join(root, 'other-repo');
+    const tools = join(workspace, 'tools'), own = join(root, 'local', 'bin');
+    for (const directory of [home, other, own]) await mkdir(directory, {recursive: true, mode: 0o700});
+    await mkdir(tools, {recursive: true, mode: 0o755});
+    for (const [directory, provider, mode] of [[tools, 'claude', 0o755], [own, 'codex', 0o700]] as const) {
+      await writeFile(join(directory, provider), `#!/bin/sh
+printf "${provider}"
+`); await chmod(join(directory, provider), mode);
+    }
+    const link = join(root, 'tools-link'); await symlink(tools, link);
+    const planted = launchers.stableRepositoryLauncherContents('0.2.223', {platform: 'linux', nodeDirectory: '/usr/bin',
+      providerDirectory: ['/workspaces/repo/tools', '/home/ubuntu/repo/tools', tools]});
+    await mkdir(join(workspace, '.dharma', 'bin'), {recursive: true, mode: 0o755});
+    await writeFile(join(workspace, '.dharma', 'bin', 'dharma'), planted.shell, {mode: 0o755});
+    await writeFile(join(workspace, '.dharma', 'bin', 'dharma.cmd'), planted.windows, {mode: 0o644});
+    const read = (path = workspace) => launchers.protectedSetUpProviderDirectories({home, workspace: path});
+    const record = (directories: string[], path = workspace) =>
+      launchers.recordSetUpProviderDirectories({home, workspace: path, providerDirectory: directories});
+    assert.deepEqual(await read(), [], 'nothing recorded: the committed launcher is not read');
+    await record([tools, link, own]);
+    assert.deepEqual(await read(), [{provider: 'codex', directory: own}], 'a directory inside the workspace is never kept');
+    assert.deepEqual(await read(other), [], 'another workspace has its own record');
+    await record([own], other);
+    assert.deepEqual(await read(other), [{provider: 'codex', directory: own}]);
+    await chmod(join(own, 'codex'), 0o722);
+    assert.deepEqual(await read(), [], 'a recorded directory that no longer passes is dropped');
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
 // CLI 0.2.224 review R2: claude, agy and hermes were held to codex's launcher rules (the PATH entry is its own real
 // path; a node there hash-equals the running one), so fnm's per-shell bin directory, a symlink, was refused. The real
 // directory is checked and recorded instead; it is refused only when another user owns it or others can write to it.
