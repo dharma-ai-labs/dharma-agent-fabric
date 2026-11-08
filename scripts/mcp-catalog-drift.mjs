@@ -175,9 +175,15 @@ function schemaEvidence(schema) {
   }
 }
 
-export function referenceFromCatalog(catalog) {
+// Reference profiles. `chatgpt` is the catalog's chatgptProfile set: the only
+// tools the hosted server serves to the ChatGPT OAuth client (platform #1909).
+export const PROFILES = Object.freeze(['chatgpt']);
+
+export function referenceFromCatalog(catalog, { profile } = {}) {
+  if (profile !== undefined && !PROFILES.includes(profile)) throw new Error('unknown_profile');
+  const tools = Array.isArray(catalog?.tools) ? catalog.tools : [];
   return {
-    tools: (Array.isArray(catalog?.tools) ? catalog.tools : []).map(tool => ({
+    tools: (profile === 'chatgpt' ? tools.filter(tool => tool?.chatgptProfile === true) : tools).map(tool => ({
       name: tool.name, confirmation: tool.confirmation === true, outputSchema: tool.outputSchema === true,
       annotations: readAnnotations(tool.annotations)?.values ?? {},
     })),

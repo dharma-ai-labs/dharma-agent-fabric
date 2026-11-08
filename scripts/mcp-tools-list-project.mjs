@@ -5,16 +5,26 @@
 //     droppedToolKeys, droppedAnnotationKeys } }
 // or { schema, status: 'rejected', code } with a code from PROJECTION_CODES.
 // Input problems never throw; the only thrown error is a fixed internal
-// contract message. No file/network/process access and no provenance,
-// identity, version, observation, confirmation or consent is produced: the
+// contract message. The API has no file/network/process access and produces
+// no provenance, identity, version, observation, confirmation or consent: the
 // caller supplies those when it builds a manifest v1 snapshot.
+//
+// CLI, for a capture the caller made itself:
+//   node scripts/mcp-tools-list-project.mjs --stdin --identity <s> --version <s>
+//     < tools-list.json > server-snapshot.json
+// reads one raw tools/list RESULT on stdin and writes one manifest v1
+// `server` snapshot with the given identity and version and observed true.
+// A rejection or bad argument writes only its fixed code to stderr, exit 2.
 //
 // Tools keep only manifest v1 fields (name, title, description, annotations,
 // inputSchema, outputSchema) and known annotation keys; everything else is
 // dropped and only counted. Kept values are copied verbatim (order,
 // duplicates and opaque schema keywords preserved). This is not a secret
 // sanitizer: allowed documentation and schema text is retained.
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { types } from 'node:util';
 
 export const PROJECTION_SCHEMA = 'dharma.mcp-tools-list-projection/v1';
@@ -171,4 +181,45 @@ export function projectToolsListResult(result) {
   }
   if (!projectionContracts().output(output)) throw new Error('tools_list_projection_contract_invalid');
   return output;
+}
+
+const nonBlank = value => typeof value === 'string' && value.trim() !== '' && value.length <= 200;
+
+function cliArguments(args) {
+  const values = new Map();
+  let stdin = false;
+  for (let index = 0; index < args.length; index++) {
+    const flag = args[index];
+    if (flag === '--stdin' && !stdin) { stdin = true; continue; }
+    const value = args[++index];
+    if (!['--identity', '--version'].includes(flag) || values.has(flag) || !nonBlank(value) || value.startsWith('--')) return null;
+    values.set(flag, value);
+  }
+  return stdin && values.size === 2 ? { identity: values.get('--identity'), version: values.get('--version') } : null;
+}
+
+function readStdinResult() {
+  const bytes = readFileSync(0);
+  if (bytes.length > PROJECTION_LIMITS.maxInputBytes) return new Rejection('input_too_large');
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    return new Rejection('input_not_json');
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const fail = code => { process.stderr.write(`${code}\n`); process.exitCode = 2; };
+  const provenance = cliArguments(process.argv.slice(2));
+  if (provenance === null) fail('tools_list_project_arguments_invalid');
+  else {
+    const result = readStdinResult();
+    const projection = result instanceof Rejection ? { status: 'rejected', code: result.code } : projectToolsListResult(result);
+    if (projection.status !== 'ready') fail(projection.code);
+    else {
+      process.stdout.write(`${JSON.stringify({ boundary: 'server',
+        provenance: { observed: true, identity: provenance.identity, version: provenance.version },
+        tools: projection.tools })}\n`);
+    }
+  }
 }

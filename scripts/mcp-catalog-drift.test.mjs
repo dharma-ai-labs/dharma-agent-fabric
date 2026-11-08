@@ -409,7 +409,7 @@ test('reference derives from the actual catalog without hardcoded host inventory
 test('no-argument verifier keeps its exact existing output', () => {
   const child = spawnSync(process.execPath, [verifier], { cwd: root, encoding: 'utf8', timeout: 30_000 });
   assert.equal(child.status, 0, child.stderr);
-  assert.equal(child.stdout, '{"ok":true,"toolCount":30,"confirmationCount":14}\n');
+  assert.equal(child.stdout, '{"ok":true,"toolCount":65,"confirmationCount":38}\n');
 });
 
 test('verifier opt-in snapshot mode runs the comparator against the real catalog', () => {
@@ -439,4 +439,66 @@ test('verifier opt-in snapshot mode runs the comparator against the real catalog
       assert.doesNotMatch(bad.stdout, /"ok":true/);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// 393-F3: since platform #1909 a ChatGPT OAuth client is served only the
+// chatgptProfile tools, so its capture is compared against that profile.
+const realCatalog = () => JSON.parse(readFileSync(resolve(root, 'plugins/dharma-agent-fabric/openai-app/mcp-tool-catalog.json'), 'utf8'));
+const runVerifierArgs = (manifest, extraArgs) => {
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-drift-profile-'));
+  try {
+    const path = join(dir, 'manifest.json');
+    writeFileSync(path, JSON.stringify(manifest));
+    return spawnSync(process.execPath, [verifier, '--snapshot-manifest', path, ...extraArgs], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+};
+const chatgptCaptureManifest = () => {
+  const profile = new Set(realCatalog().tools.filter(tool => tool.chatgptProfile).map(tool => tool.name));
+  const manifest = catalogManifest();
+  for (const snapshot of manifest.snapshots) snapshot.tools = snapshot.tools.filter(tool => profile.has(tool.name));
+  return manifest;
+};
+
+test('393-F3: the chatgpt profile reference holds exactly the catalog chatgptProfile tools, in catalog order', () => {
+  const catalog = realCatalog();
+  const profile = catalog.tools.filter(tool => tool.chatgptProfile === true).map(tool => tool.name);
+  assert.equal(profile.length, 20);
+  assert.deepEqual(referenceFromCatalog(catalog, { profile: 'chatgpt' }).tools.map(tool => tool.name), profile);
+  assert.equal(referenceFromCatalog(catalog).tools.length, catalog.tools.length, 'no profile keeps the full reference');
+  assert.throws(() => referenceFromCatalog(catalog, { profile: 'gemini' }), /unknown_profile/);
+});
+
+test('393-F3: a 20-tool ChatGPT-client capture is compatible with --profile chatgpt and incompatible without it', () => {
+  const manifest = chatgptCaptureManifest();
+  const profiled = runVerifierArgs(manifest, ['--profile', 'chatgpt']);
+  assert.equal(profiled.status, 0, profiled.stderr);
+  const receipt = JSON.parse(profiled.stdout);
+  assert.equal(receipt.verdict, 'compatible');
+  assert.equal(receipt.referenceToolCount, 20);
+  const full = runVerifierArgs(manifest, []);
+  assert.equal(full.status, 1);
+  const fullReceipt = JSON.parse(full.stdout);
+  assert.equal(fullReceipt.verdict, 'incompatible');
+  assert.equal(fullReceipt.referenceToolCount, 65);
+  assert.ok(fullReceipt.boundaries.every(item => item.reasons.includes('missing_tools')));
+});
+
+test('393-F3: a 65-tool capture is incompatible with --profile chatgpt, so a leaking ChatGPT filter fails', () => {
+  const leaked = runVerifierArgs(catalogManifest(), ['--profile', 'chatgpt']);
+  assert.equal(leaked.status, 1);
+  const receipt = JSON.parse(leaked.stdout);
+  assert.equal(receipt.verdict, 'incompatible');
+  assert.ok(receipt.boundaries.every(item => item.reasons.includes('extra_tools')));
+  assert.ok(receipt.boundaries[0].extraTools.includes('fabric_remediation_merge_pr'));
+});
+
+test('393-F3: --profile accepts only chatgpt and only with --snapshot-manifest', () => {
+  for (const extraArgs of [['--profile', 'gemini'], ['--profile'], ['--profile', 'chatgpt', '--profile', 'chatgpt']]) {
+    const bad = runVerifierArgs(chatgptCaptureManifest(), extraArgs);
+    assert.equal(bad.status, 2, extraArgs.join(' '));
+    assert.equal(bad.stdout, '', extraArgs.join(' '));
+  }
+  const alone = spawnSync(process.execPath, [verifier, '--profile', 'chatgpt'], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(alone.status, 2);
+  assert.equal(alone.stdout, '');
 });

@@ -1,7 +1,9 @@
 // Regressions for the pure raw MCP tools/list RESULT projector. Offline only:
-// no SDK, server, subprocess, network or file output. Uses the existing
-// comparator, offline assembler and contracts unchanged.
+// no SDK, server, network or file output; the --stdin CLI runs as a node
+// subprocess. Uses the existing comparator, offline assembler and contracts
+// unchanged.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
@@ -385,4 +387,45 @@ test('ready projection does not waive the independent aggregate manifest byte bu
   const before = JSON.stringify(snapshots);
   assert.throws(() => assembleSnapshotManifest(expected, snapshots), { message: 'snapshot_assembly_too_large' });
   assert.equal(JSON.stringify(snapshots), before);
+});
+
+// 393-R6-1: the operator turns a saved raw tools/list result into a manifest
+// v1 server-boundary snapshot with one command. The caller supplies identity
+// and version; observed is true because the caller captured it.
+const CLI = resolve(root, 'scripts/mcp-tools-list-project.mjs');
+const runCli = (args, input) => spawnSync(process.execPath, [CLI, ...args], { input, encoding: 'utf8' });
+
+test('--stdin CLI writes a server-boundary snapshot of the projected tools', () => {
+  const raw = rawResult();
+  const run = runCli(['--stdin', '--identity', 'dharma-agent-fabric', '--version', 'v-test'], JSON.stringify(raw));
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stderr, '');
+  noPrivate(run.stdout);
+  const snapshot = JSON.parse(run.stdout);
+  assert.deepEqual(snapshot, { boundary: 'server',
+    provenance: { observed: true, identity: 'dharma-agent-fabric', version: 'v-test' },
+    tools: ready(projectToolsListResult(raw)).tools });
+  const manifest = JSON.parse(assembleSnapshotManifest({ identity: 'dharma-agent-fabric', version: 'v-test' }, [snapshot]));
+  assert.ok(contracts().manifest(manifest));
+});
+
+test('--stdin CLI fails closed with a fixed code and no output', () => {
+  const args = ['--stdin', '--identity', 'dharma-agent-fabric', '--version', 'v-test'];
+  for (const [input, code] of [
+    [JSON.stringify({ jsonrpc: '2.0', id: 1, result: rawResult() }), 'envelope_not_result'],
+    [JSON.stringify({ tools: [], nextCursor: 'c' }), 'incomplete_pagination'],
+    ['{"tools": [', 'input_not_json'],
+  ]) {
+    const run = runCli(args, input);
+    assert.equal(run.status, 2);
+    assert.equal(run.stdout, '');
+    assert.equal(run.stderr, `${code}\n`);
+  }
+  for (const bad of [[], ['--stdin'], ['--stdin', '--identity', 'x'], ['--identity', 'x', '--version', 'y'],
+    ['--stdin', '--identity', ' ', '--version', 'y'], ['--stdin', '--identity', 'x', '--version', 'y', '--extra', 'z']]) {
+    const run = runCli(bad, JSON.stringify(rawResult()));
+    assert.equal(run.status, 2, JSON.stringify(bad));
+    assert.equal(run.stdout, '');
+    assert.equal(run.stderr, 'tools_list_project_arguments_invalid\n');
+  }
 });
