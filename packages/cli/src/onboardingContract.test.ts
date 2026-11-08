@@ -101,3 +101,26 @@ test('the overview separates native command approval from recipient device appro
   assert.match(overview, /configured automatic reviewer/);
   assert.doesNotMatch(overview, /recipient approves only the matching browser/);
 });
+
+test('the installed guide states first-GA setup hosts and limits without stale release numbers', async () => {
+  const contract = (await readFile(contractUrl, 'utf8')).replace(/\r\n/g, '\n');
+
+  // The portal pins the exact release on /agent-fabric/setup; release-numbered
+  // statements in the signed contract go stale as soon as the next CLI ships.
+  assert.doesNotMatch(contract, /0\.2\.19\d/);
+  assert.doesNotMatch(contract, /\bCLI\s*19\d\b/i);
+  assert.match(contract, /pinned CLI release shown on `\/agent-fabric\/setup`/);
+
+  assert.match(contract, /Setup runs inside Claude Code or Codex\./);
+  assert.match(contract, /Agy \(Antigravity\), Hermes Agent, Grok and Gemini are preview, not GA/);
+  const previewHost = /\b(?:Agy|Antigravity|Hermes|Grok|Gemini)\b/;
+  const unlabelled = contract
+    .split(/\n+|(?<=[.;:])\s+/)
+    .filter(sentence => previewHost.test(sentence) && !/\bpreview\b/i.test(sentence));
+  assert.deepEqual(unlabelled, []);
+
+  assert.match(contract, /manual run from a plain terminal, outside Claude Code or Codex, is refused cleanly/);
+  assert.match(contract, /documented first-GA limit/);
+  assert.match(contract, /first repository in an organization is Admin-first by design/);
+  assert.match(contract, /developer's setup attempt receives 403/);
+});
