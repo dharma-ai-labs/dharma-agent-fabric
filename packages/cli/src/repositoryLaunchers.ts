@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, readdir, readFile, realpath } from 'node:fs/promises';
+import { lstat, open, readdir, readFile, readlink, realpath } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, join, posix, win32 } from 'node:path';
 import { promisify } from 'node:util';
@@ -257,6 +257,41 @@ async function protectParents(path: string, privateGroups: PrivateGroups) {
   }
 }
 
+// Resolves an absolute path as realpath does, one component at a time. Every link followed and every directory passed
+// on the way, through link targets too, is owned by this user or root, and every such directory is closed to others
+// (a root-owned sticky directory above the end excepted), so no other user can repoint the path after the check. A
+// link's own mode is not checked: Linux ignores it. Protected links, such as a linked bin directory or fnm's per-shell
+// directory in the user's own state directory, pass; a link in a directory others can write does not (CLI 0.2.224 R2b).
+async function protectedPathResolution(path: string, privateGroups: PrivateGroups) {
+  providerDirectoryPath(path);
+  const pending = path.split('/').filter(Boolean);
+  let resolved = '/', links = 0;
+  const protectedDirectory = async (directory: string, end: boolean) => {
+    const stat = await lstat(directory);
+    if (!stat.isDirectory()) throw new UnsafeProviderEntry(directory, false);
+    protectedEntry(directory, stat, privateGroups, !end && stat.uid === 0 && (stat.mode & 0o1000) !== 0);
+  };
+  await protectedDirectory(resolved, !pending.length);
+  while (pending.length) {
+    const name = pending.shift()!;
+    if (name === '.') continue;
+    if (name === '..') {resolved = posix.dirname(resolved); continue;}
+    const next = posix.join(resolved, name);
+    const stat = await lstat(next);
+    if (stat.isSymbolicLink()) {
+      protectedEntry(next, stat, privateGroups, true);
+      if (++links > 40) throw Error();
+      const target = await readlink(next);
+      if (target.startsWith('/')) resolved = '/';
+      pending.unshift(...target.split('/').filter(Boolean));
+      continue;
+    }
+    await protectedDirectory(next, !pending.length);
+    resolved = next;
+  }
+  return resolved;
+}
+
 // The provider bin directory and the executable it resolves to are owned by this user or root, and neither they
 // nor their parents can be written by anyone else; the user's own private group is not anyone else. A codex PATH
 // entry must be its own real path, as in 0.2.223. Another provider's entry may be a symlink, as fnm's per-shell bin
@@ -339,10 +374,9 @@ export async function providerFirstOnPathUnsafe(provider: ProviderCommand,
 }
 
 async function relayProviderExecutable(directory: string, provider: ProviderCommand, privateGroups: PrivateGroups) {
-  // The relay runs the provider through this entry, so the entry must be its own real path, as in 0.2.223: a link
-  // could be repointed after the check. The launcher writes each set-up provider's real directory first on the
-  // relay PATH (CLI 0.2.224 review round 2).
-  if (await realpath(directory) !== directory) throw Error();
+  // The relay runs the provider through this entry, so no other user may be able to repoint it after the check
+  // (CLI 0.2.224 review round 2). The launcher writes each set-up provider's real directory first on the relay PATH.
+  await protectedPathResolution(directory, privateGroups);
   const {executable} = await protectedProviderExecutable(directory, provider, privateGroups);
   await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
