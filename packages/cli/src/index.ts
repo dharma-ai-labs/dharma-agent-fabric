@@ -2104,10 +2104,16 @@ async function installStableRepositoryLauncher(workspace: string, providers: rea
   const npmCliPath = process.platform === 'linux' ? await (scope
     ? scope.step(() => resolveRepositoryNpmCli()) : resolveRepositoryNpmCli()) : undefined;
   // The relay service starts with the user manager PATH, not this shell's. Carry the bin directory of the
-  // provider set up in this checkout, so the relay probes and installs for it as setup did.
+  // provider set up in this checkout, so the relay probes and installs for it as setup did. The relay serves every
+  // adapter, so, as relay upgrade does, keep each protected provider already holding the registered workspace's
+  // installed bundle; setting up a second agent never drops the first one's directory (PR #424 review F1).
+  const config = await readDeviceConfig();
+  const record = config ? selectDeviceWorkspace(await (scope ? scope.step(() => registry()) : registry()),
+    {organizationId: config.organizationId, deviceId: config.deviceId, path: workspace}) : null;
+  const holders = record ? await (scope ? scope.step(() => protectedBundleHolders(record)) : protectedBundleHolders(record)) : [];
   const searchPath = providerProcessEnvironment(process.env).PATH;
   const resolved: (string | undefined)[] = [];
-  for (const provider of providers) {
+  for (const provider of [...new Set([...holders, ...providers])]) {
     resolved.push(await (scope ? scope.step(() => resolveRepositoryProviderDirectory({provider, searchPath}))
       : resolveRepositoryProviderDirectory({provider, searchPath})));
   }
