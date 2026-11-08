@@ -265,8 +265,10 @@ the receipt. If the seed is 60 days old or older, rebuild it (see Reset).
    differ.
 4. Capture `tools/list` with the reviewer session, project it with
    `scripts/mcp-tools-list-project.mjs`, and run
-   `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`.
-   The verdict must be `compatible`.
+   `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json> --profile chatgpt`.
+   The reviewer session is a ChatGPT-client capture, so it lists only the
+   20-tool profile and is checked against that profile. The verdict must be
+   `compatible`. Never refresh the 65-tool snapshot from this capture.
 5. Repeat steps 2 and 3 after 48 hours with the relay still stopped, to show
    that the Codex endpoint stays `active` and TC-2 is unchanged.
 6. In the guided-check organization, after its guided checks have run (a

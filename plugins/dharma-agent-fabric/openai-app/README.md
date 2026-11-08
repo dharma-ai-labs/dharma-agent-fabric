@@ -89,9 +89,15 @@ for submission is met; the submission itself is still the owner's action.
   match `live-mcp-tools.snapshot.json`, and that the submission declares
   exactly the ChatGPT profile.
 - Before each submission, capture `tools/list` from the hosted server, project
-  it with `scripts/mcp-tools-list-project.mjs`, and run
-  `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`.
-  Refresh the snapshot if the verdict is not `compatible`.
+  it with `scripts/mcp-tools-list-project.mjs`, and compare it. The full
+  `compatible` comparison,
+  `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`,
+  uses a capture from a non-ChatGPT client (all 65 tools). A ChatGPT-client
+  capture is checked with `--profile chatgpt` against the 20-tool profile:
+  `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json> --profile chatgpt`.
+  Refresh `live-mcp-tools.snapshot.json` only when the non-ChatGPT comparison
+  is not `compatible`. Never refresh the 65-tool snapshot from a ChatGPT-client
+  capture.
 - Test cases and their seed are described in `REVIEWER_GUIDE.md` and
   `REVIEWER_SEED_PLAN.md`.
 

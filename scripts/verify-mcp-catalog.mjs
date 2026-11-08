@@ -1,18 +1,31 @@
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { compareSnapshotManifest, referenceFromCatalog } from './mcp-catalog-drift.mjs';
+import { PROFILES, compareSnapshotManifest, referenceFromCatalog } from './mcp-catalog-drift.mjs';
 
 // No arguments: unchanged static catalog verification. Opt-in offline mode:
-// --snapshot-manifest <file.json> compares explicitly supplied snapshots.
+// --snapshot-manifest <file.json> compares explicitly supplied snapshots
+// against all catalog tools. Add --profile chatgpt for a capture made through
+// the ChatGPT OAuth client, which is served only the chatgptProfile tools.
 const args = process.argv.slice(2);
+const OPTIONS = new Set(['--snapshot-manifest', '--profile']);
 let snapshotManifestPath = null;
+let profile;
 if (args.length > 0) {
-  if (args.length !== 2 || args[0] !== '--snapshot-manifest' || !/\.json$/i.test(args[1])) {
-    process.stderr.write('Usage: verify-mcp-catalog.mjs [--snapshot-manifest <manifest.json>]\n');
+  const options = new Map();
+  let valid = args.length % 2 === 0;
+  for (let index = 0; valid && index < args.length; index += 2) {
+    valid = OPTIONS.has(args[index]) && !options.has(args[index]);
+    options.set(args[index], args[index + 1]);
+  }
+  const manifestArg = options.get('--snapshot-manifest');
+  if (!valid || !/\.json$/i.test(manifestArg ?? '')
+    || (options.has('--profile') && !PROFILES.includes(options.get('--profile')))) {
+    process.stderr.write('Usage: verify-mcp-catalog.mjs [--snapshot-manifest <manifest.json> [--profile chatgpt]]\n');
     process.exit(2);
   }
-  snapshotManifestPath = resolve(args[1]);
+  snapshotManifestPath = resolve(manifestArg);
+  profile = options.get('--profile');
 }
 
 const removedSpeculativeTools = [
@@ -97,7 +110,7 @@ if (snapshotManifestPath === null) {
   }
   let receipt;
   try {
-    receipt = compareSnapshotManifest(manifest, referenceFromCatalog(catalog));
+    receipt = compareSnapshotManifest(manifest, referenceFromCatalog(catalog, { profile }));
   } catch {
     process.stderr.write('snapshot_comparison_unavailable\n');
     process.exit(2);
