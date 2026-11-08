@@ -464,12 +464,14 @@ test('relay guard and setup accept a 0775 provider tree whose group is the user\
 test('a group-writable provider tree stays refused when the group is shared or the entry is world-writable', {skip: process.platform !== 'linux'}, async () => {
   const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
   await privateGroupHost(async ({bin, accounts}) => {
-    for (const shared of [
-      await accounts('<user>:x:<gid>:alice'), // another member
-      await accounts('staff:x:<gid>:'), // not named after the user
-      await accounts('<user>:x:<gid>:', 'alice:x:4242:<gid>::/home/alice:/bin/sh\n'), // another user's primary group
-      await accounts('other:x:1:'), // the group is not listed at all
-    ]) {
+    // Each case writes the account files just before its checks, as all cases share one pair of files.
+    for (const [groups, otherUsers] of [
+      ['<user>:x:<gid>:alice', ''], // another member
+      ['staff:x:<gid>:', ''], // not named after the user
+      ['<user>:x:<gid>:', 'alice:x:4242:<gid>::/home/alice:/bin/sh\n'], // another user's primary group
+      ['other:x:1:', ''], // the group is not listed at all
+    ] as const) {
+      const shared = await accounts(groups, otherUsers);
       assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: shared}), true);
       await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin, accounts: shared}),
         /^Error: relay_startup_claude_path_invalid: /);
@@ -487,6 +489,7 @@ test('a group-writable provider tree stays refused when the group is shared or t
 // group other than the user's primary one, so the F3 rule refused claude, agy and hermes installed there by npm -g,
 // which 0.2.223 ran. A supplementary group of this user is private in effect, and accepted, when /etc/group lists no
 // member but this user and no /etc/passwd entry has it as primary group. A group with another member stays refused.
+// N2 (1x8): an empty member list counted as private too; a supplementary group must list this user, and only them.
 test('relay guard and setup accept a group-writable provider tree whose supplementary group has no other member', {skip: process.platform !== 'linux'}, async t => {
   const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
   const supplementary = process.getgroups!().find(gid => gid !== process.getgid!() && gid !== 0);
@@ -513,11 +516,15 @@ test('relay guard and setup accept a group-writable provider tree whose suppleme
     assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry, accounts: own}), false, 'relay');
     assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry, accounts: own}), versionBin, 'setup');
     assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: entry, accounts: own}), null, 'status');
-    for (const [shared, why] of [
-      [await accounts(group('<user>,alice')), 'another member'],
-      [await accounts(group('<user>'), `alice:x:4242:${supplementary}::/home/alice:/bin/sh\n`), "another user's primary group"],
-      [await accounts('<user>:x:<gid>:'), 'the group is not listed'],
+    // Each case writes the account files just before its checks, as all cases share one pair of files.
+    for (const [groups, otherUsers, why] of [
+      [group('<user>,alice'), '', 'another member'],
+      [group('<user>'), `alice:x:4242:${supplementary}::/home/alice:/bin/sh\n`, "another user's primary group"],
+      ['<user>:x:<gid>:', '', 'the group is not listed'],
+      // N2: the user is in it by some other means, such as NSS or --group-add, so who else is in it is unknown.
+      [group(''), '', 'group listed with no members'],
     ] as const) {
+      const shared = await accounts(groups, otherUsers);
       assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry, accounts: shared}), true, why);
       await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry, accounts: shared}),
         /^Error: relay_startup_claude_path_invalid: /, why);
