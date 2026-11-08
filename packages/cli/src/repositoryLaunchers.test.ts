@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import test from 'node:test';
 
@@ -418,4 +418,82 @@ test('actual Linux launcher with two set-up providers reaches both and verifies 
     assert.equal(await verify(), false, 'every recorded directory is checked, not only the first');
     assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after, ['claude', 'codex']), false);
   } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// PR #424 review F3 (3x6=18): the relay guard applied setup's mode rule, which refused any group-writable entry.
+// Stock Ubuntu login sessions use umask 0002 with a private group per user, so a claude installed under ~ has 0775
+// directories that only this user can write. 0.2.223 ran it; 0.2.224 stopped. A group-writable entry is accepted
+// only when its group is this user's own private group; world-writable entries and shared groups stay refused.
+type AccountFiles = {group: string; passwd: string};
+type ProviderPathChecks = {
+  providerFirstOnPathUnsafe(provider: string, options: {searchPath?: string; accounts?: AccountFiles}): Promise<boolean>;
+  resolveRepositoryProviderDirectory(options: {provider?: string; searchPath?: string; accounts?: AccountFiles}): Promise<string | undefined>;
+  providerUnsafePathDiagnosis(provider: string, options: {searchPath?: string; accounts?: AccountFiles}):
+    Promise<{path: string; remedy: string} | null>;
+};
+
+async function privateGroupHost(run: (host: {root: string; local: string; bin: string;
+  accounts(group: string, otherUsers?: string): Promise<AccountFiles>}) => Promise<void>) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-private-group-')));
+  try {
+    const user = userInfo().username, uid = process.getuid!(), gid = process.getgid!();
+    // As a native Claude install under umask 0002 leaves it: ~/.local and its bin directory are 0775.
+    const local = join(root, 'local'), bin = join(local, 'bin');
+    await mkdir(bin, {recursive: true});
+    await chmod(local, 0o775); await chmod(bin, 0o775);
+    await writeFile(join(bin, 'claude'), '#!/bin/sh\nexit 0\n'); await chmod(join(bin, 'claude'), 0o775);
+    await run({root, local, bin, accounts: async (group, otherUsers = '') => {
+      await writeFile(join(root, 'group'), `root:x:0:\n${group.replace('<user>', user).replace('<gid>', String(gid))}\n`);
+      await writeFile(join(root, 'passwd'),
+        `root:x:0:0:root:/root:/bin/sh\n${user}:x:${uid}:${gid}::${root}:/bin/sh\n${otherUsers.replace('<gid>', String(gid))}`);
+      return {group: join(root, 'group'), passwd: join(root, 'passwd')};
+    }});
+  } finally {await rm(root, {recursive: true, force: true});}
+}
+
+test('relay guard and setup accept a 0775 provider tree whose group is the user\'s own private group', {skip: process.platform !== 'linux'}, async () => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  await privateGroupHost(async ({bin, accounts}) => {
+    const own = await accounts('<user>:x:<gid>:');
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), false);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin, accounts: own}), bin);
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: own}), null);
+  });
+});
+
+test('a group-writable provider tree stays refused when the group is shared or the entry is world-writable', {skip: process.platform !== 'linux'}, async () => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  await privateGroupHost(async ({bin, accounts}) => {
+    for (const shared of [
+      await accounts('<user>:x:<gid>:alice'), // another member
+      await accounts('staff:x:<gid>:'), // not named after the user
+      await accounts('<user>:x:<gid>:', 'alice:x:4242:<gid>::/home/alice:/bin/sh\n'), // another user's primary group
+      await accounts('other:x:1:'), // the group is not listed at all
+    ]) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: shared}), true);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin, accounts: shared}),
+        /^Error: relay_startup_claude_path_invalid: /);
+    }
+    const own = await accounts('<user>:x:<gid>:');
+    await chmod(bin, 0o777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), true);
+    await chmod(bin, 0o775); await chmod(join(bin, 'claude'), 0o777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), true);
+  });
+});
+
+test('the unsafe-path diagnosis names the failing entry and the command that fixes it', {skip: process.platform !== 'linux'}, async () => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  await privateGroupHost(async ({local, bin, accounts}) => {
+    const shared = await accounts('<user>:x:<gid>:alice');
+    await chmod(bin, 0o755); await chmod(join(bin, 'claude'), 0o755);
+    // The bin directory itself is fine; its parent is the entry another member of the group can write.
+    const diagnosis = await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: shared});
+    assert.equal(diagnosis?.path, local);
+    assert.ok(diagnosis?.remedy.includes(`chmod go-w '${local}'`), diagnosis?.remedy);
+    await chmod(local, 0o755);
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: shared}), null);
+    await chmod(join(bin, 'claude'), 0o757);
+    assert.equal((await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: shared}))?.path, join(bin, 'claude'));
+  });
 });
