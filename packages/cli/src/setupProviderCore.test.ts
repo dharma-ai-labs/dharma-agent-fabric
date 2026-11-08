@@ -64,7 +64,8 @@ test('actual setup and relay upgrade put the set-up provider bin directory on th
   const bootstrap = between(text, 'const {launcher, autostart} = flags.has(\'no-relay-daemon\')', 'let sharedRepositoryReady = onboarded.sharedRepositoryReady === true;');
   assert.equal((bootstrap.match(/installStableRepositoryLauncher\(workspace, \[provider\]\)/g) || []).length, 2);
   const installer = between(text, 'async function installStableRepositoryLauncher(', "return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };");
-  assert.match(installer, /for \(const provider of providers\)/);
+  assert.match(installer, /for \(const provider of \[\.\.\.new Set\(\[\.\.\.holders, \.\.\.providers\]\)\]\)/);
+  assert.match(installer, /protectedBundleHolders\(record\)/);
   assert.match(installer, /resolveRepositoryProviderDirectory\(\{provider, searchPath\}\)/);
   assert.match(installer, /providerDirectoriesInPathOrder\(/);
   const upgrade = between(text, 'async function relayUpgrade(', 'const upgrade=maintenance?');
