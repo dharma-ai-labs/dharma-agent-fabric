@@ -290,7 +290,7 @@ async function protectedPathResolution(path: string, privateGroups: PrivateGroup
   const protectedDirectory = async (directory: string, end: boolean) => {
     const stat = await lstat(directory);
     if (!stat.isDirectory()) throw new UnsafeProviderEntry(directory, false);
-    protectedEntry(directory, stat, privateGroups, !end && stat.uid === 0 && (stat.mode & 0o1000) !== 0);
+    await protectedEntry(directory, stat, privateGroups, !end && stat.uid === 0 && (stat.mode & 0o1000) !== 0);
   };
   await protectedDirectory(resolved, !pending.length);
   while (pending.length) {
@@ -301,11 +301,11 @@ async function protectedPathResolution(path: string, privateGroups: PrivateGroup
     let stat;
     try {stat = await lstat(next);} catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      protectedEntry(resolved, await lstat(resolved), privateGroups);
+      await protectedEntry(resolved, await lstat(resolved), privateGroups);
       throw new AbsentEntry();
     }
     if (stat.isSymbolicLink()) {
-      protectedEntry(next, stat, privateGroups, true);
+      await protectedEntry(next, stat, privateGroups, true);
       if (++links > 40) throw Error();
       const target = await readlink(next);
       if (target.startsWith('/')) resolved = '/';
