@@ -352,24 +352,47 @@ test('the seed capsules are default capsules, so the 90-day retention is the sho
 
 // 393-F3: since platform #1909 a ChatGPT OAuth client sees only the 20-tool
 // profile, so each capture instruction must name the client it uses.
-test('the capture steps name which client each tools/list capture uses', () => {
-  const profileSize = catalog.tools.filter(tool => tool.chatgptProfile).length;
+// 393-R5-1: the platform treats a client as ChatGPT only when it registered
+// dynamically with every redirect URI on https://chatgpt.com, and ChatGPT
+// developer mode never shows the raw tools/list. So an operator's capture
+// comes from a non-ChatGPT client (all tools, no --profile), and the ChatGPT
+// side is checked in developer mode.
+test('the capture steps use a non-ChatGPT capture and check the ChatGPT profile in developer mode', () => {
+  const profileNames = catalog.tools.filter(tool => tool.chatgptProfile).map(tool => tool.name);
+  const profileSize = profileNames.length;
   const fullSize = catalog.tools.length;
   const bullet = readme.split('\n- ').find(item => item.includes('--snapshot-manifest')) ?? '';
   const checklistLine = checklist.split('\n').find(line => line.includes('A fresh hosted `tools/list` capture')) ?? '';
-  for (const [name, text] of [['README.md', bullet], ['PUBLICATION_CHECKLIST.md', checklistLine]]) {
+  const acceptance = seedPlan.slice(seedPlan.indexOf('## Acceptance before submission'));
+  const captureStep = acceptance.split(/\n(?=\d+\. )/).find(step => step.includes('--snapshot-manifest')) ?? '';
+  for (const [name, text] of [['README.md', bullet], ['PUBLICATION_CHECKLIST.md', checklistLine], ['REVIEWER_SEED_PLAN.md', captureStep]]) {
     const flat = text.replace(/\s+/g, ' ');
-    assert.match(flat, new RegExp(`non-ChatGPT client [(]all ${fullSize} tools[)]`), `${name} must name the non-ChatGPT client for the full comparison`);
-    assert.match(flat, new RegExp(`ChatGPT-client capture is checked with \`--profile chatgpt\` against the ${profileSize}-tool profile`),
-      `${name} must check a ChatGPT-client capture with --profile chatgpt`);
-    assert.match(flat, new RegExp(`[Nn]ever refresh the ${fullSize}-tool snapshot from a ChatGPT-client capture`),
+    assert.match(flat, /non-ChatGPT MCP client[^.]*signed in as the reviewer account/,
+      `${name} must capture with a non-ChatGPT MCP client signed in as the reviewer account`);
+    assert.match(flat, /`node scripts\/verify-mcp-catalog\.mjs --snapshot-manifest <manifest\.json>`/,
+      `${name} must run the full comparison without --profile`);
+    assert.match(flat, new RegExp(`\`compatible\`[^.]*all ${fullSize} tools`), `${name} must expect a compatible verdict with all ${fullSize} tools`);
+    assert.match(flat, /ChatGPT developer mode never shows the raw `tools\/list`/, `${name} must say developer mode never shows the raw tools/list`);
+    assert.match(flat, new RegExp(`exactly the ${profileSize} [^.]*\`chatgptProfile: true\``),
+      `${name} must check that the ChatGPT connector lists exactly the ${profileSize} profile tools`);
+    assert.match(flat, /call to a tool outside the profile[^.]*must be refused/, `${name} must check that a call outside the profile is refused`);
+    assert.match(flat, /`--profile chatgpt` is only for a capture that really came through a ChatGPT-registered OAuth client.*?the usual operator cannot make one/,
+      `${name} must keep --profile chatgpt for a real ChatGPT-registered capture, which the usual operator cannot make`);
+    assert.doesNotMatch(flat, /reviewer session is a ChatGPT-client capture/, `${name} must not call the operator capture a ChatGPT-client capture`);
+  }
+  for (const [name, text] of [['README.md', bullet], ['PUBLICATION_CHECKLIST.md', checklistLine]]) {
+    assert.match(text.replace(/\s+/g, ' '), new RegExp(`[Nn]ever refresh the ${fullSize}-tool snapshot from a ChatGPT-client capture`),
       `${name} must forbid refreshing the full snapshot from a ChatGPT-client capture`);
   }
   assert.doesNotMatch(readme, /Refresh the snapshot if the verdict is not `compatible`\./, 'README.md must not refresh the snapshot from any capture');
-  const acceptance = seedPlan.slice(seedPlan.indexOf('## Acceptance before submission'));
-  const captureStep = acceptance.split(/\n(?=\d+\. )/).find(step => step.includes('--snapshot-manifest')) ?? '';
-  assert.match(captureStep.replace(/\s+/g, ' '), /--snapshot-manifest <manifest\.json> --profile chatgpt/,
-    'the seed plan captures with the reviewer ChatGPT session, so it must check against the ChatGPT profile');
+  const captureFlat = captureStep.replace(/\s+/g, ' ');
+  assert.doesNotMatch(captureFlat, /--snapshot-manifest <manifest\.json> --profile chatgpt/,
+    'the seed plan must not check the operator capture with --profile chatgpt');
+  const missing = profileNames.filter(tool => !captureStep.includes(`\`${tool}\``));
+  assert.deepEqual(missing, [], 'the seed plan must list every ChatGPT profile tool for the developer-mode check');
+  const example = catalogByName.get(captureFlat.match(/for example `(fabric_[a-z0-9_]+)`/)?.[1]);
+  assert.ok(example && !example.chatgptProfile && example.annotations.readOnlyHint === true,
+    'the refusal check must use a read-only tool outside the profile, so no write runs during acceptance');
 });
 
 // 393-F4: ChatGPT is refused every tool outside the profile, so no submitted
