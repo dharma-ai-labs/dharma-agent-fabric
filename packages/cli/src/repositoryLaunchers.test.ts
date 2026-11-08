@@ -792,6 +792,55 @@ test('relay and setup refuse a provider executable whose link chain passes a dir
   } finally {await chmod(shared, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
 });
 
+// CLI 0.2.224 review N1b (2x4=8): the N1 check refused claude, agy and hermes when the node beside them was a dangling
+// link (~/.local/bin/node to a removed nvm version, beside the native claude) or a file without an exec bit, although
+// execvp skips such an entry and 0.2.223 ran that claude: relay provider_unsafe_path, setup
+// relay_startup_claude_path_invalid. A node that is missing from a directory no other user can write, or that no one
+// can run, is now treated as absent for those providers. codex keeps the 0.2.223 rule, and a node that others could
+// create or repoint stays refused.
+test('relay and setup accept a claude whose sibling node is a dangling link or not executable', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-absent-node-')));
+  const open = join(root, 'open');
+  try {
+    const versions = join(root, 'nvm', 'versions', 'node'), versionBin = join(versions, 'v18', 'bin');
+    await mkdir(versionBin, {recursive: true, mode: 0o700});
+    await mkdir(open, {mode: 0o700});
+    const providerBin = async (name: string, provider: string, node: (bin: string) => Promise<void>) => {
+      const bin = join(root, name); await mkdir(bin, {mode: 0o700});
+      await writeFile(join(bin, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+      await node(bin);
+      return bin;
+    };
+    // The link's target, and for nvm the whole version directory, is gone from directories closed to others.
+    const missingFile = await providerBin('missing-file', 'claude', bin => symlink(join(versionBin, 'node'), join(bin, 'node')));
+    const removedVersion = await providerBin('removed-version', 'claude',
+      bin => symlink(join(versions, 'v16', 'bin', 'node'), join(bin, 'node')));
+    const plainFile = await providerBin('plain-file', 'claude', bin => writeFile(join(bin, 'node'), '#!/bin/sh\n', {mode: 0o644}));
+    for (const bin of [missingFile, removedVersion, plainFile]) {
+      const name = relative(root, bin);
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), false, `relay: ${name}`);
+      assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}), bin, `setup: ${name}`);
+      assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin}), null, `status: ${name}`);
+    }
+    // codex's node is held to the launcher's Node, as in 0.2.223: a dangling or non-executable one stays refused.
+    for (const [name, node] of [['codex-missing', (bin: string) => symlink(join(versionBin, 'node'), join(bin, 'node'))],
+      ['codex-plain', (bin: string) => writeFile(join(bin, 'node'), '#!/bin/sh\n', {mode: 0o644})]] as const) {
+      const bin = await providerBin(name, 'codex', node);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: bin}),
+        /^Error: relay_startup_codex_path_invalid/, `setup: ${name}`);
+    }
+    // A missing node that another user could create, in a directory they can write, stays refused and is named.
+    const openTarget = await providerBin('open-target', 'claude', bin => symlink(join(open, 'node'), join(bin, 'node')));
+    await chmod(open, 0o777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: openTarget}), true, 'relay: node missing from a 0777 directory');
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: openTarget}),
+      /^Error: relay_startup_claude_path_invalid/, 'setup: node missing from a 0777 directory');
+    assert.equal((await launchers.providerUnsafePathDiagnosis('claude', {searchPath: openTarget}))?.path, open,
+      'status names the directory where others could create the node');
+  } finally {await chmod(open, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
+
 // CLI 0.2.224 review R424-1 (2x4=8): an absolute PATH entry the shell resolves fine but written with a trailing '/',
 // a doubled '/' or a '.' part ('dir/', '//dir', '/./dir') made the provider check throw, so the relay refused claude,
 // agy and hermes (provider_unsafe_path) and setup refused them (relay_startup_claude_path_invalid). Each absolute
