@@ -424,7 +424,7 @@ test('actual Linux launcher with two set-up providers reaches both and verifies 
 // Stock Ubuntu login sessions use umask 0002 with a private group per user, so a claude installed under ~ has 0775
 // directories that only this user can write. 0.2.223 ran it; 0.2.224 stopped. A group-writable entry is accepted
 // only when its group is this user's own private group; world-writable entries and shared groups stay refused.
-type AccountFiles = {group: string; passwd: string};
+type AccountFiles = {group: string; passwd: string; groupLookup?: (gid: number) => Promise<string | undefined>};
 type ProviderPathChecks = {
   providerFirstOnPathUnsafe(provider: string, options: {searchPath?: string; accounts?: AccountFiles}): Promise<boolean>;
   resolveRepositoryProviderDirectory(options: {provider?: string; searchPath?: string; accounts?: AccountFiles}): Promise<string | undefined>;
@@ -531,6 +531,35 @@ test('relay guard and setup accept a group-writable provider tree whose suppleme
     }
     await chmod(versionBin, 0o2777);
     assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry, accounts: own}), true, 'world-writable');
+  });
+});
+
+// CLI 0.2.224 review R424-2 (1x5=5): NSS user private groups, as sssd's auto_private_groups and FreeIPA make them, are
+// not in /etc/group, so after the upgrade a 0775 provider tree owned by the user's own primary group was refused. The
+// primary group also counts as private when its id is the user's id and the NSS entry (getent group) names it after
+// the user with no other member; anything else stays refused, and `dharma status` names the case.
+test('relay guard and setup accept a 0775 provider tree whose primary group is an NSS user private group', {skip: process.platform !== 'linux'}, async () => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  const user = userInfo().username, uid = process.getuid!(), gid = process.getgid!();
+  await privateGroupHost(async ({bin, accounts}) => {
+    const nss = async (line: string | undefined) => ({...await accounts('other:x:1:'), groupLookup: async (id: number) =>
+      id === gid ? line : undefined});
+    const own = await nss(`${user}:*:${gid}:`);
+    // Only a primary group whose id is the user's id is looked up.
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), uid !== gid, 'relay');
+    if (uid === gid) {
+      assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin, accounts: own}), bin, 'setup');
+      assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: own}), null, 'status');
+    }
+    for (const [line, why] of [[`staff:*:${gid}:`, 'not named after the user'], [`${user}:*:${gid}:alice`, 'another member'],
+      [undefined, 'no NSS entry']] as const) {
+      const shared = await nss(line);
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: shared}), true, why);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin, accounts: shared}),
+        /^Error: relay_startup_claude_path_invalid: /, why);
+      const diagnosis = await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: shared});
+      assert.ok(diagnosis?.remedy.includes(`getent group ${gid}`), `status names the private-group case: ${diagnosis?.remedy}`);
+    }
   });
 });
 
