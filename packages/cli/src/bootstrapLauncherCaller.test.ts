@@ -45,7 +45,8 @@ async function caller(overrides: Record<string, unknown> = {}) {
     currentBootstrapHostScope, writeBootstrapHostText, stableRepositoryLauncherContents,
     readDeviceConfig: async () => null, registry: async () => [], selectDeviceWorkspace,
     providersHoldingInstalledBundle: async () => [],
-    protectedLauncherProviderDirectories: async () => [],
+    dharmaHome: () => '/synthetic/home', protectedSetUpProviderDirectories: async () => [],
+    recordSetUpProviderDirectories: async () => {},
     providerDirectoriesInPathOrder: (launcherModule as Record<string, unknown>).providerDirectoriesInPathOrder,
     resolveRepositoryNpmCli: async () => npmCliPath,
     providerProcessEnvironment: () => ({PATH: '/synthetic/codex/bin:/synthetic/fallback/bin'}),
@@ -212,23 +213,28 @@ test('actual launcher installer leaves out a bundle holder whose executable fail
 
 // CLI 0.2.224 review R1: codex set up first, with its shared package still pending (no ACTIVE_BUNDLE, so it holds no
 // bundle), then Claude Code set up in the same checkout. The launcher dropped codex's bin directory and the relay never
-// reached codex again. The installer keeps each protected provider directory the launcher being replaced carries.
-test('actual launcher installer keeps the provider directories of the launcher it replaces', async t => {
-  const linux = process.platform === 'linux', f = await fixture(t), seen: unknown[] = [];
-  const first = await caller();
+// reached codex again. The installer records the directories it writes in this device's state and keeps each protected
+// one recorded for the launcher being replaced (K1: never read from the working tree).
+test('actual launcher installer keeps the provider directories it recorded for the launcher it replaces', async t => {
+  const linux = process.platform === 'linux', f = await fixture(t), seen: unknown[] = [], recorded: unknown[] = [];
+  const recordSetUpProviderDirectories = async (input: unknown) => {recorded.push(input);};
+  const first = await caller({recordSetUpProviderDirectories});
   await runCodexBootstrapHost(f.input, () => first(f.root, ['codex']));
-  const prior = {shell: await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), windows: await fs.readFile(resolve(f.bin, 'dharma.cmd'), 'utf8')};
-  const second = await caller({
+  const second = await caller({recordSetUpProviderDirectories,
     providerProcessEnvironment: () => ({PATH: '/synthetic/codex/bin:/synthetic/claude/bin'}),
     resolveRepositoryProviderDirectory: async (input: {provider: string}) => {
       assert.equal(input.provider, 'claude', 'a kept directory is not resolved again'); return linux ? '/synthetic/claude/bin' : undefined;
     },
-    protectedLauncherProviderDirectories: async (launchers: unknown) => {
-      seen.push(launchers); return linux ? [{provider: 'codex', directory: '/synthetic/codex/bin'}] : [];
+    protectedSetUpProviderDirectories: async (input: unknown) => {
+      seen.push(input); return linux ? [{provider: 'codex', directory: '/synthetic/codex/bin'}] : [];
     },
   });
   await runCodexBootstrapHost(f.input, () => second(f.root, ['claude']));
-  assert.deepEqual(JSON.parse(JSON.stringify(seen)), [prior], 'the installer reads the launcher it replaces');
+  assert.deepEqual(JSON.parse(JSON.stringify(seen)), [{home: '/synthetic/home', workspace: f.root}],
+    "the installer reads this device's record for the workspace");
+  assert.deepEqual(JSON.parse(JSON.stringify(recorded)), [
+    {home: '/synthetic/home', workspace: f.root, providerDirectory: linux ? ['/synthetic/codex/bin'] : []},
+    {home: '/synthetic/home', workspace: f.root, providerDirectory: linux ? ['/synthetic/codex/bin', '/synthetic/claude/bin'] : []}]);
   const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
     nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
     ...(linux ? {providerDirectory: ['/synthetic/codex/bin', '/synthetic/claude/bin']} : {})});

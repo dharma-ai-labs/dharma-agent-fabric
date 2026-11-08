@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, readdir, readFile, readlink, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, readlink, realpath, rename, writeFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, join, posix, win32 } from 'node:path';
 import { promisify } from 'node:util';
@@ -490,21 +490,51 @@ async function protectedRecordedProviderDirectory(directory: string, providers: 
   throw Error();
 }
 
+const SET_UP_PROVIDERS = 'dharma.repository-launcher-providers/v1';
+// This device's record of the provider directories it wrote on a workspace's launcher, in its own state directory.
+const setUpProvidersPath = (home: string, workspace: string) => join(home, 'relay', 'launcher-providers',
+  `${createHash('sha256').update(workspace).digest('hex').slice(0, 32)}.json`);
+
+/** Records the provider directories setup or relay upgrade wrote on the workspace's launcher. Linux only. */
+export async function recordSetUpProviderDirectories(options: {home: string; workspace: string;
+  providerDirectory: readonly string[]; platform?: NodeJS.Platform}) {
+  if ((options.platform ?? process.platform) !== 'linux') return;
+  const path = setUpProvidersPath(options.home, options.workspace);
+  await mkdir(dirname(path), {recursive: true, mode: 0o700});
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify({schema: SET_UP_PROVIDERS, workspace: options.workspace,
+    providerDirectory: [...options.providerDirectory]})}
+`, {mode: 0o600, flag: 'wx'});
+  await rename(temporary, path);
+}
+
 /**
- * The provider bin directories the launcher being replaced carries, written by any agent-fabric version, that still
- * pass setup's check today, each with the provider command it passes for. Setup and relay upgrade keep them, so an
- * agent whose shared package is still pending stays on the relay PATH (CLI 0.2.224 review R1). Linux only.
+ * The provider directories this device recorded for the workspace's launcher that still pass setup's check today,
+ * each with the provider command it passes for. Setup and relay upgrade keep them, so an agent whose shared package is
+ * still pending stays on the relay PATH (CLI 0.2.224 review R1). They come from this user's own state, never from the
+ * launcher in the working tree, which anyone who writes to the repository can commit, and none whose real path is
+ * inside the workspace is kept (K1). Linux only.
  */
-export async function protectedLauncherProviderDirectories(launchers: Launchers | null,
-  platform: NodeJS.Platform = process.platform): Promise<{provider: ProviderCommand; directory: string}[]> {
-  if (platform !== 'linux' || typeof launchers?.shell !== 'string') return [];
-  const version = launchers.shell.match(/ -- @dharma-ai-labs\/agent-fabric@([^\s"]+) "\$@"\n$/)?.[1];
-  const recorded = version && VERSION.test(version) ? recordedRuntime(version, launchers, platform) : undefined;
+export async function protectedSetUpProviderDirectories(options: {home: string; workspace: string;
+  platform?: NodeJS.Platform}): Promise<{provider: ProviderCommand; directory: string}[]> {
+  if ((options.platform ?? process.platform) !== 'linux') return [];
+  let record: {schema?: unknown; workspace?: unknown; providerDirectory?: unknown};
+  try {
+    const path = setUpProvidersPath(options.home, options.workspace), stat = await lstat(path);
+    if (!stat.isFile() || stat.uid !== process.getuid!() || (stat.mode & 0o077) || stat.size > 65536) return [];
+    record = JSON.parse(await readFile(path, 'utf8')) ?? {};
+  } catch {return [];}
+  if (record.schema !== SET_UP_PROVIDERS || record.workspace !== options.workspace
+    || !Array.isArray(record.providerDirectory) || record.providerDirectory.length > 16) return [];
+  const workspaces = [options.workspace, await realpath(options.workspace).catch(() => options.workspace)];
+  const inside = (path: string) => workspaces.some(workspace => path === workspace || path.startsWith(`${workspace}/`));
   const kept: {provider: ProviderCommand; directory: string}[] = [];
   const privateGroups = await ownPrivateGroups();
-  for (const directory of [recorded?.providerDirectory ?? []].flat()) {
-    try {kept.push({provider: await protectedRecordedProviderDirectory(directory, undefined, process.execPath, privateGroups), directory});}
-    catch {}
+  for (const directory of record.providerDirectory) {
+    try {
+      if (typeof directory !== 'string' || inside(providerDirectoryPath(directory)) || inside(await realpath(directory))) continue;
+      kept.push({provider: await protectedRecordedProviderDirectory(directory, undefined, process.execPath, privateGroups), directory});
+    } catch {}
   }
   return kept;
 }
