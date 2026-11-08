@@ -633,3 +633,60 @@ test('relay and setup skip an unsearchable or file PATH entry ahead of claude, b
     }
   } finally {await chmod(closed, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
 });
+
+// CLI 0.2.224 review R1: setup and relay upgrade rewrote the launcher with only the bundle holders and the provider
+// set up, so a first agent whose shared package was still pending (no ACTIVE_BUNDLE) dropped off the relay PATH.
+// 0.2.223 always carried codex. The directories the launcher being replaced carries are kept while they still pass.
+test('the launcher being replaced names its protected provider directories, from any agent-fabric version', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  assert.equal(typeof launchers.protectedLauncherProviderDirectories, 'function');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-current-launcher-')));
+  try {
+    const codexDirectory = join(root, 'npm-global', 'bin'), claudeDirectory = join(root, 'local', 'bin');
+    for (const directory of [codexDirectory, claudeDirectory]) await mkdir(directory, {recursive: true, mode: 0o700});
+    await writeFile(join(codexDirectory, 'codex'), '#!/bin/sh\nprintf "own-codex"\n', {mode: 0o700});
+    await writeFile(join(claudeDirectory, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
+    const runtime = {platform: 'linux' as const, nodeDirectory: dirname(process.execPath), npmCliPath: '/approved/npm/bin/npm-cli.js'};
+    const read = (contents: unknown) => launchers.protectedLauncherProviderDirectories(contents);
+    // The single-directory launcher 0.2.223 wrote for codex.
+    const codexOnly = launchers.stableRepositoryLauncherContents('0.2.223', {...runtime, providerDirectory: codexDirectory});
+    assert.deepEqual(await read(codexOnly), [{provider: 'codex', directory: codexDirectory}]);
+    const both = launchers.stableRepositoryLauncherContents('0.2.224', {...runtime, providerDirectory: [claudeDirectory, codexDirectory]});
+    assert.deepEqual(await read(both), [{provider: 'claude', directory: claudeDirectory}, {provider: 'codex', directory: codexDirectory}]);
+    assert.deepEqual(await read(launchers.stableRepositoryLauncherContents('0.2.224', runtime)), [], 'no provider directory');
+    assert.deepEqual(await read({...codexOnly, shell: codexOnly.shell + 'echo foreign\n'}), [], 'not a launcher setup wrote');
+    assert.deepEqual(await read(null), []);
+    await chmod(join(codexDirectory, 'codex'), 0o722);
+    assert.deepEqual(await read(both), [{provider: 'claude', directory: claudeDirectory}], 'a directory that no longer passes is dropped');
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review R2: claude, agy and hermes were held to codex's launcher rules (the PATH entry is its own real
+// path; a node there hash-equals the running one), so fnm's per-shell bin directory, a symlink, was refused. The real
+// directory is checked and recorded instead; it is refused only when another user owns it or others can write to it.
+test('a non-codex provider in a symlinked fnm-style bin directory resolves to its protected real directory', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-fnm-provider-')));
+  try {
+    const installation = join(root, 'fnm', 'node-versions', 'v22', 'installation'), real = join(installation, 'bin');
+    await mkdir(real, {recursive: true, mode: 0o700});
+    await copyFile(process.execPath, join(real, 'node')); await chmod(join(real, 'node'), 0o700);
+    await writeFile(join(real, 'claude'), '#!/bin/sh\nprintf "fnm-claude"\n', {mode: 0o700});
+    await writeFile(join(real, 'codex'), '#!/bin/sh\nprintf "fnm-codex"\n', {mode: 0o700});
+    const multishell = join(root, 'fnm_multishells', '4242_1762560000000');
+    await mkdir(dirname(multishell), {mode: 0o700}); await symlink(installation, multishell);
+    const entry = join(multishell, 'bin');
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry}), real);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry}), false);
+    const after = launchers.stableRepositoryLauncherContents('0.2.224', {platform: 'linux', nodeDirectory: dirname(process.execPath),
+      providerDirectory: real});
+    assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after, 'claude'), true);
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: entry}),
+      /^Error: relay_startup_codex_path_invalid/, 'codex keeps the 0.2.223 rules');
+    await chmod(real, 0o777);
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry}),
+      /^Error: relay_startup_claude_path_invalid/, 'a world-writable real directory is refused');
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry}), true);
+  } finally {await chmod(join(root, 'fnm', 'node-versions', 'v22', 'installation', 'bin'), 0o700).catch(() => {});
+    await rm(root, {recursive: true, force: true});}
+});
