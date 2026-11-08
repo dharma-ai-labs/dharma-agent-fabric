@@ -21,7 +21,7 @@ test('the installed contract uses one agent-run public reference and exact recip
   const contract = await readFile(contractUrl, 'utf8');
   assert.match(contract, /public setup reference is not a bearer credential/i);
   assert.match(contract, /actual authenticated coding-agent conversation/i);
-  assert.match(contract, /verified server-canonical public instructions \(CLI192 portal mode\)/i);
+  assert.match(contract, /verified server-canonical public instructions \(portal mode\)/i);
   assert.match(contract, /provided original public prompt \(legacy stdin mode\)/i);
   assert.match(contract, /Neither mode attests the enclosing human chat/i);
   assert.match(contract, /registers the matching `dharma_setup_reference` tool/i);
@@ -59,7 +59,7 @@ test('the installed guide distinguishes canonical portal input from legacy stdin
   assert.match(contract, /Legacy `--stdin` remains supported for an entire original public prompt and cannot combine with either portal pin/i);
   assert.match(contract, /`nativeOriginalUserPromptAttested:false`/);
   assert.match(contract, /legacy input is not a failure fallback/i);
-  assert.match(contract, /From CLI 0\.2\.193/);
+  assert.match(contract, /The generated prompt explicitly prepares and selects both npm prefix and cache/);
   assert.match(contract, /both npm prefix and cache in a fresh private temporary directory outside the source checkout/);
   assert.match(contract, /trusted runtime files inside a mutable source checkout remain forbidden/);
   assert.doesNotMatch(contract, /both npm prefix and cache beneath the approved checkout/);
@@ -71,7 +71,7 @@ test('the installed guide distinguishes canonical portal input from legacy stdin
 
 test('the installed guide scopes trusted setup approval to one native command', async () => {
   const contract = await readFile(contractUrl, 'utf8');
-  assert.match(contract, /From CLI 0\.2\.194/);
+  assert.match(contract, /An initial shell entry requires normal one-command approval/);
   assert.match(contract, /normal one-command approval for the exact initial setup command outside the coding sandbox/);
   assert.match(contract, /Execute only after actual approval/);
   assert.match(contract, /never accept session-wide or persistent rules/);
@@ -84,7 +84,7 @@ test('the installed guide scopes trusted setup approval to one native command', 
 
 test('the installed guide keeps executable setup text out of the child model turn', async () => {
   const contract = await readFile(contractUrl, 'utf8');
-  assert.match(contract, /From CLI 0\.2\.195/);
+  assert.match(contract, /The host captures, validates, binds and SHA-256 attributes/);
   assert.match(contract, /captures, validates, binds and SHA-256 attributes the exact public portal prompt/);
   assert.match(contract, /never forwards that raw prompt as executable child-turn content/);
   assert.match(contract, /host-derived instruction bound to the exact operation ID, setup reference and prompt hash/);
