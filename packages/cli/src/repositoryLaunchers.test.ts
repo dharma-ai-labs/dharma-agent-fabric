@@ -715,7 +715,7 @@ printf "${provider}"
     await mkdir(join(workspace, '.dharma', 'bin'), {recursive: true, mode: 0o755});
     await writeFile(join(workspace, '.dharma', 'bin', 'dharma'), planted.shell, {mode: 0o755});
     await writeFile(join(workspace, '.dharma', 'bin', 'dharma.cmd'), planted.windows, {mode: 0o644});
-    const read = (path = workspace) => launchers.protectedSetUpProviderDirectories({home, workspace: path});
+    const read = (path = workspace) => launchers.protectedSetUpProviderDirectories({home, workspace: path, searchPath: ''});
     const record = (directories: string[], path = workspace) =>
       launchers.recordSetUpProviderDirectories({home, workspace: path, providerDirectory: directories});
     assert.deepEqual(await read(), [], 'nothing recorded: the committed launcher is not read');
@@ -726,6 +726,39 @@ printf "${provider}"
     assert.deepEqual(await read(other), [{provider: 'codex', directory: own}]);
     await chmod(join(own, 'codex'), 0o722);
     assert.deepEqual(await read(), [], 'a recorded directory that no longer passes is dropped');
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review K1 regression (2x3=6): since K1, only this device's record kept a provider directory. A 0.2.223
+// device has no record, so when its codex held no installed bundle the first 0.2.224 setup of another agent, or a relay
+// upgrade from inside that agent, dropped codex from the launcher; 0.2.223 always carried the codex on the setup PATH.
+// With no record for the workspace, that codex is kept when it passes, and left off when absent, unsafe or inside the
+// workspace, never failing; the launcher in the working tree is still never read.
+test('with no record yet, the protected codex first on the setup PATH is kept, and an absent or unsafe one left off', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-unrecorded-codex-')));
+  try {
+    const home = join(root, 'home'), workspace = join(root, 'repo'), codexDirectory = join(root, 'npm-global', 'bin');
+    const tools = join(workspace, 'tools'), elsewhere = join(root, 'elsewhere', 'bin');
+    for (const directory of [home, codexDirectory, tools, elsewhere]) await mkdir(directory, {recursive: true, mode: 0o700});
+    for (const directory of [codexDirectory, tools, elsewhere]) {
+      await writeFile(join(directory, 'codex'), '#!/bin/sh\nprintf "codex"\n', {mode: 0o700});
+    }
+    // A 0.2.223-format launcher naming another codex directory: it is never read.
+    const prior = launchers.stableRepositoryLauncherContents('0.2.223', {platform: 'linux', nodeDirectory: '/usr/bin',
+      providerDirectory: elsewhere});
+    await mkdir(join(workspace, '.dharma', 'bin'), {recursive: true, mode: 0o700});
+    await writeFile(join(workspace, '.dharma', 'bin', 'dharma'), prior.shell, {mode: 0o700});
+    const read = (searchPath: string) => launchers.protectedSetUpProviderDirectories({home, workspace, searchPath});
+    assert.deepEqual(await read(`${codexDirectory}:${elsewhere}`), [{provider: 'codex', directory: codexDirectory}],
+      'the codex first on the setup PATH is kept');
+    assert.deepEqual(await read(''), [], 'no codex on PATH: nothing, and the working-tree launcher is not read');
+    assert.deepEqual(await read(`${tools}:${codexDirectory}`), [], 'a codex inside the workspace is never kept');
+    await chmod(join(codexDirectory, 'codex'), 0o722);
+    assert.deepEqual(await read(`${codexDirectory}:${elsewhere}`), [], 'an unsafe codex is left off, never an error');
+    await chmod(join(codexDirectory, 'codex'), 0o700);
+    await launchers.recordSetUpProviderDirectories({home, workspace, providerDirectory: []});
+    assert.deepEqual(await read(codexDirectory), [], 'once a record exists, it alone decides');
   } finally {await rm(root, {recursive: true, force: true});}
 });
 

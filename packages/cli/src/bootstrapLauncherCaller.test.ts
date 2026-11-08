@@ -230,8 +230,8 @@ test('actual launcher installer keeps the provider directories it recorded for t
     },
   });
   await runCodexBootstrapHost(f.input, () => second(f.root, ['claude']));
-  assert.deepEqual(JSON.parse(JSON.stringify(seen)), [{home: '/synthetic/home', workspace: f.root}],
-    "the installer reads this device's record for the workspace");
+  assert.deepEqual(JSON.parse(JSON.stringify(seen)), [{home: '/synthetic/home', workspace: f.root,
+    searchPath: '/synthetic/codex/bin:/synthetic/claude/bin'}], "the installer reads this device's record for the workspace");
   assert.deepEqual(JSON.parse(JSON.stringify(recorded)), [
     {home: '/synthetic/home', workspace: f.root, providerDirectory: linux ? ['/synthetic/codex/bin'] : []},
     {home: '/synthetic/home', workspace: f.root, providerDirectory: linux ? ['/synthetic/codex/bin', '/synthetic/claude/bin'] : []}]);
@@ -273,4 +273,38 @@ test('actual launcher installer never keeps a provider directory a committed lau
     nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
     ...(linux ? {providerDirectory: '/synthetic/codex/bin'} : {})});
   assert.equal(shell, expected.shell);
+});
+
+// CLI 0.2.224 review K1 regression (2x3=6): a 0.2.223 device has a launcher naming codex's directory and no record of
+// its own. With codex's shared package still pending (no installed bundle, so codex is not a holder), the first 0.2.224
+// `setup --provider claude` dropped codex from the launcher, which 0.2.223 always carried from the setup PATH. With no
+// record, setup keeps the protected codex first on its PATH, leaves off an unsafe one without failing, and records.
+test('actual launcher installer keeps codex from the setup PATH on a 0.2.223 device with no record', {skip: process.platform !== 'linux'}, async t => {
+  for (const unsafe of [false, true]) {
+    const f = await fixture(t);
+    const home = await fs.realpath(await fs.mkdtemp(resolve(tmpdir(), 'dharma-launcher-home-')));
+    const tools = await fs.realpath(await fs.mkdtemp(resolve(tmpdir(), 'dharma-launcher-codex-')));
+    t.after(() => fs.rm(home, {recursive: true, force: true})); t.after(() => fs.rm(tools, {recursive: true, force: true}));
+    const codex = resolve(tools, 'bin'); await fs.mkdir(codex, {mode: 0o700});
+    await fs.writeFile(resolve(codex, 'codex'), '#!/bin/sh\necho codex\n', {mode: 0o700});
+    if (unsafe) await fs.chmod(resolve(codex, 'codex'), 0o722);
+    const prior = stableRepositoryLauncherContents('0.2.223', {platform: 'linux', nodeDirectory: dirname(process.execPath),
+      providerDirectory: codex});
+    await fs.mkdir(f.bin, {recursive: true, mode: 0o700});
+    await fs.writeFile(resolve(f.bin, 'dharma'), prior.shell, {mode: 0o700});
+    await fs.writeFile(resolve(f.bin, 'dharma.cmd'), prior.windows, {mode: 0o600});
+    const install = await caller({...launcherModule, dharmaHome: () => home,
+      resolveRepositoryNpmCli: async () => npmCliPath,
+      providerProcessEnvironment: () => ({PATH: `${codex}:/synthetic/claude/bin`}),
+      resolveRepositoryProviderDirectory: async (input: {provider: string}) => {
+        assert.equal(input.provider, 'claude', 'codex holds no bundle'); return '/synthetic/claude/bin';
+      }});
+    await runCodexBootstrapHost(f.input, () => install(f.root, ['claude']));
+    const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
+      nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
+      providerDirectory: unsafe ? ['/synthetic/claude/bin'] : [codex, '/synthetic/claude/bin']});
+    assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell, unsafe ? 'unsafe codex left off' : 'codex kept');
+    assert.deepEqual(await launcherModule.protectedSetUpProviderDirectories({home, workspace: f.root, searchPath: ''}),
+      unsafe ? [] : [{provider: 'codex', directory: codex}], 'the record now names what the launcher carries');
+  }
 });
