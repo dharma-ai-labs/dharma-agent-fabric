@@ -731,6 +731,33 @@ printf "${provider}"
   } finally {await rm(root, {recursive: true, force: true});}
 });
 
+// CLI 0.2.224 review R6-1 (2x4=8): the launcher puts every provider directory ahead of the recorded Node directory, and
+// npm exec starts the CLI through env node. Since R2 and N1, a claude, agy or hermes directory could hold a node other
+// than the setup Node, which then ran the supervisor, relay and sessions, and codex bootstrap failed closed with
+// setup_runtime_process_unconfirmed. A directory whose sibling node is not the setup Node is left off the launcher;
+// the relay guard still runs that provider.
+test('a provider directory whose node is not the setup Node is left off the launcher, and the relay still runs it', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-foreign-node-')));
+  try {
+    const home = join(root, 'home'), workspace = join(root, 'repo'), bin = join(root, 'claude-bin');
+    for (const directory of [home, workspace, bin]) await mkdir(directory, {mode: 0o700});
+    await writeFile(join(bin, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
+    // A protected node of another version, as an older nvm version's bin directory or /usr/bin behind an nvm Node holds.
+    await writeFile(join(bin, 'node'), '#!/bin/sh\necho FAKE-NODE\n'); await chmod(join(bin, 'node'), 0o755);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), false, 'relay: the provider still runs');
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin}), null, 'status: nothing unsafe');
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}), undefined,
+      'setup: left off the launcher');
+    await launchers.recordSetUpProviderDirectories({home, workspace, providerDirectory: [bin]});
+    assert.deepEqual(await launchers.protectedSetUpProviderDirectories({home, workspace}), [], 'a recorded one is not kept');
+    // The setup Node beside claude, as in the nvm or fnm bin directory setup runs from, keeps the directory.
+    await rm(join(bin, 'node')); await copyFile(process.execPath, join(bin, 'node')); await chmod(join(bin, 'node'), 0o700);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}), bin, 'setup: the setup Node');
+    assert.deepEqual(await launchers.protectedSetUpProviderDirectories({home, workspace}), [{provider: 'claude', directory: bin}]);
+  } finally {await rm(root, {recursive: true, force: true});}
+});
+
 // CLI 0.2.224 review R2: claude, agy and hermes were held to codex's launcher rules (the PATH entry is its own real
 // path; a node there hash-equals the running one), so fnm's per-shell bin directory, a symlink, was refused. The real
 // directory is checked and recorded instead; it is refused only when another user owns it or others can write to it.
