@@ -729,15 +729,29 @@ test('relay and setup refuse a provider executable whose link chain passes a dir
     const codexBin = join(root, 'codex-bin'); await mkdir(codexBin, {mode: 0o700});
     await writeFile(join(codexBin, 'codex'), '#!/bin/sh\nprintf "own-codex"\n', {mode: 0o700});
     await symlink(join('..', 'shared', 'node'), join(codexBin, 'node'));
+    // N1: a node beside claude is the env-node a node-script claude runs with, since the launcher and the relay put the
+    // provider directory before the recorded Node directory on PATH. Its link chain is checked as codex's node is.
+    const claudeBin = join(root, 'claude-bin'); await mkdir(claudeBin, {mode: 0o700});
+    await writeFile(join(claudeBin, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
+    await symlink(join('..', 'shared', 'node'), join(claudeBin, 'node'));
     // Every link and directory on the way is this user's and closed to others: all pass.
     assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), false);
     assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}), bin);
     assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: codexBin}), codexBin);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: claudeBin}), false);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: claudeBin}), claudeBin);
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: claudeBin}), null);
     await chmod(shared, 0o777);
     assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), true, 'relay: link in a 0777 directory');
     await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}),
       /^Error: relay_startup_claude_path_invalid/, 'setup: claude link in a 0777 directory');
     await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: codexBin}),
       /^Error: relay_startup_codex_path_invalid/, "setup: codex's node link in a 0777 directory");
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: claudeBin}), true,
+      "relay: claude's node link in a 0777 directory (N1)");
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: claudeBin}),
+      /^Error: relay_startup_claude_path_invalid/, "setup: claude's node link in a 0777 directory (N1)");
+    assert.equal((await launchers.providerUnsafePathDiagnosis('claude', {searchPath: claudeBin}))?.path, shared,
+      "status names the directory that lets others repoint claude's node (N1)");
   } finally {await chmod(shared, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
 });
