@@ -349,3 +349,41 @@ test('the seed capsules are default capsules, so the 90-day retention is the sho
   const step4 = seedPlan.slice(seedPlan.indexOf('4. **Trajectories.**'), seedPlan.indexOf('5. **Stop the relay.**'));
   assert.match(step4, /content disclosure policy[^.]*off/i, 'both step-4 options run with content synchronization off');
 });
+
+// 393-F3: since platform #1909 a ChatGPT OAuth client sees only the 20-tool
+// profile, so each capture instruction must name the client it uses.
+test('the capture steps name which client each tools/list capture uses', () => {
+  const profileSize = catalog.tools.filter(tool => tool.chatgptProfile).length;
+  const fullSize = catalog.tools.length;
+  const bullet = readme.split('\n- ').find(item => item.includes('--snapshot-manifest')) ?? '';
+  const checklistLine = checklist.split('\n').find(line => line.includes('A fresh hosted `tools/list` capture')) ?? '';
+  for (const [name, text] of [['README.md', bullet], ['PUBLICATION_CHECKLIST.md', checklistLine]]) {
+    const flat = text.replace(/\s+/g, ' ');
+    assert.match(flat, new RegExp(`non-ChatGPT client [(]all ${fullSize} tools[)]`), `${name} must name the non-ChatGPT client for the full comparison`);
+    assert.match(flat, new RegExp(`ChatGPT-client capture is checked with \`--profile chatgpt\` against the ${profileSize}-tool profile`),
+      `${name} must check a ChatGPT-client capture with --profile chatgpt`);
+    assert.match(flat, new RegExp(`[Nn]ever refresh the ${fullSize}-tool snapshot from a ChatGPT-client capture`),
+      `${name} must forbid refreshing the full snapshot from a ChatGPT-client capture`);
+  }
+  assert.doesNotMatch(readme, /Refresh the snapshot if the verdict is not `compatible`\./, 'README.md must not refresh the snapshot from any capture');
+  const acceptance = seedPlan.slice(seedPlan.indexOf('## Acceptance before submission'));
+  const captureStep = acceptance.split(/\n(?=\d+\. )/).find(step => step.includes('--snapshot-manifest')) ?? '';
+  assert.match(captureStep.replace(/\s+/g, ' '), /--snapshot-manifest <manifest\.json> --profile chatgpt/,
+    'the seed plan captures with the reviewer ChatGPT session, so it must check against the ChatGPT profile');
+});
+
+// 393-F4: ChatGPT is refused every tool outside the profile, so no submitted
+// text may point the reviewer or the model at one.
+test('no justification, description or case in the submission names a fabric_* tool outside the ChatGPT profile', () => {
+  const profile = new Set(catalog.tools.filter(tool => tool.chatgptProfile).map(tool => tool.name));
+  const texts = [['app_info.description', submission.app_info.description]];
+  for (const [tool, declaration] of Object.entries(submission.tools)) {
+    for (const [key, value] of Object.entries(declaration.justifications)) texts.push([`${tool}.${key}`, value]);
+  }
+  for (const testCase of [...submission.test_cases, ...submission.negative_test_cases]) {
+    for (const key of ['description', 'user_prompt', 'expected_output']) texts.push([`${testCase.description.slice(0, 24)} ${key}`, testCase[key]]);
+  }
+  const outside = texts.flatMap(([where, text]) => [...String(text).matchAll(/\bfabric_[A-Za-z0-9_*]*/g)]
+    .map(match => match[0]).filter(name => !profile.has(name)).map(name => `${where}: ${name}`));
+  assert.deepEqual(outside, []);
+});
