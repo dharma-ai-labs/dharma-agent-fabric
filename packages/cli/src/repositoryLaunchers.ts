@@ -223,7 +223,8 @@ async function protectParents(path: string, privateGroup: number | null) {
 // (a root-owned sticky directory above the end excepted), so no other user can repoint the path after the check. A
 // link's own mode is not checked: Linux ignores it. Protected links, such as a linked bin directory or fnm's per-shell
 // directory in the user's own state directory, pass; a link in a directory others can write does not (CLI 0.2.224 R2b).
-async function protectedPathResolution(path: string, privateGroup: number | null) {
+// With `file`, the path may end in a regular file, such as a provider executable, whose own checks follow (F1).
+async function protectedPathResolution(path: string, privateGroup: number | null, file = false) {
   providerDirectoryPath(path);
   const pending = path.split('/').filter(Boolean);
   let resolved = '/', links = 0;
@@ -247,6 +248,7 @@ async function protectedPathResolution(path: string, privateGroup: number | null
       pending.unshift(...target.split('/').filter(Boolean));
       continue;
     }
+    if (file && !pending.length && stat.isFile()) return next;
     await protectedDirectory(next, !pending.length);
     resolved = next;
   }
@@ -256,13 +258,15 @@ async function protectedPathResolution(path: string, privateGroup: number | null
 // The provider bin directory and the executable it resolves to are owned by this user or root, and neither they
 // nor their parents can be written by anyone else; the user's own private group is not anyone else. A codex PATH
 // entry must be its own real path, as in 0.2.223. Another provider's entry may be a symlink, as fnm's per-shell bin
-// directory is: its real directory is checked and is the one the launcher records (CLI 0.2.224 review R2).
+// directory is: its real directory is checked and is the one the launcher records (CLI 0.2.224 review R2). The relay
+// and the launcher run the provider by name, so the kernel follows the executable's own link chain again at launch:
+// every link and directory on it is checked as well (F1).
 async function protectedProviderExecutable(directory: string, provider: ProviderCommand, privateGroup: number | null) {
   providerDirectoryPath(directory);
   const real = await realpath(directory);
   if (real !== directory && (provider === 'codex' || providerDirectoryPath(real) !== real)) throw Error();
   await protectParents(real, privateGroup);
-  const executable = await realpath(join(real, provider));
+  const executable = await protectedPathResolution(join(real, provider), privateGroup, true);
   await protectParents(dirname(executable), privateGroup);
   return {directory: real, executable};
 }
@@ -290,7 +294,7 @@ async function protectedProviderDirectory(path: string, provider: ProviderComman
   }
   // npm's CLI child uses env-node; provider priority must not replace its runtime.
   if (hasNode) {
-    const selectedNode = await realpath(join(directory, 'node'));
+    const selectedNode = await protectedPathResolution(join(directory, 'node'), privateGroup, true);
     await protectParents(dirname(selectedNode), privateGroup);
     if (!((await lstat(selectedNode)).mode & 0o111)
       || await protectedBinaryHash(selectedNode, 'linux') !== await protectedBinaryHash(nodePath, 'linux')) throw Error();
