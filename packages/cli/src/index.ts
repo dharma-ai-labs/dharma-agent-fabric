@@ -2124,7 +2124,7 @@ async function installStableRepositoryLauncher(workspace: string, providers: rea
   // Keep each protected provider directory the launcher being replaced carries, so setting up another agent never
   // drops one whose shared package is still pending (CLI 0.2.224 review R1).
   const kept = await (scope ? scope.step(() => currentLauncherProviders(workspace)) : currentLauncherProviders(workspace));
-  const providerDirectory = providerDirectoriesInPathOrder([...resolved, ...kept.map(item => item.directory)], searchPath);
+  const providerDirectory = await providerDirectoriesInPathOrder([...resolved, ...kept.map(item => item.directory)], searchPath);
   const contents = stableRepositoryLauncherContents(VERSION,
     { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
       ...(providerDirectory.length ? {providerDirectory} : {}) });
@@ -2222,7 +2222,7 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       resolved.push(...kept.map(item => item.directory));
       launcherProviders = [...new Set([...launcherProviders, ...kept.map(item => item.provider)])];
     }
-    const providerDirectory = providerDirectoriesInPathOrder(resolved, searchPath);
+    const providerDirectory = await providerDirectoriesInPathOrder(resolved, searchPath);
     const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
     const receipt = await upgrade({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,

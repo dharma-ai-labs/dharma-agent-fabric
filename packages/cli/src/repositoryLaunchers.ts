@@ -17,14 +17,25 @@ const unsafeProviderOnPath = (provider: ProviderCommand) => `relay_startup_${pro
   + ` If you set up another provider, pass --provider <${PROVIDER_COMMANDS.join('|')}>.`;
 
 /**
- * The resolved provider bin directories, once each, in the order of the PATH they were resolved from. One not on that
- * PATH (a symlinked entry's real directory, or one kept from the launcher being replaced) follows, in the given order.
+ * The resolved provider bin directories, once each, in the order of the PATH they were resolved from. A symlinked
+ * entry's real directory takes that entry's place, so each provider stays first on PATH where setup found it (CLI
+ * 0.2.224 review round 2). One no PATH entry reaches, kept from the launcher being replaced, follows in the given order.
  */
-export function providerDirectoriesInPathOrder(directories: readonly (string | undefined)[], searchPath: string | undefined): string[] {
+export async function providerDirectoriesInPathOrder(directories: readonly (string | undefined)[],
+  searchPath: string | undefined): Promise<string[]> {
   const order = (searchPath ?? '').split(':');
-  const rank = (directory: string) => order.includes(directory) ? order.indexOf(directory) : order.length;
-  return [...new Set(directories.filter((directory): directory is string => directory !== undefined))]
-    .sort((left, right) => rank(left) - rank(right));
+  const unique = [...new Set(directories.filter((directory): directory is string => directory !== undefined))];
+  let real: (string | undefined)[] | undefined;
+  const rank = new Map<string, number>();
+  for (const directory of unique) {
+    let index = order.indexOf(directory);
+    if (index < 0) {
+      real ??= await Promise.all(order.map(entry => posix.isAbsolute(entry) ? realpath(entry).catch(() => undefined) : undefined));
+      index = real.indexOf(directory);
+    }
+    rank.set(directory, index < 0 ? order.length : index);
+  }
+  return unique.sort((left, right) => rank.get(left)! - rank.get(right)!);
 }
 
 function providerDirectoryPath(value: string) {
@@ -289,6 +300,10 @@ export async function providerFirstOnPathUnsafe(provider: ProviderCommand,
 }
 
 async function relayProviderExecutable(directory: string, provider: ProviderCommand, privateGroup: number | null) {
+  // The relay runs the provider through this entry, so the entry must be its own real path, as in 0.2.223: a link
+  // could be repointed after the check. The launcher writes each set-up provider's real directory first on the
+  // relay PATH (CLI 0.2.224 review round 2).
+  if (await realpath(directory) !== directory) throw Error();
   const {executable} = await protectedProviderExecutable(directory, provider, privateGroup);
   await protectedExecutableFile(executable, privateGroup);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
