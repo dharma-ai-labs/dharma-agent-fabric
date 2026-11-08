@@ -369,13 +369,11 @@ test('the capture steps use a non-ChatGPT capture and check the ChatGPT profile 
     const flat = text.replace(/\s+/g, ' ');
     assert.match(flat, /non-ChatGPT MCP client[^.]*signed in as the reviewer account/,
       `${name} must capture with a non-ChatGPT MCP client signed in as the reviewer account`);
-    assert.match(flat, /`node scripts\/verify-mcp-catalog\.mjs --snapshot-manifest <manifest\.json>`/,
+    assert.match(flat, /node scripts\/verify-mcp-catalog\.mjs --snapshot-manifest manifest\.json(?! --profile)/,
       `${name} must run the full comparison without --profile`);
-    assert.match(flat, new RegExp(`\`compatible\`[^.]*all ${fullSize} tools`), `${name} must expect a compatible verdict with all ${fullSize} tools`);
     assert.match(flat, /ChatGPT developer mode never shows the raw `tools\/list`/, `${name} must say developer mode never shows the raw tools/list`);
     assert.match(flat, new RegExp(`exactly the ${profileSize} [^.]*\`chatgptProfile: true\``),
       `${name} must check that the ChatGPT connector lists exactly the ${profileSize} profile tools`);
-    assert.match(flat, /call to a tool outside the profile[^.]*must be refused/, `${name} must check that a call outside the profile is refused`);
     assert.match(flat, /`--profile chatgpt` is only for a capture that really came through a ChatGPT-registered OAuth client.*?the usual operator cannot make one/,
       `${name} must keep --profile chatgpt for a real ChatGPT-registered capture, which the usual operator cannot make`);
     assert.doesNotMatch(flat, /reviewer session is a ChatGPT-client capture/, `${name} must not call the operator capture a ChatGPT-client capture`);
@@ -393,6 +391,185 @@ test('the capture steps use a non-ChatGPT capture and check the ChatGPT profile 
   const example = catalogByName.get(captureFlat.match(/for example `(fabric_[a-z0-9_]+)`/)?.[1]);
   assert.ok(example && !example.chatgptProfile && example.annotations.readOnlyHint === true,
     'the refusal check must use a read-only tool outside the profile, so no write runs during acceptance');
+});
+
+// 393-R6-1: compareSnapshotManifest takes the worst status over five
+// boundaries, and tools/list carries no confirmation flag, so one hosted
+// server-boundary capture can never be `compatible`. The documented pass
+// criterion is the one a correct capture actually meets.
+const SINGLE_CAPTURE_SERVER_REASONS = ['confirmation_evidence_missing', 'schema_reference_missing', 'schema_unsupported'];
+const DRAFT_07 = 'http://json-schema.org/draft-07/schema#';
+const repoRoot = resolve(import.meta.dirname, '..');
+const captureDocs = () => {
+  const acceptance = seedPlan.slice(seedPlan.indexOf('## Acceptance before submission'), seedPlan.indexOf('## Reset'));
+  return [
+    ['REVIEWER_SEED_PLAN.md', acceptance.split(/\n(?=\d+\. )/).find(step => step.includes('--snapshot-manifest')) ?? ''],
+    ['README.md', readme.split('\n- ').find(item => item.includes('--snapshot-manifest')) ?? ''],
+    ['PUBLICATION_CHECKLIST.md', checklist.split('\n').find(line => line.includes('A fresh hosted `tools/list` capture')) ?? ''],
+  ];
+};
+// The lines of the first ```sh block in a text, trimmed.
+const shellBlock = text => {
+  const lines = text.split('\n').map(line => line.trim());
+  const start = lines.indexOf('```sh');
+  if (start < 0) return [];
+  const end = lines.indexOf('```', start + 1);
+  return lines.slice(start + 1, end < 0 ? undefined : end).filter(Boolean);
+};
+
+// The failures of a receipt against the documented single-capture criterion.
+function singleCaptureProblems(receipt) {
+  const problems = [];
+  if (receipt.verdict !== 'unknown') problems.push(`verdict ${receipt.verdict}`);
+  if (receipt.manifestErrors.length) problems.push(`manifestErrors ${receipt.manifestErrors}`);
+  for (const boundary of receipt.boundaries) {
+    if (boundary.boundary === 'server') {
+      if (boundary.missingTools.length) problems.push(`missingTools ${boundary.missingTools}`);
+      if (boundary.extraTools.length) problems.push(`extraTools ${boundary.extraTools}`);
+      const other = boundary.reasons.filter(reason => !SINGLE_CAPTURE_SERVER_REASONS.includes(reason));
+      if (other.length) problems.push(`server reasons ${other}`);
+    } else if (boundary.status !== 'unknown' || boundary.reasons.join() !== 'not_supplied') {
+      problems.push(`${boundary.boundary} ${boundary.status} ${boundary.reasons}`);
+    }
+  }
+  return problems;
+}
+
+// A 65-tool hosted tools/list RESULT in the shape the platform serves:
+// @modelcontextprotocol/sdk 1.30.0 with zod 4.6.6 labels every input and
+// output schema JSON Schema draft-07.
+function hostedToolsList(change = tools => tools) {
+  return {
+    tools: change(snapshot.tools.map(tool => ({
+      name: tool.name, title: tool.title, description: tool.description,
+      inputSchema: { $schema: DRAFT_07, type: 'object',
+        properties: Object.fromEntries(tool.inputProperties.map(name => [name, { type: 'string' }])),
+        required: tool.inputRequired, additionalProperties: false },
+      outputSchema: { $schema: DRAFT_07, type: 'object', properties: {}, additionalProperties: {} },
+      annotations: { title: tool.title, ...tool.annotations },
+      execution: { taskSupport: 'forbidden' },
+    }))),
+  };
+}
+
+// Runs one documented `node ...` line without a shell: "$VAR" arguments come
+// from env, `< file` is stdin and `> file` is stdout, both inside cwd.
+function runDocumented(line, cwd, env) {
+  const tokens = line.split(/\s+/).map(token => token.replace(/^"\$([A-Z_]+)"$/, (_, name) => {
+    assert.ok(Object.hasOwn(env, name), `documented command uses unset ${name}`);
+    return env[name];
+  }));
+  assert.equal(tokens[0], 'node', `documented command must run node: ${line}`);
+  const args = [];
+  let input;
+  let output;
+  for (let index = 1; index < tokens.length; index++) {
+    if (tokens[index] === '<') input = readFileSync(join(cwd, tokens[++index]));
+    else if (tokens[index] === '>') output = tokens[++index];
+    else args.push(tokens[index]);
+  }
+  assert.match(args[0] ?? '', /^scripts\/[a-z-]+\.mjs$/, `documented command must run a repository script: ${line}`);
+  args[0] = resolve(repoRoot, args[0]);
+  const result = spawnSync(process.execPath, args, { cwd, input, encoding: 'utf8' });
+  if (output) writeFileSync(join(cwd, output), result.stdout);
+  return result;
+}
+
+function runCaptureCommands(rawResult) {
+  const commands = shellBlock(captureDocs()[0][1]);
+  const dir = mkdtempSync(join(tmpdir(), 'openai-app-capture-'));
+  try {
+    writeFileSync(join(dir, 'tools-list.json'), JSON.stringify(rawResult));
+    const env = { SERVER_NAME: snapshot.serverInfo.name, SERVER_VERSION: snapshot.serverInfo.version };
+    const results = commands.map(line => runDocumented(line, dir, env));
+    for (const result of results.slice(0, -1)) assert.equal(result.status, 0, result.stderr);
+    const verify = results.at(-1);
+    return { verify, receipt: JSON.parse(verify.stdout) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('the capture docs give the exact commands from a raw tools/list result to the verifier (393-R6-1)', () => {
+  const [[, seedStep], [, readmeBullet]] = captureDocs();
+  const commands = shellBlock(seedStep);
+  assert.equal(commands.length, 3, 'the seed plan gives one command each to project, assemble and verify');
+  assert.match(commands[0], /^node scripts\/mcp-tools-list-project\.mjs --stdin .*< tools-list\.json > server-snapshot\.json$/);
+  assert.match(commands[1], /^node scripts\/mcp-snapshot-manifest-assemble\.mjs .*--snapshot server-snapshot\.json > manifest\.json$/);
+  assert.equal(commands[2], 'node scripts/verify-mcp-catalog.mjs --snapshot-manifest manifest.json');
+  assert.deepEqual(shellBlock(readmeBullet), commands, 'README.md must give the same commands as the seed plan');
+  for (const name of ['SERVER_NAME', 'SERVER_VERSION']) {
+    assert.ok(commands.join(' ').includes(`"$${name}"`), `the commands must use ${name}`);
+    assert.match(seedStep.replace(/\s+/g, ' '), new RegExp(`\`${name}\``), `the seed plan must say how to set ${name}`);
+  }
+  assert.match(seedStep.replace(/\s+/g, ' '), /`result` object of the `tools\/list` response \(not the JSON-RPC envelope\)/,
+    'the seed plan must say which part of the tools/list response to save');
+});
+
+test('every capture doc states the real single-capture pass criterion (393-R6-1)', () => {
+  for (const [name, text] of captureDocs()) {
+    const flat = text.replace(/\s+/g, ' ');
+    assert.doesNotMatch(flat, /`compatible`, with all \d+ tools/, `${name} must not expect a compatible verdict from one capture`);
+    assert.match(flat, /verdict must be `unknown`/, `${name} must expect an unknown verdict`);
+    assert.match(flat, /`missingTools` and `extraTools`[^.]*empty/, `${name} must require empty missingTools and extraTools`);
+    assert.match(flat, /`annotation_mismatch`/, `${name} must rule out annotation_mismatch`);
+    for (const reason of [...SINGLE_CAPTURE_SERVER_REASONS, 'not_supplied']) {
+      assert.ok(flat.includes(`\`${reason}\``), `${name} must name the allowed reason ${reason}`);
+    }
+    assert.match(flat, /[Dd]o not add[^.]*confirmation[^.]*source, host, submitted or released[^.]*nobody observed/,
+      `${name} must forbid adding unobserved confirmation or boundary evidence`);
+  }
+});
+
+test('the documented commands pass a correct 65-tool hosted capture and fail a drifted one (393-R6-1)', () => {
+  const { verify, receipt } = runCaptureCommands(hostedToolsList());
+  assert.equal(verify.status, 1, 'one server-boundary capture is unknown, so the verifier exits 1');
+  assert.equal(receipt.referenceToolCount, catalog.tools.length);
+  assert.deepEqual(singleCaptureProblems(receipt), []);
+  const server = receipt.boundaries.find(boundary => boundary.boundary === 'server');
+  assert.equal(server.tools.length, catalog.tools.length);
+  assert.deepEqual(server.reasons, ['confirmation_evidence_missing', 'schema_unsupported']);
+
+  const unlabelled = hostedToolsList(tools => tools.map(tool => {
+    const { $schema: _input, ...inputSchema } = tool.inputSchema;
+    const { $schema: _output, ...outputSchema } = tool.outputSchema;
+    return { ...tool, inputSchema, outputSchema };
+  }));
+  assert.deepEqual(singleCaptureProblems(runCaptureCommands(unlabelled).receipt), []);
+
+  const drifted = {
+    missing: [tools => tools.slice(1), /missingTools/],
+    extra: [tools => [...tools, { ...tools[0], name: 'fabric_unlisted_tool' }], /extraTools/],
+    annotation: [tools => tools.map((tool, index) => index ? tool
+      : { ...tool, annotations: { ...tool.annotations, readOnlyHint: !tool.annotations.readOnlyHint } }), /annotation_mismatch/],
+  };
+  for (const [label, [change, expected]] of Object.entries(drifted)) {
+    const problems = singleCaptureProblems(runCaptureCommands(hostedToolsList(change)).receipt);
+    assert.match(problems.join('; '), expected, `a ${label} drift must fail the criterion`);
+  }
+});
+
+// 393-R6-2: a wrapped line that starts with "1." renders as a nested list.
+test('no wrapped line in the acceptance steps starts a nested numbered list (393-R6-2)', () => {
+  const acceptance = seedPlan.slice(seedPlan.indexOf('## Acceptance before submission'), seedPlan.indexOf('## Reset'));
+  assert.deepEqual(acceptance.split('\n').filter(line => /^\s+\d+\. /.test(line)), []);
+});
+
+// 393-R6-3: ChatGPT developer mode shows only what ChatGPT offers and calls;
+// the server-side refusal is proven by the platform tests, not by this step.
+test('the refusal check says what the operator observes and where the server refusal is tested (393-R6-3)', () => {
+  for (const [name, text] of captureDocs()) {
+    const flat = text.replace(/\s+/g, ' ');
+    assert.doesNotMatch(flat, /and the server refuses the call/, `${name} must not present the server refusal as observed`);
+    assert.doesNotMatch(flat, /call to a tool outside the profile[^.]*must be refused/, `${name} must not ask the operator to observe a server refusal`);
+    assert.match(flat, /ChatGPT does not offer the tool and the conversation shows no `tools\/call` to it/,
+      `${name} must say what the operator can observe`);
+    for (const path of ['src/app/mcp/chatgptToolProfile.test.ts', 'src/lib/agent-fabric/chatgptToolProfile.test.ts']) {
+      assert.ok(flat.includes(`\`${path}\``), `${name} must cite the platform test ${path}`);
+    }
+    assert.match(flat, /`tool_not_in_client_profile`/, `${name} must name the route guard`);
+    assert.match(flat, /not by this manual step/, `${name} must say the manual step does not cover the server refusal`);
+  }
 });
 
 // 393-F4: ChatGPT is refused every tool outside the profile, so no submitted
