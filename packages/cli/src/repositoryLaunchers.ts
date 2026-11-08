@@ -233,6 +233,9 @@ async function ownPrivateGroups(accounts: AccountFiles = {}): Promise<PrivateGro
 // missing as execvp sees it (CLI 0.2.224 review N1b).
 class AbsentEntry extends Error {}
 
+// A provider directory whose sibling node is not the launcher's Node: it stays off the launcher (CLI 0.2.224 review R6-1).
+class ForeignSiblingNode extends Error {}
+
 // Names the entry a provider check refused, so `dharma status` can say which one and how to fix it.
 class UnsafeProviderEntry extends Error {
   constructor(readonly path: string, readonly writable: boolean, readonly group?: number) {
@@ -374,11 +377,15 @@ async function protectedProviderDirectory(path: string, provider: ProviderComman
   else await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
   const selectedNode = await protectedSiblingNode(directory, provider, privateGroups);
-  // Only codex is held to the launcher's own Node, as in 0.2.223: npm's CLI child uses env-node, and provider priority
-  // must not replace its runtime. Another provider's protected node is the user's runtime, such as fnm's Node beside
-  // claude (CLI 0.2.224 review R2).
-  if (provider === 'codex' && selectedNode !== undefined
-    && await protectedBinaryHash(selectedNode, 'linux') !== await protectedBinaryHash(nodePath, 'linux')) throw Error();
+  // The launcher puts every provider directory before the recorded Node directory, and npm exec starts the CLI
+  // through env-node, so a node beside any provider must be the launcher's own Node: provider priority must not replace
+  // its runtime, as in 0.2.223 for codex. Beside claude, agy or hermes, another node, such as an older nvm version's or
+  // /usr/bin's behind an nvm Node, leaves the directory off the launcher; the relay guard still runs that provider
+  // (CLI 0.2.224 review R6-1). fnm's or nvm's bin directory holding the setup Node passes (R2).
+  if (selectedNode !== undefined && await protectedBinaryHash(selectedNode, 'linux').catch(() => undefined)
+    !== await protectedBinaryHash(nodePath, 'linux')) {
+    throw provider === 'codex' ? Error() : new ForeignSiblingNode();
+  }
   return directory;
 }
 
@@ -388,7 +395,10 @@ export async function resolveRepositoryProviderDirectory(options: {provider?: Pr
   const provider = options.provider ?? 'codex';
   const privateGroups = await ownPrivateGroups(options.accounts);
   return firstProviderOnPath(provider, options.searchPath,
-    directory => protectedProviderDirectory(directory, provider, process.execPath, privateGroups));
+    directory => protectedProviderDirectory(directory, provider, process.execPath, privateGroups).catch(error => {
+      if (error instanceof ForeignSiblingNode) return undefined;
+      throw error;
+    }));
 }
 
 // An absolute PATH entry in its normal form: a trailing '/', a doubled '/' or a '.' part, which the shell resolves the
