@@ -42,8 +42,8 @@ evaluation lacks approved semantic evidence, the correct result is
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI/Desktop | available | available when installed | unavailable | available when installed | next session |
 | Claude Code | available | available when installed | unavailable | available when installed | next session |
-| Agy 1.0.1 | partial | read-only partial | partial | available when installed | plugin enable + next session |
-| Hermes Agent 0.20.4 | available through redacted session export | read-only when its model provider is configured | unavailable | available when installed | trusted project + next session |
+| Agy (preview, not GA) | partial | read-only partial | none in practice: every task starts with `--new-project` | partial | next session on Agy 1.1.15 or later; unavailable below 1.1.15 |
+| Hermes Agent 0.20.4 (preview, not GA) | available through redacted session export | read-only partial, enabled by Hermes version; a missing inference provider shows as a task failure after the run | unavailable | available when installed | trusted project + next session |
 | Pi | unavailable | unavailable | unavailable | unavailable | unavailable |
 | Other Better Harness hosts | evidence adapter work | unavailable | unavailable | unavailable | unavailable |
 
@@ -155,7 +155,7 @@ The plugin connects to the OAuth-protected MCP resource at
 explicit confirmation; organization membership and the underlying platform API
 capabilities remain authoritative.
 
-## Claude Code and Grok plugin
+## Claude Code and Grok (preview) plugin
 
 The Claude plugin in `plugins/claude/dharma-agent-fabric` packages the same
 remote MCP server with the `dharma-agent-fabric-setup` skill submitted in OpenAI
@@ -171,7 +171,7 @@ server uses standard MCP OAuth with dynamic client registration and PKCE, so no
 API key is needed. Validate changes with
 `claude plugin validate --profile directory --strict plugins/claude/dharma-agent-fabric`.
 
-The same plugin (version 1.0.4) installs in the Grok CLI:
+Grok support is a preview, not GA. The same plugin (version 1.0.6) installs in the Grok CLI:
 
 ```bash
 grok plugin marketplace add dharma-ai-labs/dharma-agent-fabric
@@ -180,7 +180,7 @@ grok plugin install dharma-agent-fabric --trust
 
 Then run `/mcps` in Grok, select `dharma-agent-fabric` and press `i` to sign in.
 Validate with `grok plugin validate plugins/claude/dharma-agent-fabric`. Grok Bot
-and grok.com can connect through a custom connector at `https://mcp.dharma-ai.io/mcp`.
+and grok.com (preview, not GA) can connect through a custom connector at `https://mcp.dharma-ai.io/mcp`.
 
 ## Development
 

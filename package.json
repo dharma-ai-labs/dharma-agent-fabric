@@ -45,8 +45,9 @@
     "proof:provider": "npm run build && node scripts/proof-provider-task.mjs",
     "public:content:check": "node scripts/check-public-content.mjs",
     "plugin:skills:generate": "node scripts/plugin-skill-parity.mjs --write",
+    "docs:preview:check": "node --test scripts/preview-labels.test.mjs",
     "plugin:skills:check": "node --test scripts/plugin-skill-parity.test.mjs && node scripts/plugin-skill-parity.mjs",
-    "check": "npm run public:content:check && npm run plugin:skills:check && npm run vendor:verify && npm test && npm run pack:verify && npm run pack:setup-readiness && npm run mcp:catalog:verify && npm run openapi:verify"
+    "check": "npm run public:content:check && npm run docs:preview:check && npm run plugin:skills:check && npm run vendor:verify && npm test && npm run pack:verify && npm run pack:setup-readiness && npm run mcp:catalog:verify && npm run openapi:verify"
   },
   "devDependencies": {
     "@apidevtools/swagger-parser": "^12.1.0",

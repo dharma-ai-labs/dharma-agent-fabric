@@ -24,7 +24,7 @@ and do not establish that automatic learning or every listed adapter is qualifie
 - a private agent-control repository under `dharma-ai-labs`, with the company administrator invited as a collaborator;
 - a scoped organization API key for the public HQ API;
 - the open-source `@dharma-ai-labs/agent-fabric` CLI;
-- repository-local instructions and policy for Codex, Claude Code, Agy, and Hermes Agent;
+- repository-local instructions and policy for Codex, Claude Code, Agy (preview), and Hermes Agent (preview);
 - one selected execution boundary: Dharma-managed ADK, GCP Vertex BYOK, or local BYOK;
 - encrypted local evidence capture and reduced trajectory synchronization;
 - exact 100-trajectory analysis windows, versioned rubrics, and an organization-isolated Failure Atlas;
@@ -131,7 +131,7 @@ Typical scopes:
 
 The complete token is displayed once. Store it in the operating-system secret manager or CI secret store. Do not put it in Git, `.env.example`, logs, screenshots, issue text, or a chat transcript.
 
-## 5. Connect local Codex, Claude Code, Agy, and Hermes Agent
+## 5. Connect local Codex, Claude Code, Agy (preview), and Hermes Agent (preview)
 
 Prerequisites:
 
@@ -180,7 +180,7 @@ For each selected repository, the CLI:
 4. registers the current device, workspace, and provider as endpoints of that agent;
 5. obtains the permanent control branch and agent identity from HQ;
 6. writes the repository bootstrap without storing the source path or Git credential;
-7. detects Codex, Claude Code, Agy, and Hermes Agent independently;
+7. detects Codex, Claude Code, Agy (preview), and Hermes Agent (preview) independently;
 8. installs `.agents/skills/dharma-agent-fabric/SKILL.md`, the organization API coordinates, and a managed bootstrap Skill only for detected providers that report Skill installation as available;
 9. waits for browser approval and continues automatically without a manual resume command;
 10. reports evidence, task, continuation, skill-installation, activation, and rollback capabilities separately.

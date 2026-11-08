@@ -460,7 +460,8 @@ the same agent. The CLI derives repository identity from a credential-free
 normalized Git remote. Repositories without a remote require an explicit stable
 `--repository-key`; absolute paths are never identity.
 
-Current provider adapters are Codex, Claude Code, Agy, and Hermes Agent. Run
+Current provider adapters are Codex, Claude Code, Agy (preview, not GA), and Hermes Agent
+(preview, not GA). Run
 `dharma providers list` because evidence, task, continuation, Skill installation,
 activation, and usage capabilities are reported independently.
 
