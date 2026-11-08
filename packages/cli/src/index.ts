@@ -2096,11 +2096,12 @@ export function stableRepositoryLauncherContents(version = VERSION,
 }
 
 /**
- * The protected provider directories this device recorded on the workspace's launcher; none when it recorded none. Never
- * read from the launcher in the working tree, which the repository can commit (CLI 0.2.224 review K1).
+ * The protected provider directories this device recorded on the workspace's launcher. With no record yet, as on a
+ * 0.2.223 device, the protected codex first on `searchPath`, which 0.2.223 always carried; left off when absent or
+ * unsafe. Never read from the launcher in the working tree, which the repository can commit (CLI 0.2.224 review K1).
  */
-async function currentLauncherProviders(workspace: string) {
-  return protectedSetUpProviderDirectories({home: dharmaHome(), workspace});
+async function currentLauncherProviders(workspace: string, searchPath: string | undefined) {
+  return protectedSetUpProviderDirectories({home: dharmaHome(), workspace, searchPath});
 }
 
 async function installStableRepositoryLauncher(workspace: string, providers: readonly ProviderId[]) {
@@ -2127,7 +2128,8 @@ async function installStableRepositoryLauncher(workspace: string, providers: rea
   }
   // Keep each protected provider directory the launcher being replaced carries, so setting up another agent never
   // drops one whose shared package is still pending (CLI 0.2.224 review R1).
-  const kept = await (scope ? scope.step(() => currentLauncherProviders(workspace)) : currentLauncherProviders(workspace));
+  const kept = await (scope ? scope.step(() => currentLauncherProviders(workspace, searchPath))
+    : currentLauncherProviders(workspace, searchPath));
   const providerDirectory = await providerDirectoriesInPathOrder([...resolved, ...kept.map(item => item.directory)], searchPath);
   const contents = stableRepositoryLauncherContents(VERSION,
     { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
@@ -2225,7 +2227,7 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
           launcherProviders = launcherProviders.filter(entry => entry !== item);
         }
       }
-      const kept = await currentLauncherProviders(workspace);
+      const kept = await currentLauncherProviders(workspace, searchPath);
       resolved.push(...kept.map(item => item.directory));
       launcherProviders = [...new Set([...launcherProviders, ...kept.map(item => item.provider)])];
     }

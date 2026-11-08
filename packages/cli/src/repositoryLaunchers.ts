@@ -523,21 +523,29 @@ export async function recordSetUpProviderDirectories(options: {home: string; wor
  * each with the provider command it passes for. Setup and relay upgrade keep them, so an agent whose shared package is
  * still pending stays on the relay PATH (CLI 0.2.224 review R1). They come from this user's own state, never from the
  * launcher in the working tree, which anyone who writes to the repository can commit, and none whose real path is
- * inside the workspace is kept (K1). Linux only.
+ * inside the workspace is kept (K1). With no record yet for the workspace, as on a 0.2.223 device, the codex first on
+ * the setup or upgrade `searchPath` is kept when it passes the check, as 0.2.223 always carried it, and left off when it
+ * is absent or unsafe (K1 regression). Linux only.
  */
-export async function protectedSetUpProviderDirectories(options: {home: string; workspace: string;
+export async function protectedSetUpProviderDirectories(options: {home: string; workspace: string; searchPath?: string;
   platform?: NodeJS.Platform}): Promise<{provider: ProviderCommand; directory: string}[]> {
   if ((options.platform ?? process.platform) !== 'linux') return [];
+  const workspaces = [options.workspace, await realpath(options.workspace).catch(() => options.workspace)];
+  const inside = (path: string) => workspaces.some(workspace => path === workspace || path.startsWith(`${workspace}/`));
   let record: {schema?: unknown; workspace?: unknown; providerDirectory?: unknown};
   try {
     const path = setUpProvidersPath(options.home, options.workspace), stat = await lstat(path);
     if (!stat.isFile() || stat.uid !== process.getuid!() || (stat.mode & 0o077) || stat.size > 65536) return [];
     record = JSON.parse(await readFile(path, 'utf8')) ?? {};
-  } catch {return [];}
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return [];
+    const directory = await resolveRepositoryProviderDirectory({provider: 'codex', searchPath: options.searchPath})
+      .catch(() => undefined);
+    return directory === undefined || inside(directory) || inside(await realpath(directory).catch(() => directory)) ? []
+      : [{provider: 'codex', directory}];
+  }
   if (record.schema !== SET_UP_PROVIDERS || record.workspace !== options.workspace
     || !Array.isArray(record.providerDirectory) || record.providerDirectory.length > 16) return [];
-  const workspaces = [options.workspace, await realpath(options.workspace).catch(() => options.workspace)];
-  const inside = (path: string) => workspaces.some(workspace => path === workspace || path.startsWith(`${workspace}/`));
   const kept: {provider: ProviderCommand; directory: string}[] = [];
   const privateGroups = await ownPrivateGroups();
   for (const directory of record.providerDirectory) {
