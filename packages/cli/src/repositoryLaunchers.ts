@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readdir, readFile, realpath } from 'node:fs/promises';
+import { userInfo } from 'node:os';
 import { dirname, join, posix, win32 } from 'node:path';
 
 type Launchers = { shell: string; windows: string };
@@ -158,38 +159,73 @@ export async function resolveRepositoryNpmCli(options: {npmExecPath?: string; se
   throw new Error('relay_startup_npm_unavailable');
 }
 
-async function protectParents(path: string) {
+/** The account databases that say whether this user's primary group is private to them. Tests pass copies. */
+export type AccountFiles = {group?: string; passwd?: string};
+
+/**
+ * This user's primary group id when that group is private to them: named after the user, with no other member and
+ * no other user's primary group. Its write bit then grants no one else anything. Stock Ubuntu login sessions use
+ * umask 0002 with such groups, so a provider installed under ~ has 0775 directories. Otherwise null.
+ */
+async function ownPrivateGroup(accounts: AccountFiles = {}): Promise<number | null> {
+  try {
+    const gid = String(process.getgid!()), user = userInfo().username;
+    const entries = async (path: string) => (await readFile(path, 'utf8')).split('\n').filter(Boolean).map(line => line.split(':'));
+    const groups = (await entries(accounts.group ?? '/etc/group')).filter(fields => fields[2] === gid);
+    const members = (groups[0]?.[3] ?? '').split(',').filter(Boolean);
+    const sharers = (await entries(accounts.passwd ?? '/etc/passwd')).filter(fields => fields[3] === gid && fields[0] !== user);
+    return groups.length === 1 && groups[0]![0] === user && members.every(member => member === user) && !sharers.length
+      ? Number(gid) : null;
+  } catch { return null; }
+}
+
+// Names the entry a provider check refused, so `dharma status` can say which one and how to fix it.
+class UnsafeProviderEntry extends Error {
+  constructor(readonly path: string, readonly writable: boolean) { super('unsafe_provider_entry'); }
+}
+
+function protectedEntry(path: string, stat: {uid: number; gid: number; mode: number}, privateGroup: number | null,
+  exempt = false) {
+  if (![0, process.getuid!()].includes(stat.uid)) throw new UnsafeProviderEntry(path, false);
+  if (!exempt && ((stat.mode & 0o002) || ((stat.mode & 0o020) && stat.gid !== privateGroup))) {
+    throw new UnsafeProviderEntry(path, true);
+  }
+}
+
+async function protectParents(path: string, privateGroup: number | null) {
   for (let current = path; ; current = dirname(current)) {
     const parent = await lstat(current);
     // Root-owned sticky temporary roots cannot replace this user's child directories.
-    const stickyRoot = current !== path && parent.uid === 0 && (parent.mode & 0o1000);
-    if (!parent.isDirectory() || parent.isSymbolicLink() || ![0, process.getuid!()].includes(parent.uid)
-      || ((parent.mode & 0o022) && !stickyRoot)) throw Error();
+    const stickyRoot = current !== path && parent.uid === 0 && (parent.mode & 0o1000) !== 0;
+    if (!parent.isDirectory() || parent.isSymbolicLink()) throw new UnsafeProviderEntry(current, false);
+    protectedEntry(current, parent, privateGroup, stickyRoot);
     if (dirname(current) === current) break;
   }
 }
 
 // The provider bin directory and the executable it resolves to are owned by this user or root, and neither they
-// nor their parents can be written by anyone else.
-async function protectedProviderExecutable(directory: string, provider: ProviderCommand) {
+// nor their parents can be written by anyone else; the user's own private group is not anyone else.
+async function protectedProviderExecutable(directory: string, provider: ProviderCommand, privateGroup: number | null) {
   providerDirectoryPath(directory);
   if (await realpath(directory) !== directory) throw Error();
-  await protectParents(directory);
+  await protectParents(directory, privateGroup);
   const executable = await realpath(join(directory, provider));
-  await protectParents(dirname(executable));
+  await protectParents(dirname(executable), privateGroup);
   return executable;
 }
 
-async function protectedExecutableFile(executable: string) {
+async function protectedExecutableFile(executable: string, privateGroup: number | null) {
   const stat = await lstat(executable);
-  if (!stat.isFile() || ![0, process.getuid!()].includes(stat.uid) || (stat.mode & 0o022)) throw Error();
+  if (!stat.isFile()) throw new UnsafeProviderEntry(executable, false);
+  protectedEntry(executable, stat, privateGroup);
 }
 
-async function protectedProviderDirectory(directory: string, provider: ProviderCommand, nodePath = process.execPath) {
-  const executable = await protectedProviderExecutable(directory, provider);
+async function protectedProviderDirectory(directory: string, provider: ProviderCommand, nodePath: string,
+  privateGroup: number | null) {
+  const executable = await protectedProviderExecutable(directory, provider, privateGroup);
   if (provider === 'codex') await protectedBinaryHash(executable, 'linux');
   // A native Claude binary can exceed the hashing bound; its ownership and mode are what protect it.
-  else await protectedExecutableFile(executable);
+  else await protectedExecutableFile(executable, privateGroup);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
   let hasNode = true;
   try {await lstat(join(directory, 'node'));} catch (error) {
@@ -199,7 +235,7 @@ async function protectedProviderDirectory(directory: string, provider: ProviderC
   // npm's CLI child uses env-node; provider priority must not replace its runtime.
   if (hasNode) {
     const selectedNode = await realpath(join(directory, 'node'));
-    await protectParents(dirname(selectedNode));
+    await protectParents(dirname(selectedNode), privateGroup);
     if (!((await lstat(selectedNode)).mode & 0o111)
       || await protectedBinaryHash(selectedNode, 'linux') !== await protectedBinaryHash(nodePath, 'linux')) throw Error();
   }
@@ -207,10 +243,12 @@ async function protectedProviderDirectory(directory: string, provider: ProviderC
 }
 
 export async function resolveRepositoryProviderDirectory(options: {provider?: ProviderCommand; searchPath?: string;
-  platform?: NodeJS.Platform} = {}) {
+  platform?: NodeJS.Platform; accounts?: AccountFiles} = {}) {
   if ((options.platform ?? process.platform) !== 'linux') return undefined;
   const provider = options.provider ?? 'codex';
-  return firstProviderOnPath(provider, options.searchPath, directory => protectedProviderDirectory(directory, provider));
+  const privateGroup = await ownPrivateGroup(options.accounts);
+  return firstProviderOnPath(provider, options.searchPath,
+    directory => protectedProviderDirectory(directory, provider, process.execPath, privateGroup));
 }
 
 async function firstProviderOnPath<T>(provider: ProviderCommand, searchPath: string | undefined,
@@ -233,21 +271,54 @@ async function firstProviderOnPath<T>(provider: ProviderCommand, searchPath: str
  * the launcher's own Node and hashing checks are left out. Linux only, as setup's check.
  */
 export async function providerFirstOnPathUnsafe(provider: ProviderCommand,
-  options: {searchPath?: string; platform?: NodeJS.Platform} = {}): Promise<boolean> {
+  options: {searchPath?: string; platform?: NodeJS.Platform; accounts?: AccountFiles} = {}): Promise<boolean> {
   if ((options.platform ?? process.platform) !== 'linux') return false;
-  return firstProviderOnPath(provider, options.searchPath, async directory => {
-    const executable = await protectedProviderExecutable(directory, provider);
-    await protectedExecutableFile(executable);
-    if (!((await lstat(executable)).mode & 0o111)) throw Error();
-  }).then(() => false, () => true);
+  const privateGroup = await ownPrivateGroup(options.accounts);
+  return firstProviderOnPath(provider, options.searchPath, directory => relayProviderExecutable(directory, provider, privateGroup))
+    .then(() => false, () => true);
+}
+
+async function relayProviderExecutable(directory: string, provider: ProviderCommand, privateGroup: number | null) {
+  const executable = await protectedProviderExecutable(directory, provider, privateGroup);
+  await protectedExecutableFile(executable, privateGroup);
+  if (!((await lstat(executable)).mode & 0o111)) throw Error();
+}
+
+/**
+ * For `dharma status`: the PATH entry that makes the first `provider` unsafe under providerFirstOnPathUnsafe's rules,
+ * and the command that fixes it. Null when that provider is safe or absent. Linux only, as the check.
+ */
+export async function providerUnsafePathDiagnosis(provider: ProviderCommand,
+  options: {searchPath?: string; platform?: NodeJS.Platform; accounts?: AccountFiles} = {}): Promise<{path: string; remedy: string} | null> {
+  if ((options.platform ?? process.platform) !== 'linux') return null;
+  const privateGroup = await ownPrivateGroup(options.accounts);
+  for (const directory of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
+    if (!directory) continue;
+    try {
+      try {await lstat(join(directory, provider));} catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      await relayProviderExecutable(directory, provider, privateGroup);
+      return null;
+    } catch (error) {
+      const entry = error instanceof UnsafeProviderEntry ? error : null;
+      const path = entry?.path ?? directory;
+      const quoted = `'${path.replace(/'/g, "'\\''")}'`;
+      return {path, remedy: entry?.writable
+        ? `Other users can write to ${path}. Run chmod go-w ${quoted}, or put your own ${provider} first on PATH.`
+        : `${path} belongs to another user or is not a protected ${provider}. Put your own ${provider} first on PATH, or remove ${directory} from PATH.`};
+    }
+  }
+  return null;
 }
 
 // A recorded launcher names only the directories. Verify each for one of the set-up providers; when none is known,
 // accept a directory once any provider command in it passes.
 async function protectedRecordedProviderDirectory(directory: string, providers: ProviderCommand | readonly ProviderCommand[] | undefined,
-  nodePath: string) {
+  nodePath: string, privateGroup: number | null) {
   for (const command of providers === undefined ? PROVIDER_COMMANDS : typeof providers === 'string' ? [providers] : providers) {
-    try {return await protectedProviderDirectory(directory, command, nodePath);} catch {}
+    try {return await protectedProviderDirectory(directory, command, nodePath, privateGroup);} catch {}
   }
   throw Error();
 }
@@ -295,8 +366,9 @@ async function verifyRecordedRuntime(version: string, launchers: Launchers,
   // A changed npm cache path is not a new trust root: require the already running Node bytes.
   const node = join(directory, runtime.platform === 'win32' ? 'node.exe' : 'node');
   try {
+    const privateGroup = runtime.platform === 'linux' ? await ownPrivateGroup() : null;
     for (const providerDirectory of [recorded.providerDirectory ?? []].flat()) {
-      await protectedRecordedProviderDirectory(providerDirectory, runtime.provider, runtime.nodePath);
+      await protectedRecordedProviderDirectory(providerDirectory, runtime.provider, runtime.nodePath, privateGroup);
     }
     if (recorded.npmCliPath !== undefined) {
       const activeNpm = npmContext === 'recorded' ? await protectedNpmCli(recorded.npmCliPath, runtime.platform)
