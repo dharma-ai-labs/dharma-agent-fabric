@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory, providerDirectoriesInPathOrder } from './repositoryLaunchers.js';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory, providerDirectoriesInPathOrder, protectedLauncherProviderDirectories } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -2091,6 +2091,14 @@ export function stableRepositoryLauncherContents(version = VERSION,
   return repositoryLauncherContents(version, runtime);
 }
 
+/** The protected provider directories the repository launcher being replaced carries; none when it is absent. */
+async function currentLauncherProviders(workspace: string) {
+  const read = (name: string) => readFile(resolve(workspace, '.dharma', 'bin', name), 'utf8');
+  const launchers = await Promise.all([read('dharma'), read('dharma.cmd')])
+    .then(([shell, windows]) => ({shell, windows}), () => null);
+  return launchers ? protectedLauncherProviderDirectories(launchers) : [];
+}
+
 async function installStableRepositoryLauncher(workspace: string, providers: readonly ProviderId[]) {
   const scope = currentBootstrapHostScope();
   const launcherRoot = resolve(workspace, '.dharma', 'bin');
@@ -2113,7 +2121,10 @@ async function installStableRepositoryLauncher(workspace: string, providers: rea
     resolved.push(await (scope ? scope.step(() => resolveRepositoryProviderDirectory({provider, searchPath}))
       : resolveRepositoryProviderDirectory({provider, searchPath})));
   }
-  const providerDirectory = providerDirectoriesInPathOrder(resolved, searchPath);
+  // Keep each protected provider directory the launcher being replaced carries, so setting up another agent never
+  // drops one whose shared package is still pending (CLI 0.2.224 review R1).
+  const kept = await (scope ? scope.step(() => currentLauncherProviders(workspace)) : currentLauncherProviders(workspace));
+  const providerDirectory = providerDirectoriesInPathOrder([...resolved, ...kept.map(item => item.directory)], searchPath);
   const contents = stableRepositoryLauncherContents(VERSION,
     { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
       ...(providerDirectory.length ? {providerDirectory} : {}) });
@@ -2190,12 +2201,26 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
     // A holder never displaces the calling agent (PR #425 review round 5).
     const requested = parseSelectedProviderIds(typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : [])?.[0];
     const provider = requested ?? providerHintFromEnvironment() ?? 'codex';
-    const launcherProviders = [...new Set([...await protectedBundleHolders(selected), provider])];
-    // The launcher carries the bin directory of each of these providers.
+    const holders = await protectedBundleHolders(selected);
+    let launcherProviders: ProviderId[] = [...new Set([...holders, provider])];
+    // The launcher carries the bin directory of each of these providers, and keeps each protected one the current
+    // launcher carries, so an agent whose shared package is still pending stays on the relay PATH (CLI 0.2.224 R1).
     const searchPath = providerProcessEnvironment(process.env).PATH;
     const resolved: (string | undefined)[] = [];
     if (!flags.has('rollback')) {
-      for (const item of launcherProviders) resolved.push(await resolveRepositoryProviderDirectory({provider: item, searchPath}));
+      for (const item of launcherProviders) {
+        // A provider only guessed from the environment that fails the check is left off; it never fails the upgrade
+        // (CLI 0.2.224 review R2). A --provider the user named still does.
+        const guessed = item === provider && requested === undefined && !holders.includes(item);
+        try {resolved.push(await resolveRepositoryProviderDirectory({provider: item, searchPath}));}
+        catch (error) {
+          if (!guessed) throw error;
+          launcherProviders = launcherProviders.filter(entry => entry !== item);
+        }
+      }
+      const kept = await currentLauncherProviders(workspace);
+      resolved.push(...kept.map(item => item.directory));
+      launcherProviders = [...new Set([...launcherProviders, ...kept.map(item => item.provider)])];
     }
     const providerDirectory = providerDirectoriesInPathOrder(resolved, searchPath);
     const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
