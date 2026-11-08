@@ -710,8 +710,8 @@ test('the relay refuses a symlinked provider PATH entry whose link another user 
     const entry = join(link, 'bin');
     assert.equal(await launchers.providerFirstOnPathUnsafe('agy', {searchPath: entry}), true,
       'the link sits in a directory others can write');
-    assert.equal((await launchers.providerUnsafePathDiagnosis('agy', {searchPath: entry}))?.path, entry,
-      '`dharma status` names the entry the relay refuses');
+    assert.equal((await launchers.providerUnsafePathDiagnosis('agy', {searchPath: entry}))?.path, multishells,
+      '`dharma status` names the directory that lets others repoint the entry (CLI 0.2.224 R2b)');
     assert.equal(await launchers.providerFirstOnPathUnsafe('agy', {searchPath: `${real}:${entry}`}), false,
       'the protected real directory first on PATH, as the launcher writes it, passes');
     assert.equal(await launchers.providerUnsafePathDiagnosis('agy', {searchPath: `${real}:${entry}`}), null);
