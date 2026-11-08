@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, chown, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import test from 'node:test';
 
@@ -418,4 +418,252 @@ test('actual Linux launcher with two set-up providers reaches both and verifies 
     assert.equal(await verify(), false, 'every recorded directory is checked, not only the first');
     assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after, ['claude', 'codex']), false);
   } finally {await rm(root, {recursive: true, force: true});}
+});
+
+// PR #424 review F3 (3x6=18): the relay guard applied setup's mode rule, which refused any group-writable entry.
+// Stock Ubuntu login sessions use umask 0002 with a private group per user, so a claude installed under ~ has 0775
+// directories that only this user can write. 0.2.223 ran it; 0.2.224 stopped. A group-writable entry is accepted
+// only when its group is this user's own private group; world-writable entries and shared groups stay refused.
+type AccountFiles = {group: string; passwd: string; groupLookup?: (gid: number) => Promise<string | undefined>};
+type ProviderPathChecks = {
+  providerFirstOnPathUnsafe(provider: string, options: {searchPath?: string; accounts?: AccountFiles}): Promise<boolean>;
+  resolveRepositoryProviderDirectory(options: {provider?: string; searchPath?: string; accounts?: AccountFiles}): Promise<string | undefined>;
+  providerUnsafePathDiagnosis(provider: string, options: {searchPath?: string; accounts?: AccountFiles}):
+    Promise<{path: string; remedy: string} | null>;
+};
+
+async function privateGroupHost(run: (host: {root: string; local: string; bin: string;
+  accounts(group: string, otherUsers?: string): Promise<AccountFiles>}) => Promise<void>) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-private-group-')));
+  try {
+    const user = userInfo().username, uid = process.getuid!(), gid = process.getgid!();
+    // As a native Claude install under umask 0002 leaves it: ~/.local and its bin directory are 0775.
+    const local = join(root, 'local'), bin = join(local, 'bin');
+    await mkdir(bin, {recursive: true});
+    await chmod(local, 0o775); await chmod(bin, 0o775);
+    await writeFile(join(bin, 'claude'), '#!/bin/sh\nexit 0\n'); await chmod(join(bin, 'claude'), 0o775);
+    await run({root, local, bin, accounts: async (group, otherUsers = '') => {
+      await writeFile(join(root, 'group'), `root:x:0:\n${group.replace(/<user>/g, user).replace('<gid>', String(gid))}\n`);
+      await writeFile(join(root, 'passwd'),
+        `root:x:0:0:root:/root:/bin/sh\n${user}:x:${uid}:${gid}::${root}:/bin/sh\n${otherUsers.replace('<gid>', String(gid))}`);
+      return {group: join(root, 'group'), passwd: join(root, 'passwd')};
+    }});
+  } finally {await rm(root, {recursive: true, force: true});}
+}
+
+test('relay guard and setup accept a 0775 provider tree whose group is the user\'s own private group', {skip: process.platform !== 'linux'}, async () => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  await privateGroupHost(async ({bin, accounts}) => {
+    const own = await accounts('<user>:x:<gid>:');
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), false);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin, accounts: own}), bin);
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: own}), null);
+  });
+});
+
+test('a group-writable provider tree stays refused when the group is shared or the entry is world-writable', {skip: process.platform !== 'linux'}, async () => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  await privateGroupHost(async ({bin, accounts}) => {
+    // Each case writes the account files just before its checks, as all cases share one pair of files.
+    for (const [groups, otherUsers] of [
+      ['<user>:x:<gid>:alice', ''], // another member
+      ['staff:x:<gid>:', ''], // not named after the user
+      ['<user>:x:<gid>:', 'alice:x:4242:<gid>::/home/alice:/bin/sh\n'], // another user's primary group
+      ['other:x:1:', ''], // the group is not listed at all
+    ] as const) {
+      const shared = await accounts(groups, otherUsers);
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: shared}), true);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin, accounts: shared}),
+        /^Error: relay_startup_claude_path_invalid: /);
+    }
+    const own = await accounts('<user>:x:<gid>:');
+    await chmod(bin, 0o777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), true);
+    await chmod(bin, 0o775); await chmod(join(bin, 'claude'), 0o777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), true);
+  });
+});
+
+// CLI 0.2.224 review C1 (2x4=8): the devcontainers node feature puts nvm in /usr/local/share/nvm, owned USER:nvm with
+// g+rws under umask 0002, and adds only this user to the group nvm. Each version's bin directory is then writable by a
+// group other than the user's primary one, so the F3 rule refused claude, agy and hermes installed there by npm -g,
+// which 0.2.223 ran. A supplementary group of this user is private in effect, and accepted, when /etc/group lists no
+// member but this user and no /etc/passwd entry has it as primary group. A group with another member stays refused.
+// N2 (1x8): an empty member list counted as private too; a supplementary group must list this user, and only them.
+test('relay guard and setup accept a group-writable provider tree whose supplementary group has no other member', {skip: process.platform !== 'linux'}, async t => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  const supplementary = process.getgroups!().find(gid => gid !== process.getgid!() && gid !== 0);
+  if (supplementary === undefined) {t.skip('this user has no supplementary group'); return;}
+  await privateGroupHost(async ({root, accounts}) => {
+    const share = join(root, 'share'), nvm = join(share, 'nvm'), versionBin = join(nvm, 'versions', 'node', 'v22', 'bin');
+    const pkg = join(nvm, 'versions', 'node', 'v22', 'lib', 'node_modules', '@anthropic-ai', 'claude-code');
+    await mkdir(versionBin, {recursive: true}); await mkdir(pkg, {recursive: true});
+    await writeFile(join(pkg, 'cli.js'), '#!/bin/sh\nexit 0\n');
+    await symlink(join('..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'), join(versionBin, 'claude'));
+    await symlink(join('versions', 'node', 'v22'), join(nvm, 'current'));
+    for (const path of [nvm, join(nvm, 'versions'), join(nvm, 'versions', 'node'), join(nvm, 'versions', 'node', 'v22'), versionBin,
+      join(nvm, 'versions', 'node', 'v22', 'lib'), join(nvm, 'versions', 'node', 'v22', 'lib', 'node_modules'),
+      join(nvm, 'versions', 'node', 'v22', 'lib', 'node_modules', '@anthropic-ai'), pkg]) {
+      await chown(path, -1, supplementary); await chmod(path, 0o2775);
+    }
+    await chown(join(pkg, 'cli.js'), -1, supplementary); await chmod(join(pkg, 'cli.js'), 0o775);
+    await chmod(share, 0o755);
+    // main's relay and setup take only a PATH entry that is its own real path, so this forward-port puts the version's
+    // real bin directory on PATH, where the release branch uses nvm's current link.
+    const entry = versionBin;
+    const group = (members: string) => `<user>:x:<gid>:\nnvm:x:${supplementary}:${members}`;
+    const own = await accounts(group('<user>'));
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry, accounts: own}), false, 'relay');
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry, accounts: own}), versionBin, 'setup');
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: entry, accounts: own}), null, 'status');
+    // Each case writes the account files just before its checks, as all cases share one pair of files.
+    for (const [groups, otherUsers, why] of [
+      [group('<user>,alice'), '', 'another member'],
+      [group('<user>'), `alice:x:4242:${supplementary}::/home/alice:/bin/sh\n`, "another user's primary group"],
+      ['<user>:x:<gid>:', '', 'the group is not listed'],
+      // N2: the user is in it by some other means, such as NSS or --group-add, so who else is in it is unknown.
+      [group(''), '', 'group listed with no members'],
+    ] as const) {
+      const shared = await accounts(groups, otherUsers);
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry, accounts: shared}), true, why);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry, accounts: shared}),
+        /^Error: relay_startup_claude_path_invalid: /, why);
+    }
+    await chmod(versionBin, 0o2777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry, accounts: own}), true, 'world-writable');
+  });
+});
+
+// CLI 0.2.224 review R424-2 (1x5=5): NSS user private groups, as sssd's auto_private_groups and FreeIPA make them, are
+// not in /etc/group, so after the upgrade a 0775 provider tree owned by the user's own primary group was refused. The
+// primary group also counts as private when its id is the user's id and the NSS entry (getent group) names it after
+// the user with no other member; anything else stays refused, and `dharma status` names the case.
+test('relay guard and setup accept a 0775 provider tree whose primary group is an NSS user private group', {skip: process.platform !== 'linux'}, async () => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  const user = userInfo().username, uid = process.getuid!(), gid = process.getgid!();
+  await privateGroupHost(async ({bin, accounts}) => {
+    const nss = async (line: string | undefined) => ({...await accounts('other:x:1:'), groupLookup: async (id: number) =>
+      id === gid ? line : undefined});
+    const own = await nss(`${user}:*:${gid}:`);
+    // Only a primary group whose id is the user's id is looked up.
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), uid !== gid, 'relay');
+    if (uid === gid) {
+      assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin, accounts: own}), bin, 'setup');
+      assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: own}), null, 'status');
+    }
+    for (const [line, why] of [[`staff:*:${gid}:`, 'not named after the user'], [`${user}:*:${gid}:alice`, 'another member'],
+      [undefined, 'no NSS entry']] as const) {
+      const shared = await nss(line);
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: shared}), true, why);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin, accounts: shared}),
+        /^Error: relay_startup_claude_path_invalid: /, why);
+      const diagnosis = await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: shared});
+      assert.ok(diagnosis?.remedy.includes(`getent group ${gid}`), `status names the private-group case: ${diagnosis?.remedy}`);
+    }
+  });
+});
+
+// Writes the access ACL user::rwx, user:65534:rwx, group::r-x, mask::rwx, other::r-x on `path` as the raw xattr, since
+// setfacl is often not installed. False when this host cannot (no python3, or a file system without ACLs).
+async function grantOtherUserByAcl(path: string) {
+  const script = 'import os,struct,sys\n'
+    + 'e=[(1,7,0xffffffff),(2,7,65534),(4,5,0xffffffff),(16,7,0xffffffff),(32,5,0xffffffff)]\n'
+    + "os.setxattr(sys.argv[1],'system.posix_acl_access',struct.pack('<I',2)+b''.join(struct.pack('<HHI',*x) for x in e))\n";
+  try {await promisify(execFile)('python3', ['-I', '-c', script, path], {timeout: 10000}); return true;} catch {return false;}
+}
+
+// CLI 0.2.224 review A1 (1x7=7): with a POSIX ACL, the group bits of st_mode are the ACL mask, which also bounds named
+// users and named groups. A 0775 directory of the user's private group with the entry user:<other>:rwx passed the
+// private-group exemption, though that other user can create, rename or replace entries in it. For codex this was a
+// regression: 0.2.223 refused any group write bit. The exemption now holds only for an entry with no ACL.
+test('relay and setup refuse a private-group provider directory that an ACL opens to another user', {skip: process.platform !== 'linux'}, async t => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  await privateGroupHost(async ({bin, accounts}) => {
+    await writeFile(join(bin, 'codex'), '#!/bin/sh\nexit 0\n'); await chmod(join(bin, 'codex'), 0o755);
+    const own = await accounts('<user>:x:<gid>:');
+    for (const provider of ['claude', 'codex']) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe(provider, {searchPath: bin, accounts: own}), false, `relay: ${provider} with no ACL`);
+      assert.equal(await launchers.resolveRepositoryProviderDirectory({provider, searchPath: bin, accounts: own}), bin, `setup: ${provider} with no ACL`);
+    }
+    if (!await grantOtherUserByAcl(bin)) {t.skip('this host cannot write a POSIX ACL'); return;}
+    assert.equal((await lstat(bin)).mode & 0o777, 0o775, 'the ACL mask shows as the group bits');
+    for (const provider of ['claude', 'codex']) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe(provider, {searchPath: bin, accounts: own}), true, `relay: ${provider} behind an ACL`);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider, searchPath: bin, accounts: own}),
+        new RegExp(`^Error: relay_startup_${provider}_path_invalid: `), `setup: ${provider} behind an ACL`);
+      assert.equal((await launchers.providerUnsafePathDiagnosis(provider, {searchPath: bin, accounts: own}))?.path, bin,
+        `status names the directory the ACL opens: ${provider}`);
+    }
+  });
+});
+
+test('the unsafe-path diagnosis names the failing entry and the command that fixes it', {skip: process.platform !== 'linux'}, async () => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  await privateGroupHost(async ({local, bin, accounts}) => {
+    const shared = await accounts('<user>:x:<gid>:alice');
+    await chmod(bin, 0o755); await chmod(join(bin, 'claude'), 0o755);
+    // The bin directory itself is fine; its parent is the entry another member of the group can write.
+    const diagnosis = await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: shared});
+    assert.equal(diagnosis?.path, local);
+    assert.ok(diagnosis?.remedy.includes(`chmod go-w '${local}'`), diagnosis?.remedy);
+    await chmod(local, 0o755);
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: shared}), null);
+    await chmod(join(bin, 'claude'), 0o757);
+    assert.equal((await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: shared}))?.path, join(bin, 'claude'));
+  });
+});
+
+// CLI 0.2.224 review S1 (1x6=6): the provider on each PATH entry was probed at path.join(entry, provider), which
+// drops a '..' part as text, while execvp hands '<entry>/claude' to the kernel, which follows links first. An entry
+// '/home/u/link/../bin' with link pointing elsewhere was skipped, so the relay and setup passed the next, protected
+// claude while the shell ran a claude from a directory others can write. The entry is now probed as execvp does, so a
+// '..' entry that holds the provider is checked, and refused as a relative entry.
+test('relay and setup refuse a provider found through a .. PATH entry that crosses a link', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-dotdot-entry-')));
+  const open = join(root, 'other', 'bin');
+  try {
+    await mkdir(join(root, 'a'), {mode: 0o700});
+    await mkdir(join(root, 'other', 'deep'), {recursive: true, mode: 0o700});
+    await mkdir(open, {mode: 0o700});
+    await symlink(join(root, 'other', 'deep'), join(root, 'a', 'link'));
+    await writeFile(join(open, 'claude'), '#!/bin/sh\nprintf "other-claude"\n', {mode: 0o755});
+    await chmod(open, 0o777);
+    const safe = join(root, 'safe'); await mkdir(safe, {mode: 0o700});
+    await writeFile(join(safe, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
+    // The kernel resolves a/link/.. to other, so the shell runs other/bin/claude, not the protected one in safe.
+    const entry = `${root}/a/link/../bin`, searchPath = `${entry}:${safe}`;
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath}), true, 'relay: claude through a .. entry');
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath}),
+      /^Error: relay_startup_claude_path_invalid/, 'setup: claude through a .. entry');
+    assert.equal((await launchers.providerUnsafePathDiagnosis('claude', {searchPath}))?.path, entry, 'status names the .. entry');
+  } finally {await chmod(open, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
+
+// CLI 0.2.224 review R5-1 (2x4=8): a PATH entry ahead of the provider that this user cannot search (EACCES, such as
+// /root/.local/bin in a devcontainer that runs as vscode) or that is a file (ENOTDIR) made the relay refuse claude,
+// agy and hermes and setup refuse them, although execvp skips such an entry and 0.2.223 had no check for it. Those
+// entries are now skipped for every provider but codex, which keeps the 0.2.223 rule and refuses them.
+test('relay and setup skip an unsearchable or file PATH entry ahead of claude, but not ahead of codex', {skip: process.platform !== 'linux'}, async t => {
+  if (process.getuid!() === 0) {t.skip('root can search a 0000 directory'); return;}
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-skipped-entry-')));
+  const closed = join(root, 'closed');
+  try {
+    await mkdir(closed, {mode: 0o700});
+    const file = join(root, 'file'); await writeFile(file, 'not a directory\n', {mode: 0o600});
+    const bin = join(root, 'bin'); await mkdir(bin, {mode: 0o700});
+    for (const provider of ['claude', 'codex']) await writeFile(join(bin, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+    await chmod(closed, 0o000);
+    const searchPath = `${closed}:${file}:${bin}`;
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath}), false, 'relay: claude after skipped entries');
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath}), bin, 'setup: claude after skipped entries');
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath}), null, 'status: claude after skipped entries');
+    for (const entry of [closed, file]) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe('codex', {searchPath: `${entry}:${bin}`}), true, `relay: codex after ${entry}`);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: `${entry}:${bin}`}),
+        /^Error: relay_startup_codex_path_invalid/, `setup: codex after ${entry}`);
+      assert.equal((await launchers.providerUnsafePathDiagnosis('codex', {searchPath: `${entry}:${bin}`}))?.path, entry, `status: codex after ${entry}`);
+    }
+  } finally {await chmod(closed, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
 });

@@ -102,7 +102,7 @@ import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js'
 import {classifyCodexSetupFailure, reportCodexSetupFailure, type CodexSetupFailureDiagnostic, type CodexSetupFailureObserver} from './codexSetupDiagnostic.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 import { openWithFirstAvailableOpener } from './verificationOpener.js';
-import { PROVIDER_UNSAFE_PATH, relayProviderCapability, relayProviderUnsafePath } from './relayProviderGuard.js';
+import { PROVIDER_UNSAFE_PATH, relayProviderCapability, relayProviderUnsafePath, relayProviderUnsafePathRemedy } from './relayProviderGuard.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
@@ -2104,10 +2104,16 @@ async function installStableRepositoryLauncher(workspace: string, providers: rea
   const npmCliPath = process.platform === 'linux' ? await (scope
     ? scope.step(() => resolveRepositoryNpmCli()) : resolveRepositoryNpmCli()) : undefined;
   // The relay service starts with the user manager PATH, not this shell's. Carry the bin directory of the
-  // provider set up in this checkout, so the relay probes and installs for it as setup did.
+  // provider set up in this checkout, so the relay probes and installs for it as setup did. The relay serves every
+  // adapter, so, as relay upgrade does, keep each protected provider already holding the registered workspace's
+  // installed bundle; setting up a second agent never drops the first one's directory (PR #424 review F1).
+  const config = await readDeviceConfig();
+  const record = config ? selectDeviceWorkspace(await (scope ? scope.step(() => registry()) : registry()),
+    {organizationId: config.organizationId, deviceId: config.deviceId, path: workspace}) : null;
+  const holders = record ? await (scope ? scope.step(() => protectedBundleHolders(record)) : protectedBundleHolders(record)) : [];
   const searchPath = providerProcessEnvironment(process.env).PATH;
   const resolved: (string | undefined)[] = [];
-  for (const provider of providers) {
+  for (const provider of [...new Set([...holders, ...providers])]) {
     resolved.push(await (scope ? scope.step(() => resolveRepositoryProviderDirectory({provider, searchPath}))
       : resolveRepositoryProviderDirectory({provider, searchPath})));
   }
@@ -10011,11 +10017,20 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
                 organizationId: config.organizationId, deviceId: config.deviceId,
                 workspaceId: row.workspaceId, pid: relayPid, relayPidMtimeMs: relayPidState?.relayPidMtimeMs ?? null,
                 relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt: lastSuccess });
+              const skillActivation = await readRelaySkillActivationState(dharmaHome(), row.workspaceId);
+              // The record keeps only codes; name the PATH entry the relay refuses, and the fix, from this host.
+              const providerPathRemedies: Record<string, { path: string; remedy: string }> = {};
+              for (const [provider, result] of Object.entries(skillActivation?.providers ?? {})) {
+                if (isLocalProviderId(provider) && result?.errorCode === PROVIDER_UNSAFE_PATH) {
+                  const remedy = await relayProviderUnsafePathRemedy(provider);
+                  if (remedy) providerPathRemedies[provider] = remedy;
+                }
+              }
               observations.push({ workspaceId: row.workspaceId,
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
                 lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}),
-                skillActivation: await readRelaySkillActivationState(dharmaHome(), row.workspaceId) });
+                skillActivation, ...(Object.keys(providerPathRemedies).length ? { providerPathRemedies } : {}) });
             }
             status.repositoryRelays = { state: 'observed', repositories: observations };
           }

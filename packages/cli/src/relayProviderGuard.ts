@@ -1,6 +1,6 @@
 import type { ProviderId } from '@dharma-ai-labs/agent-fabric-contracts';
 import { providerCapabilityWithoutExecutable, providerProcessEnvironment, type ProviderAdapter } from '@dharma-ai-labs/agent-fabric-provider-adapters';
-import { providerFirstOnPathUnsafe } from './repositoryLaunchers.js';
+import { providerFirstOnPathUnsafe, providerUnsafePathDiagnosis } from './repositoryLaunchers.js';
 
 /** The activation result and task refusal the relay records for a provider it will not run. */
 export const PROVIDER_UNSAFE_PATH = 'provider_unsafe_path';
@@ -10,6 +10,12 @@ type GuardOptions = { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform };
 /** Whether the first executable of `provider` on the PATH the relay runs providers with fails setup's rules. */
 export function relayProviderUnsafePath(provider: ProviderId, options: GuardOptions = {}): Promise<boolean> {
   return providerFirstOnPathUnsafe(provider, { searchPath: providerProcessEnvironment(options.env ?? process.env).PATH,
+    ...(options.platform ? { platform: options.platform } : {}) });
+}
+
+/** For `dharma status`: the entry on the relay's provider PATH that makes `provider` unsafe, and how to fix it. */
+export function relayProviderUnsafePathRemedy(provider: ProviderId, options: GuardOptions = {}) {
+  return providerUnsafePathDiagnosis(provider, { searchPath: providerProcessEnvironment(options.env ?? process.env).PATH,
     ...(options.platform ? { platform: options.platform } : {}) });
 }
 
