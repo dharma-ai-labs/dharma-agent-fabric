@@ -169,8 +169,8 @@ type PrivateGroups = ReadonlySet<number>;
  * This user's groups that are private to them, so their write bit grants no one else anything. The primary group
  * counts when it is named after the user, with no other member and no other user's primary group: stock Ubuntu login
  * sessions use umask 0002 with such groups, so a provider installed under ~ has 0775 directories (PR #424 F3). A
- * supplementary group counts when /etc/group lists no member but this user and no /etc/passwd entry has it as primary
- * group, as the devcontainers node feature's nvm group, which owns a g+rws /usr/local/share/nvm (PR #424 C1).
+ * supplementary group counts when /etc/group lists this user as its only member and no /etc/passwd entry has it as
+ * primary group, as the devcontainers node feature's nvm group, which owns a g+rws /usr/local/share/nvm (PR #424 C1).
  */
 async function ownPrivateGroups(accounts: AccountFiles = {}): Promise<PrivateGroups> {
   const found = new Set<number>();
@@ -183,8 +183,10 @@ async function ownPrivateGroups(accounts: AccountFiles = {}): Promise<PrivateGro
       const groups = groupEntries.filter(fields => fields[2] === String(gid));
       const members = (groups[0]?.[3] ?? '').split(',').filter(Boolean);
       const sharers = passwdEntries.filter(fields => fields[3] === String(gid) && (gid !== primary || fields[0] !== user));
-      if (groups.length === 1 && (gid !== primary || groups[0]![0] === user) && members.every(member => member === user)
-        && !sharers.length) found.add(gid);
+      // A supplementary group must list this user, and only them: with no member listed, this user is in it by other
+      // means, such as NSS or --group-add, and who else is in it is unknown (PR #424 N2).
+      if (groups.length === 1 && (gid !== primary ? members.length > 0 : groups[0]![0] === user)
+        && members.every(member => member === user) && !sharers.length) found.add(gid);
     }
   } catch {}
   return found;
