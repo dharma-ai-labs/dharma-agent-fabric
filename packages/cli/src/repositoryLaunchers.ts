@@ -221,12 +221,26 @@ class UnsafeProviderEntry extends Error {
   }
 }
 
-function protectedEntry(path: string, stat: {uid: number; gid: number; mode: number}, privateGroups: PrivateGroups,
+// Whether `path` has no POSIX access ACL, as GNU ls marks one with '+' after the mode, run without a shell. With an ACL
+// the group bits of the mode are the ACL mask, which also bounds named users and groups, so a group write bit may let
+// another user write. False when that cannot be told (CLI 0.2.224 review A1).
+async function withoutAccessAcl(path: string) {
+  for (const ls of ['/usr/bin/ls', '/bin/ls']) {
+    try {
+      const {stdout} = await promisify(execFile)(ls, ['-ld', '--', path], {timeout: 5000, maxBuffer: 64 * 1024, env: {LC_ALL: 'C'}});
+      return /^[-d][r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-]\.? /.test(stdout);
+    } catch {}
+  }
+  return false;
+}
+
+async function protectedEntry(path: string, stat: {uid: number; gid: number; mode: number}, privateGroups: PrivateGroups,
   exempt = false) {
   if (![0, process.getuid!()].includes(stat.uid)) throw new UnsafeProviderEntry(path, false);
   if (!exempt && (stat.mode & 0o002)) throw new UnsafeProviderEntry(path, true);
-  // Name the group, so `dharma status` can say when a group counts as private (PR #424 R424-2).
-  if (!exempt && (stat.mode & 0o020) && !privateGroups.has(stat.gid)) {
+  // Name the group, so `dharma status` can say when a group counts as private (PR #424 R424-2). The group write bit of
+  // an entry with an ACL is its mask, so only an entry with no ACL is exempt; otherwise 0.2.223's rule applies (A1).
+  if (!exempt && (stat.mode & 0o020) && (!privateGroups.has(stat.gid) || !await withoutAccessAcl(path))) {
     throw new UnsafeProviderEntry(path, true, stat.gid);
   }
 }
@@ -237,7 +251,7 @@ async function protectParents(path: string, privateGroups: PrivateGroups) {
     // Root-owned sticky temporary roots cannot replace this user's child directories.
     const stickyRoot = current !== path && parent.uid === 0 && (parent.mode & 0o1000) !== 0;
     if (!parent.isDirectory() || parent.isSymbolicLink()) throw new UnsafeProviderEntry(current, false);
-    protectedEntry(current, parent, privateGroups, stickyRoot);
+    await protectedEntry(current, parent, privateGroups, stickyRoot);
     if (dirname(current) === current) break;
   }
 }
@@ -256,7 +270,7 @@ async function protectedProviderExecutable(directory: string, provider: Provider
 async function protectedExecutableFile(executable: string, privateGroups: PrivateGroups) {
   const stat = await lstat(executable);
   if (!stat.isFile()) throw new UnsafeProviderEntry(executable, false);
-  protectedEntry(executable, stat, privateGroups);
+  await protectedEntry(executable, stat, privateGroups);
 }
 
 async function protectedProviderDirectory(directory: string, provider: ProviderCommand, nodePath: string,
