@@ -29,6 +29,7 @@ async function fixture() {
     providerProcessEnvironment: (source: NodeJS.ProcessEnv) => source, providerHintFromEnvironment: () => null,
     parseSelectedProviderIds: (values: string[]) => values.length ? values : null,
     resolveRepositoryProviderDirectory: async () => '/fixtures/codex/bin', providersHoldingInstalledBundle: async () => [],
+    protectedLauncherProviderDirectories: async () => [],
     // The core of PR #425 records no providers on the workspace; upgrade never writes the record.
     saveWorkspaceRecord: async () => { throw new Error('unexpected workspace record write'); },
     withRelayStartupMutation: async (operation: () => Promise<unknown>) => { calls.push('lock'); return operation(); },
@@ -59,7 +60,7 @@ async function fixture() {
   assert.equal(nodes.length, 1);
   // The bundle-holder helper it calls runs as written; its filesystem and PATH readers stay fixtures.
   const helpers = source.statements.filter(node => ts.isFunctionDeclaration(node)
-    && ['protectedBundleHolders'].includes(node.name?.text ?? ''))
+    && ['protectedBundleHolders', 'currentLauncherProviders'].includes(node.name?.text ?? ''))
     .map(node => node.getText(source).replace(/^export\s+/, ''));
   const compiled = ts.transpileModule([nodes[0]!.getText(source).replaceAll('import.meta.url', JSON.stringify(import.meta.url)),
     ...helpers].join('\n'), {
@@ -413,4 +414,72 @@ test('relay upgrade usage and the unsafe PATH error name --provider', async () =
   assert.match(CLI_USAGE, /relay upgrade --workspace <owned-checkout> \[--provider <codex\|claude\|agy\|hermes>\]/);
   const source = await readFile(fileURLToPath(new URL('../src/repositoryLaunchers.ts', import.meta.url)), 'utf8');
   assert.match(source, /const unsafeProviderOnPath = [^;]*--provider/);
+});
+
+// CLI 0.2.224 review R1: codex set up with its shared package still pending holds no bundle, so a Claude Code relay
+// upgrade wrote a launcher without codex, which then never came back. 0.2.223 always carried codex. The upgrade keeps
+// each protected provider directory the current launcher carries, and checks the launcher it writes for that provider.
+test('actual upgrade keeps the protected provider directories of the current launcher', async () => {
+  const f = await fixture(), resolved: string[] = [], read: string[] = [];
+  const reader = f.deps.readFile as (path: string) => Promise<string>;
+  f.deps.readFile = async (path: string) => {
+    if (dirname(path) === resolve(f.startup.workspace, '.dharma', 'bin')) {read.push(basename(path)); return `launcher ${basename(path)}`;}
+    return reader(path);
+  };
+  f.deps.protectedLauncherProviderDirectories = async (launchers: {shell: string; windows: string}) => {
+    assert.deepEqual({...launchers}, {shell: 'launcher dharma', windows: 'launcher dharma.cmd'});
+    return [{provider: 'codex', directory: '/fixtures/codex/bin'}];
+  };
+  f.deps.providerHintFromEnvironment = () => 'claude';
+  f.deps.resolveRepositoryProviderDirectory = async (input: {provider: string}) => {
+    resolved.push(input.provider); return `/fixtures/${input.provider}/bin`; };
+  f.deps.stableRepositoryLauncherContents = (_version: string, runtime?: {providerDirectory?: unknown}) => ({runtime});
+  let launcher: unknown, verified: unknown;
+  f.deps.verifyRollbackRepositoryLaunchers = async (_version: string, _launchers: unknown, provider?: unknown) => {
+    verified = provider; return true; };
+  f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {launcherContents(version: string): {runtime?: {providerDirectory?: unknown}};
+    verifyNextLaunchers?(version: string, launchers: unknown): Promise<boolean>}) => {
+    launcher = hooks.launcherContents('0.2.118').runtime?.providerDirectory;
+    await hooks.verifyNextLaunchers?.('0.2.118', {});
+    return {state: 'completed'};
+  };
+  f.flags.set('apply', true);
+  await f.run()(f.flags);
+  assert.deepEqual(read.sort(), ['dharma', 'dharma.cmd']);
+  assert.deepEqual(resolved, ['claude'], 'a kept directory is not resolved again');
+  assert.deepEqual(JSON.parse(JSON.stringify(launcher)), ['/fixtures/claude/bin', '/fixtures/codex/bin']);
+  assert.deepEqual(JSON.parse(JSON.stringify(verified)), ['claude', 'codex']);
+});
+
+// CLI 0.2.224 review R2: a provider merely guessed from the environment (the calling agent, else codex) that fails the
+// launcher check hard-failed the upgrade. It is left off the launcher instead; a --provider the user named still fails.
+test('actual upgrade leaves off a guessed provider that fails the check, and refuses a named one', async () => {
+  for (const [flag, hint] of [[undefined, 'claude'], [undefined, null], ['claude', 'codex']] as const) {
+    const f = await fixture(), label = `${flag} ${hint}`;
+    f.deps.providerHintFromEnvironment = () => hint;
+    f.deps.providersHoldingInstalledBundle = async () => ['agy'];
+    f.deps.resolveRepositoryProviderDirectory = async (input: {provider: string}) => {
+      if (input.provider !== 'agy') throw new Error(`relay_startup_${input.provider}_path_invalid`);
+      return '/fixtures/agy/bin';
+    };
+    f.deps.stableRepositoryLauncherContents = (_version: string, runtime?: {providerDirectory?: unknown}) => ({runtime});
+    let launcher: unknown, verified: unknown;
+    f.deps.verifyRollbackRepositoryLaunchers = async (_version: string, _launchers: unknown, provider?: unknown) => {
+      verified = provider; return true; };
+    f.deps.upgradeRelayRuntime = async (_input: unknown, hooks: {launcherContents(version: string): {runtime?: {providerDirectory?: unknown}};
+      verifyNextLaunchers?(version: string, launchers: unknown): Promise<boolean>}) => {
+      launcher = hooks.launcherContents('0.2.118').runtime?.providerDirectory;
+      await hooks.verifyNextLaunchers?.('0.2.118', {});
+      return {state: 'completed'};
+    };
+    f.flags.set('apply', true);
+    if (flag) {
+      f.flags.set('provider', flag);
+      await assert.rejects(f.run()(f.flags), /relay_startup_claude_path_invalid/, label);
+      continue;
+    }
+    await f.run()(f.flags);
+    assert.deepEqual(JSON.parse(JSON.stringify(launcher)), ['/fixtures/agy/bin'], label);
+    assert.deepEqual(JSON.parse(JSON.stringify(verified)), ['agy'], label);
+  }
 });
