@@ -58,7 +58,8 @@ test('actual setup readiness wait explains a pending result from the relay recor
 test('actual diagnostic status shows each repository relay activation counters and last results', async () => {
   const text = await source();
   const status = text.slice(text.indexOf("if (command === 'status') {"), text.indexOf("if (command === 'assistant')"));
-  assert.match(status, /skillActivation: await readRelaySkillActivationState\(dharmaHome\(\), row\.workspaceId\)/);
+  assert.match(status, /const skillActivation = await readRelaySkillActivationState\(dharmaHome\(\), row\.workspaceId\)/);
+  assert.match(status, /lastSuccessfulPollAt, \.\.\.\(lastFailure \? \{ lastFailure \} : \{\}\),\s*skillActivation,/);
 });
 
 // PR #424 review F3: a provider_unsafe_path result left `dharma status` with neither the failing path nor a remedy.

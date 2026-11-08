@@ -100,7 +100,7 @@ import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js'
 import {classifyCodexSetupFailure, reportCodexSetupFailure, type CodexSetupFailureDiagnostic, type CodexSetupFailureObserver} from './codexSetupDiagnostic.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
 import { openWithFirstAvailableOpener } from './verificationOpener.js';
-import { PROVIDER_UNSAFE_PATH, relayProviderCapability, relayProviderUnsafePath } from './relayProviderGuard.js';
+import { PROVIDER_UNSAFE_PATH, relayProviderCapability, relayProviderUnsafePath, relayProviderUnsafePathRemedy } from './relayProviderGuard.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
@@ -9927,11 +9927,20 @@ export async function run(argv: string[]): Promise<Output> {
                 organizationId: config.organizationId, deviceId: config.deviceId,
                 workspaceId: row.workspaceId, pid: relayPid, relayPidMtimeMs: relayPidState?.relayPidMtimeMs ?? null,
                 relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt: lastSuccess });
+              const skillActivation = await readRelaySkillActivationState(dharmaHome(), row.workspaceId);
+              // The record keeps only codes; name the PATH entry the relay refuses, and the fix, from this host.
+              const providerPathRemedies: Record<string, { path: string; remedy: string }> = {};
+              for (const [provider, result] of Object.entries(skillActivation?.providers ?? {})) {
+                if (isLocalProviderId(provider) && result?.errorCode === PROVIDER_UNSAFE_PATH) {
+                  const remedy = await relayProviderUnsafePathRemedy(provider);
+                  if (remedy) providerPathRemedies[provider] = remedy;
+                }
+              }
               observations.push({ workspaceId: row.workspaceId,
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
                 lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}),
-                skillActivation: await readRelaySkillActivationState(dharmaHome(), row.workspaceId) });
+                skillActivation, ...(Object.keys(providerPathRemedies).length ? { providerPathRemedies } : {}) });
             }
             status.repositoryRelays = { state: 'observed', repositories: observations };
           }
