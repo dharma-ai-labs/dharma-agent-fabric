@@ -330,6 +330,21 @@ async function protectedExecutableFile(executable: string, privateGroups: Privat
   await protectedEntry(executable, stat, privateGroups);
 }
 
+// The node beside a provider is the env-node a node-script provider, and npm's CLI child, run with: the launcher and
+// the relay put the provider directory before the recorded Node directory on PATH. When there is one, its own link
+// chain and file are checked as the provider executable's are, for every provider (CLI 0.2.224 review N1).
+async function protectedSiblingNode(directory: string, privateGroups: PrivateGroups) {
+  try {await lstat(join(directory, 'node'));} catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  const selected = await protectedPathResolution(join(directory, 'node'), privateGroups, true);
+  await protectParents(dirname(selected), privateGroups);
+  await protectedExecutableFile(selected, privateGroups);
+  if (!((await lstat(selected)).mode & 0o111)) throw Error();
+  return selected;
+}
+
 async function protectedProviderDirectory(path: string, provider: ProviderCommand, nodePath: string,
   privateGroups: PrivateGroups) {
   const {directory, executable} = await protectedProviderExecutable(path, provider, privateGroups);
@@ -337,21 +352,12 @@ async function protectedProviderDirectory(path: string, provider: ProviderComman
   // A native Claude binary can exceed the hashing bound; its ownership and mode are what protect it.
   else await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
-  // Only codex is held to the Node rule below, as in 0.2.223; another provider's own protected directory is the
-  // user's runtime, such as fnm's Node beside claude (CLI 0.2.224 review R2).
-  if (provider !== 'codex') return directory;
-  let hasNode = true;
-  try {await lstat(join(directory, 'node'));} catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    hasNode = false;
-  }
-  // npm's CLI child uses env-node; provider priority must not replace its runtime.
-  if (hasNode) {
-    const selectedNode = await protectedPathResolution(join(directory, 'node'), privateGroups, true);
-    await protectParents(dirname(selectedNode), privateGroups);
-    if (!((await lstat(selectedNode)).mode & 0o111)
-      || await protectedBinaryHash(selectedNode, 'linux') !== await protectedBinaryHash(nodePath, 'linux')) throw Error();
-  }
+  const selectedNode = await protectedSiblingNode(directory, privateGroups);
+  // Only codex is held to the launcher's own Node, as in 0.2.223: npm's CLI child uses env-node, and provider priority
+  // must not replace its runtime. Another provider's protected node is the user's runtime, such as fnm's Node beside
+  // claude (CLI 0.2.224 review R2).
+  if (provider === 'codex' && selectedNode !== undefined
+    && await protectedBinaryHash(selectedNode, 'linux') !== await protectedBinaryHash(nodePath, 'linux')) throw Error();
   return directory;
 }
 
@@ -405,9 +411,10 @@ async function relayProviderExecutable(directory: string, provider: ProviderComm
   // The relay runs the provider through this entry, so no other user may be able to repoint it after the check
   // (CLI 0.2.224 review round 2). The launcher writes each set-up provider's real directory first on the relay PATH.
   await protectedPathResolution(directory, privateGroups);
-  const {executable} = await protectedProviderExecutable(directory, provider, privateGroups);
+  const {directory: real, executable} = await protectedProviderExecutable(directory, provider, privateGroups);
   await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
+  await protectedSiblingNode(real, privateGroups);
 }
 
 /**
