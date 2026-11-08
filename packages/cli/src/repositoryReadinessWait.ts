@@ -7,6 +7,7 @@ export type RepositoryReadinessObservation = {
 export type RepositoryReadinessResult = RepositoryReadinessObservation & {
   outcome: 'ready' | 'blocked' | 'pending';
   attempts: number;
+  code?: string;
 };
 
 export type RepositoryReadinessProgress = RepositoryReadinessObservation & {
@@ -23,6 +24,7 @@ export async function waitForRepositoryReadiness(
     now?: () => number;
     wait?: (delayMs: number) => Promise<void>;
     onProgress?: (progress: RepositoryReadinessProgress) => void;
+    explainPending?: () => Promise<string | null>;
   } = {},
 ): Promise<RepositoryReadinessResult> {
   const maximumWaitMs = options.maximumWaitMs ?? 300_000;
@@ -39,7 +41,11 @@ export async function waitForRepositoryReadiness(
     if (observed.ready) return { ...observed, outcome: 'ready', attempts };
     if (observed.state === 'blocked') return { ...observed, outcome: 'blocked', attempts };
     const remaining = deadline - now();
-    if (remaining <= 0) return { ...observed, outcome: 'pending', attempts };
+    if (remaining <= 0) {
+      // A diagnostic lookup must never change the readiness result itself.
+      const code = await options.explainPending?.().catch(() => null);
+      return { ...observed, outcome: 'pending', attempts, ...(code ? { code } : {}) };
+    }
     options.onProgress?.({ ...observed, attempts, elapsedMs: maximumWaitMs - remaining, maximumWaitMs });
     await wait(Math.min(intervalMs, remaining));
   }

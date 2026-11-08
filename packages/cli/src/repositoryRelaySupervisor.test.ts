@@ -273,3 +273,62 @@ test('only current-device aliases with matching canonical routes and organizatio
   await assert.rejects(selectRepositoryRelayRegistrations([alias('/a'), alias('/a')], enrollment,
     async () => ({ organizationId: enrollment.organizationId })), /Ambiguous registry/);
 });
+
+// Start times of one repository whose session opens fail with the given error per attempt.
+async function failedSessionOpenStarts(errorFor: (attempt: number) => Error, attempts: number) {
+  const controller = new AbortController();
+  let clock = 0;
+  const starts: number[] = [];
+  await runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a], now: () => clock,
+    run: () => {
+      const attempt = starts.push(clock);
+      return withRepositoryRelayStage('session_open', async () => { throw errorFor(attempt); });
+    },
+    wait: async () => {
+      await new Promise(accept => setImmediate(accept));
+      clock += 10_000;
+      if (starts.length > attempts || clock > 10_000_000) controller.abort();
+    } });
+  return starts.slice(1).map((at, index) => at - starts[index]!);
+}
+const identityLost = () => Error('relay_host_device_identity_unavailable');
+const storeUnreadable = () => Object.assign(Error('Windows Credential Manager fresh read failed: read_response_invalid.'),
+  { code: 'read_response_invalid' });
+
+test('five consecutive device identity or store failures back the retry off to ten minutes', async () => {
+  const gaps = await failedSessionOpenStarts(attempt => attempt % 2 ? identityLost() : storeUnreadable(), 7);
+  assert.equal(gaps.length, 7);
+  for (const gap of gaps.slice(0, 4)) assert.ok(gap <= 60_000, `short retry before the fifth failure: ${gaps}`);
+  for (const gap of gaps.slice(4)) assert.ok(gap >= 600_000 && gap <= 620_000, `ten-minute retry after five: ${gaps}`);
+});
+
+test('any other failure keeps the short retry and restarts the device credential count', async () => {
+  const other = await failedSessionOpenStarts(() => Error('connection_transport_unavailable private detail'), 8);
+  assert.ok(other.every(gap => gap <= 60_000), `other failures: ${other}`);
+  const mixed = await failedSessionOpenStarts(attempt => attempt % 5 === 0 ? Error('worker failed') : identityLost(), 10);
+  assert.ok(mixed.every(gap => gap <= 60_000), `interrupted credential failures: ${mixed}`);
+});
+
+// The real relayRestartDelayMs schedule: 1, 2, 4, 8, 16, then 30 s.
+test('a store that does not answer keeps the short retry however often it repeats', async () => {
+  const storeBusy = () => Object.assign(Error('Windows Credential Manager fresh read failed: read_timeout.'), { code: 'read_timeout' });
+  const busy = await failedSessionOpenStarts(storeBusy, 8);
+  assert.equal(busy.length, 8);
+  assert.ok(busy.every(gap => gap <= 60_000), `store-busy failures must never wait ten minutes: ${busy}`);
+  const helperGone = await failedSessionOpenStarts(attempt => attempt % 2 ? storeBusy()
+    : Object.assign(Error('Windows Credential Manager fresh read failed: read_helper_exited.'), { code: 'read_helper_exited' }), 7);
+  assert.ok(helperGone.every(gap => gap <= 60_000), `helper outages: ${helperGone}`);
+  const identity = await failedSessionOpenStarts(identityLost, 6);
+  assert.ok(identity.slice(0, 4).every(gap => gap <= 60_000) && identity.slice(4).every(gap => gap >= 600_000),
+    `identity failures still wait ten minutes after five: ${identity}`);
+});
+
+test('an unreadable WSL vault entry backs off like any unreadable store', async () => {
+  const wslUnreadable = () => Error('Windows Credential Manager failed: Credential read unavailable.');
+  const alone = await failedSessionOpenStarts(wslUnreadable, 6);
+  assert.ok(alone.slice(0, 4).every(gap => gap <= 60_000) && alone.slice(4).every(gap => gap >= 600_000), `WSL unreadable: ${alone}`);
+  const mixed = await failedSessionOpenStarts(attempt => attempt % 2 ? wslUnreadable() : identityLost(), 6);
+  assert.ok(mixed.slice(4).every(gap => gap >= 600_000), `WSL unreadable with identity loss: ${mixed}`);
+  const otherText = await failedSessionOpenStarts(() => Error('Windows Credential Manager failed: Credential write unavailable.'), 7);
+  assert.ok(otherText.every(gap => gap <= 60_000), `other helper text stays busy: ${otherText}`);
+});

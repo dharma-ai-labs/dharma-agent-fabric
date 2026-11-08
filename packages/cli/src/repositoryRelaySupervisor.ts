@@ -1,5 +1,6 @@
 import { isAbsolute, resolve, win32 } from 'node:path';
 import { selectDeviceWorkspace, type OnboardingWorkspaceRecord } from './onboardingWorkspace.js';
+import { RELAY_OPEN_FAILURE_CODES, relayOpenFailureCode } from './relayOpenFailure.js';
 import { relayRestartDelayMs } from './relaySupervisor.js';
 
 export interface RepositoryRelayRegistration { workspaceId: string; policyPath: string }
@@ -10,8 +11,14 @@ export type RepositoryRelayFailureCategory = 'policy_boundary' | 'retention_not_
 // Exact codes only: any other error message can quote a path or a server value.
 export const REPOSITORY_RELAY_FAILURE_CODES: ReadonlySet<string> = new Set(['connection_anchor_lock_invalid', 'connection_anchor_busy',
   'connection_anchor_recovery_required', 'connection_anchor_lock_unavailable', 'connection_anchor_lock_cleanup_unconfirmed',
-  'device_signing_control_unavailable']);
+  'device_signing_control_unavailable', ...RELAY_OPEN_FAILURE_CODES]);
 const typedFailure = (value: unknown) => REPOSITORY_RELAY_FAILURE_CODES.has(value as string) ? { failureCode: value as string } : {};
+// An unreadable device identity or store needs the user, so a retry every 30 s only repeats the failure.
+// connection_identity_store_busy is transient and stays on the short relayRestartDelayMs schedule.
+const DEVICE_CREDENTIAL_FAILURES: ReadonlySet<string> = new Set(['connection_identity_requires_recovery',
+  'connection_identity_store_unavailable']);
+const DEVICE_CREDENTIAL_FAILURE_LIMIT = 5;
+const DEVICE_CREDENTIAL_RETRY_MS = 600_000;
 interface Observation { workspaceId: string | null; code: string; stage?: RepositoryRelayStage;
   category?: RepositoryRelayFailureCategory; failureCode?: string }
 
@@ -26,8 +33,12 @@ export async function withRepositoryRelayStage<T>(stage: RepositoryRelayStage, o
   catch (error) { throw error instanceof StagedRepositoryRelayError ? error : new StagedRepositoryRelayError(stage, error); }
 }
 
+function failureCause(error: unknown) {
+  return error instanceof StagedRepositoryRelayError ? error.cause : error;
+}
+
 function failureMessage(error: unknown) {
-  const cause = error instanceof StagedRepositoryRelayError ? error.cause : error;
+  const cause = failureCause(error);
   try { return cause instanceof Error ? cause.message : ''; }
   catch { return ''; }
 }
@@ -152,9 +163,10 @@ export async function runRegisteredRepositoryRelays(input: {
 }) {
   const now = input.now ?? Date.now;
   const wait = input.wait ?? waitForRelayRefresh;
-  const workers = new Map<string, { row: RepositoryRelayRegistration; controller: AbortController;
-    flight: Promise<void>; done: boolean; failed: boolean }>();
-  const failures = new Map<string, { count: number; retryAt: number }>();
+  type Worker = { row: RepositoryRelayRegistration; controller: AbortController;
+    flight: Promise<void>; done: boolean; failed: boolean; failureCode?: string };
+  const workers = new Map<string, Worker>();
+  const failures = new Map<string, { count: number; credentialCount: number; retryAt: number }>();
   // Diagnostics must never turn a caught worker failure into an unhandled rejection.
   const observe = (event: Observation) => {
     try { void Promise.resolve(input.observe?.(event)).catch(() => {}); }
@@ -179,14 +191,16 @@ export async function runRegisteredRepositoryRelays(input: {
         if (!worker.done) continue;
         workers.delete(id);
         if (worker.failed && !worker.controller.signal.aborted) {
-          const count = (failures.get(id)?.count ?? 0) + 1;
-          failures.set(id, { count, retryAt: now() + relayRestartDelayMs(count) });
+          const previous = failures.get(id), count = (previous?.count ?? 0) + 1;
+          const credentialCount = DEVICE_CREDENTIAL_FAILURES.has(worker.failureCode ?? '') ? (previous?.credentialCount ?? 0) + 1 : 0;
+          failures.set(id, { count, credentialCount, retryAt: now() + (credentialCount >= DEVICE_CREDENTIAL_FAILURE_LIMIT
+            ? DEVICE_CREDENTIAL_RETRY_MS : relayRestartDelayMs(count)) });
         } else failures.delete(id);
       }
       for (const row of rows) {
         if (workers.has(row.workspaceId) || (failures.get(row.workspaceId)?.retryAt ?? 0) > now()) continue;
         const controller = new AbortController();
-        const worker = { row, controller, done: false, failed: false, flight: Promise.resolve() };
+        const worker: Worker = { row, controller, done: false, failed: false, flight: Promise.resolve() };
         workers.set(row.workspaceId, worker);
         worker.flight = Promise.resolve().then(async () => {
           if (controller.signal.aborted || input.signal.aborted) return;
@@ -200,10 +214,11 @@ export async function runRegisteredRepositoryRelays(input: {
           } catch (error) {
             if (!controller.signal.aborted) {
               worker.failed = true;
-              observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
-                stage: error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run',
-                category: failureCategory(error),
-                ...typedFailure(failureMessage(error)) });
+              const stage = error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run';
+              worker.failureCode = typedFailure(failureMessage(error)).failureCode
+                ?? (stage === 'session_open' ? relayOpenFailureCode(failureCause(error)) : undefined);
+              observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed', stage,
+                category: failureCategory(error), ...(worker.failureCode ? { failureCode: worker.failureCode } : {}) });
             }
           } finally {
             worker.done = true;

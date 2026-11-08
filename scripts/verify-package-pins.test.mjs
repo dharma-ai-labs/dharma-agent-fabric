@@ -83,3 +83,13 @@ test('CLI pins runtime packages published with providerLaunch and requiredSkillF
   assert.equal(cli.dependencies[evidence.name], evidence.version);
   assert.equal(cli.dependencies[vault.name], vault.version);
 });
+
+test('CLI pins provider-adapters published with providerCapabilityWithoutExecutable', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const [cli, provider] = await Promise.all(['cli', 'provider-adapters'].map(manifest));
+  // #427's relay provider guard imports providerCapabilityWithoutExecutable. provider-adapters 0.1.40 is on npm
+  // without it, so a published CLI pinned to 0.1.40 would stop at module load.
+  assert.ok(provider.version.localeCompare('0.1.41', undefined, {numeric: true}) >= 0,
+    `provider-adapters ${provider.version} is published without providerCapabilityWithoutExecutable`);
+  assert.equal(cli.dependencies[provider.name], provider.version);
+});

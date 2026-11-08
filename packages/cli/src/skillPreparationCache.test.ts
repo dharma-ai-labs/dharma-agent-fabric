@@ -15,6 +15,8 @@ import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './sk
 import { prepareProvidersIndependently } from './skillPreparationPump.js';
 import { withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { currentBootstrapHostScope } from './bootstrapHostScope.js';
+import { nextSkillActivationResult, relaySkillActivationPath, requireActiveSkillInstall, skillActivationErrorCode }
+  from './skillActivationResult.js';
 
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 type PublishInput = { home: string; workspaceId: string; provider: 'codex'; sourceRoot: string;
@@ -157,7 +159,7 @@ test('revocation or cancellation during stale-policy validation cannot become a 
 // Execute the emitted cache reader and safe-boundary callback, with synthetic
 // authorization and delivery. This is an offline caller test, not live receipt proof.
 async function runPolicyRefreshActivation(f: Awaited<ReturnType<typeof fixture>>, options: {
-  denyFresh?: boolean; foreignDevice?: boolean; tamperMetadata?: boolean;
+  denyFresh?: boolean; foreignDevice?: boolean; tamperMetadata?: boolean; installStatus?: string;
 }, diagnostic: (message: string) => void) {
   await (await publisher())({ ...f, workspaceId: WORKSPACE, provider: 'codex', assertCurrent: () => {}, onCommitted: () => {} });
   if (options.tamperMetadata) await writeFile(join(f.sourceRoot, 'PREPARED.json'), f.recordBytes + ' ');
@@ -190,8 +192,7 @@ async function runPolicyRefreshActivation(f: Awaited<ReturnType<typeof fixture>>
     repositoryBindingId: f.expected.repositoryBindingId, path: f.home };
   const fabric = Object.freeze({ fixture: true });
   const fresh = Object.freeze({ fixture: 'fresh-authorized-preparation', policy, config, workspace, fabric });
-  try {
-    await new Script(`${readers[0]!.getText(ast)}\n(${callbacks[0]!.getText(ast)})();`).runInNewContext({
+  const context: Record<string, unknown> = {
       Map, Error, canonicalize, sha256, canonicalWorkspace: workspace,
       provider: 'codex', policyPath: join(f.home, 'approved-policy.json'), fabric,
       skillPreparationsCompleted: 0, skillActivationsCompleted: 0,
@@ -208,13 +209,19 @@ async function runPolicyRefreshActivation(f: Awaited<ReturnType<typeof fixture>>
       activatePreparedSkillUpdate: async (input: { prepared: unknown }) => {
         assert.equal(input.prepared, fresh, 'stale cache must never become the activated preparation');
         activations++;
+        return { ok: true, status: options.installStatus ?? 'active' };
       },
+      requireActiveSkillInstall,
       createPublicKey: () => { throw new Error('unexpected stale cache signature path'); },
       rm: () => { throw new Error('unexpected stale cache cleanup'); },
-    });
-    return { currentChecks, freshCalls, activations, error: null };
+  };
+  const counted = () => ({ currentChecks, freshCalls, activations, completed: context.skillActivationsCompleted });
+  try {
+    await new Script(`${readers[0]!.getText(ast)}\n(${callbacks[0]!.getText(ast)})();`).runInNewContext(context);
+    return { ...counted(), error: null, errorCode: null };
   } catch (error) {
-    return { currentChecks, freshCalls, activations, error: error instanceof Error ? error.message : String(error) };
+    return { ...counted(), error: error instanceof Error ? error.message : String(error),
+      errorCode: skillActivationErrorCode(error, 'activation') };
   }
 }
 
@@ -223,9 +230,20 @@ test('actual relay activation prepares fresh under renewed policy after a valid 
   try {
     const result = await runPolicyRefreshActivation(f, {}, message => t.diagnostic(message));
     assert.equal(result.error, null); assert.ok(result.currentChecks >= 2);
-    assert.equal(result.freshCalls, 1); assert.equal(result.activations, 1);
+    assert.equal(result.freshCalls, 1); assert.equal(result.activations, 1); assert.equal(result.completed, 1);
     await readFile(join(f.scopeRoot, 'CURRENT.json'));
   } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('actual relay activation turns a failed or rolled-back install receipt into a coded failure', async t => {
+  for (const installStatus of ['failed', 'rolled_back']) {
+    const f = await fixture();
+    try {
+      const result = await runPolicyRefreshActivation(f, { installStatus }, message => t.diagnostic(message));
+      assert.equal(result.activations, 1); assert.equal(result.completed, 0, installStatus);
+      assert.equal(result.errorCode, `install_failed:${installStatus}`);
+    } finally { await rm(f.home, { recursive: true, force: true }); }
+  }
 });
 
 test('actual relay activation preserves fresh-preparation denial after a stale cache miss', async t => {
@@ -355,6 +373,10 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       } }),
     rawLocalRetentionDays: () => 1,
     providerAdapters: [{ providerId: 'codex', capability: async () => ({ skillInstall: 'available' }) }],
+    relayProviderCapability: async (adapter: { capability(): Promise<unknown> }) =>
+      ({ unsafePath: false, capability: await adapter.capability() }),
+    PROVIDER_UNSAFE_PATH: 'provider_unsafe_path',
+    readRelaySkillActivationState: async () => null,
     isLocalProviderId: (provider: string) => provider === 'codex', prepareProvidersIndependently,
     withSkillPreparationTransaction: async (_input: unknown, operation: () => Promise<void>) => operation(),
     skillPreparationScopeRoot, serializeSkillPreparationRecord,
@@ -399,6 +421,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       return {};
     },
     writeJsonAtomic: async () => {},
+    relaySkillActivationPath, nextSkillActivationResult, skillActivationErrorCode,
   }) as Record<string, unknown>;
   assert.equal(vaultCloses, 1); assert.equal(transportCalls, holdSourceScan ? 2 : 1);
   assert.equal(sourceScans, 1, 'source scan must remain single-flight');

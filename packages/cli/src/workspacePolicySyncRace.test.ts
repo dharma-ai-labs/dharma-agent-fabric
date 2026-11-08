@@ -132,6 +132,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
       return providers;
     },
     selectedProviderAdapters: () => [{capability: async () => {await hooks.probe?.(); return {provider: 'codex'};}}],
+    relayProviderCapability: async (adapter: {capability(): Promise<unknown>}) => ({unsafePath: false, capability: await adapter.capability()}),
     registry: async () => [item], canonicalFilesystemPath: async (path: string) => path,
     readDeviceConfig: async () => ({organizationId: ORGANIZATION, serverPublicKeyEd25519: publicKey}),
     rename: async (from: string, to: string) => {await hooks.rename?.(from, to); return fs.rename(from, to);},

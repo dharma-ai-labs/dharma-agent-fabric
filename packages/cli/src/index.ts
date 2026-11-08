@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, posix, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryCodexDirectory } from './repositoryLaunchers.js';
+import { stableRepositoryLauncherContents as repositoryLauncherContents, verifyRecordedRepositoryLaunchers, verifyRollbackRepositoryLaunchers, resolveRepositoryNpmCli, resolveRepositoryProviderDirectory, providerDirectoriesInPathOrder, protectedSetUpProviderDirectories, recordSetUpProviderDirectories } from './repositoryLaunchers.js';
 import {
   canonicalize, createActionDecisionPublicKeyResolver, sha256, validateContract,
   validateTrustedServerSigningKeysetContract, verifyCanonicalObject, verifyInitialServerSigningKeyset,
@@ -47,6 +47,7 @@ import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureRecei
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
   repositoryRelayFailureReceipt, repositoryRelayTimestampMs, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+import { relayOpenFailureRemedyForHost } from './relayOpenFailure.js';
 import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, startupPreflightFailure, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
 import { readWorkspaceRegistry } from './workspaceRegistry.js';
@@ -77,6 +78,8 @@ import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionS
 import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmission.js';
 import { resolveBootstrapRepositoryWorkspace } from './bootstrapRepositorySelection.js';
 import { receiveRepositoryPackageDelivery } from './repositoryPackageDelivery.js';
+import { nextSkillActivationResult, readRelaySkillActivationState, relaySkillActivationPath, repositoryReadinessPendingCode,
+  requireActiveSkillInstall, SkillActivationError, skillActivationErrorCode, type SkillActivationResult, type SkillActivationStage } from './skillActivationResult.js';
 import { selectInstalledRepositoryKnowledge } from './repositoryInstalledKnowledge.js';
 import { collectRepositorySourceRestoration } from './repositorySourceRestoration.js';
 import { planRepositorySourceResolution, reconcileRepositorySourceSnapshot } from './repositorySourceReconciliation.js';
@@ -96,6 +99,8 @@ import { deriveRepositoryRole } from './repositoryRoleDerivation.js';
 import { withOnboardingStage, type OnboardingStage } from './onboardingStage.js';
 import {classifyCodexSetupFailure, reportCodexSetupFailure, type CodexSetupFailureDiagnostic, type CodexSetupFailureObserver} from './codexSetupDiagnostic.js';
 import { waitForRepositoryReadiness, type RepositoryReadinessResult } from './repositoryReadinessWait.js';
+import { openWithFirstAvailableOpener } from './verificationOpener.js';
+import { PROVIDER_UNSAFE_PATH, relayProviderCapability, relayProviderUnsafePath, relayProviderUnsafePathRemedy } from './relayProviderGuard.js';
 import { connectDemoDevice, verifyDemoDevice } from './demoEnrollment.js';
 import { performDemoPeerAction, withDemoDeviceLock, type DemoPeerAction } from './demoPeer.js';
 import { demoRepositoryPackage } from './demoPackage.js';
@@ -160,7 +165,7 @@ export { openCooperativeInboxSession, type CooperativeSessionContext } from './c
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
 
-const VERSION = '0.2.223';
+const VERSION = '0.2.224';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -2082,11 +2087,20 @@ async function archiveEnrollmentForAuthorizedRebind(existing: DeviceConfig) {
 }
 
 export function stableRepositoryLauncherContents(version = VERSION,
-  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; codexDirectory?: string }) {
+  runtime?: { platform: NodeJS.Platform; nodeDirectory: string; npmCliPath?: string; providerDirectory?: string | readonly string[] }) {
   return repositoryLauncherContents(version, runtime);
 }
 
-async function installStableRepositoryLauncher(workspace: string) {
+/**
+ * The protected provider directories this device recorded on the workspace's launcher. With no record yet, as on a
+ * 0.2.223 device, the protected codex first on `searchPath`, which 0.2.223 always carried; left off when absent or
+ * unsafe. Never read from the launcher in the working tree, which the repository can commit (CLI 0.2.224 review K1).
+ */
+async function currentLauncherProviders(workspace: string, searchPath: string | undefined) {
+  return protectedSetUpProviderDirectories({home: dharmaHome(), workspace, searchPath});
+}
+
+async function installStableRepositoryLauncher(workspace: string, providers: readonly ProviderId[]) {
   const scope = currentBootstrapHostScope();
   const launcherRoot = resolve(workspace, '.dharma', 'bin');
   const shellPath = resolve(launcherRoot, 'dharma');
@@ -2094,12 +2108,28 @@ async function installStableRepositoryLauncher(workspace: string) {
   await scope?.assert();
   const npmCliPath = process.platform === 'linux' ? await (scope
     ? scope.step(() => resolveRepositoryNpmCli()) : resolveRepositoryNpmCli()) : undefined;
-  const codexDirectory = await (scope
-    ? scope.step(() => resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}))
-    : resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}));
+  // The relay service starts with the user manager PATH, not this shell's. Carry the bin directory of the
+  // provider set up in this checkout, so the relay probes and installs for it as setup did. The relay serves every
+  // adapter, so, as relay upgrade does, keep each protected provider already holding the registered workspace's
+  // installed bundle; setting up a second agent never drops the first one's directory (PR #424 review F1).
+  const config = await readDeviceConfig();
+  const record = config ? selectDeviceWorkspace(await (scope ? scope.step(() => registry()) : registry()),
+    {organizationId: config.organizationId, deviceId: config.deviceId, path: workspace}) : null;
+  const holders = record ? await (scope ? scope.step(() => protectedBundleHolders(record)) : protectedBundleHolders(record)) : [];
+  const searchPath = providerProcessEnvironment(process.env).PATH;
+  const resolved: (string | undefined)[] = [];
+  for (const provider of [...new Set([...holders, ...providers])]) {
+    resolved.push(await (scope ? scope.step(() => resolveRepositoryProviderDirectory({provider, searchPath}))
+      : resolveRepositoryProviderDirectory({provider, searchPath})));
+  }
+  // Keep each protected provider directory the launcher being replaced carries, so setting up another agent never
+  // drops one whose shared package is still pending (CLI 0.2.224 review R1).
+  const kept = await (scope ? scope.step(() => currentLauncherProviders(workspace, searchPath))
+    : currentLauncherProviders(workspace, searchPath));
+  const providerDirectory = await providerDirectoriesInPathOrder([...resolved, ...kept.map(item => item.directory)], searchPath);
   const contents = stableRepositoryLauncherContents(VERSION,
     { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
-      ...(codexDirectory === undefined ? {} : {codexDirectory}) });
+      ...(providerDirectory.length ? {providerDirectory} : {}) });
   if (scope) {
     await scope.assert();
     if (await scope.step(() => realpath(workspace)) !== workspace) throw new Error('codex_setup_host_launcher_path_invalid');
@@ -2122,6 +2152,9 @@ async function installStableRepositoryLauncher(workspace: string) {
     await chmod(shellPath, 0o700);
     await writeFile(cmdPath, contents.windows, { mode: 0o600 });
   }
+  // The next setup or relay upgrade keeps these directories from this record, not from the working tree (K1).
+  const recordProviders = () => recordSetUpProviderDirectories({home: dharmaHome(), workspace, providerDirectory});
+  await (scope ? scope.step(recordProviders) : recordProviders());
   return { shell: '.dharma/bin/dharma', windows: '.dharma/bin/dharma.cmd' };
 }
 
@@ -2168,8 +2201,33 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
   };
   return withRelayStartupMutation(async () => {
     const npmCliPath = process.platform === 'linux' && !flags.has('rollback') ? await resolveRepositoryNpmCli() : undefined;
-    const codexDirectory = !flags.has('rollback')
-      ? await resolveRepositoryCodexDirectory({searchPath: providerProcessEnvironment(process.env).PATH}) : undefined;
+    // The relay serves every adapter, so the launcher keeps each protected provider already holding the installed
+    // bundle, and adds the provider this upgrade is for: --provider, else the calling agent, else codex as before.
+    // A holder never displaces the calling agent (PR #425 review round 5).
+    const requested = parseSelectedProviderIds(typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : [])?.[0];
+    const provider = requested ?? providerHintFromEnvironment() ?? 'codex';
+    const holders = await protectedBundleHolders(selected);
+    let launcherProviders: ProviderId[] = [...new Set([...holders, provider])];
+    // The launcher carries the bin directory of each of these providers, and keeps each protected one the current
+    // launcher carries, so an agent whose shared package is still pending stays on the relay PATH (CLI 0.2.224 R1).
+    const searchPath = providerProcessEnvironment(process.env).PATH;
+    const resolved: (string | undefined)[] = [];
+    if (!flags.has('rollback')) {
+      for (const item of launcherProviders) {
+        // A provider only guessed from the environment that fails the check is left off; it never fails the upgrade
+        // (CLI 0.2.224 review R2). A --provider the user named still does.
+        const guessed = item === provider && requested === undefined && !holders.includes(item);
+        try {resolved.push(await resolveRepositoryProviderDirectory({provider: item, searchPath}));}
+        catch (error) {
+          if (!guessed) throw error;
+          launcherProviders = launcherProviders.filter(entry => entry !== item);
+        }
+      }
+      const kept = await currentLauncherProviders(workspace, searchPath);
+      resolved.push(...kept.map(item => item.directory));
+      launcherProviders = [...new Set([...launcherProviders, ...kept.map(item => item.provider)])];
+    }
+    const providerDirectory = await providerDirectoriesInPathOrder(resolved, searchPath);
     const upgrade=maintenance?upgradeRelayForSigningMaintenance:upgradeRelayRuntime;
     const receipt = await upgrade({ home, workspace, version: VERSION,
       organizationId: config.organizationId, deviceId: config.deviceId, workspaceId: selected.workspaceId,
@@ -2213,11 +2271,15 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       },
       launcherContents: version => stableRepositoryLauncherContents(version,
         { platform: process.platform, nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
-          ...(codexDirectory === undefined ? {} : {codexDirectory}) }),
+          ...(providerDirectory.length ? {providerDirectory} : {}) }),
       legacyLauncherContents: version => stableRepositoryLauncherContents(version),
-      verifyPriorLaunchers: verifyRecordedRepositoryLaunchers,
+      // A recorded launcher was written for whichever provider was known then, so any protected provider command
+      // in its directory passes. Only the launcher this run writes is checked for the set-up providers.
+      verifyPriorLaunchers: (version, contents) => verifyRecordedRepositoryLaunchers(version, contents,
+        { platform: process.platform, nodePath: process.execPath }),
       recordNextLaunchers: process.platform === 'linux',
-      verifyRecoveryLaunchers: verifyRollbackRepositoryLaunchers,
+      verifyRecoveryLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents),
+      verifyNextLaunchers: (version, contents) => verifyRollbackRepositoryLaunchers(version, contents, launcherProviders),
       configureStartup: (version, restore) => enableRelayAutostart({ ...startupOptions, workspace,
         launcher: startup.launcher, policy: startup.policy, version,
         ...(restore ? {restoreCodexHome: restore.codexHome}
@@ -2261,6 +2323,11 @@ async function relayUpgrade(flags: Map<string, string | boolean>): Promise<Outpu
       maintenance?'https://schemas.dharma-ai.io/local-signing-maintenance-upgrade/v1'
         :'https://schemas.dharma-ai.io/local-relay-upgrade/v1', receipt);
     if (!validation.ok) throw new Error('relay_upgrade_receipt_invalid');
+    // The launcher now carries these directories; the next setup or upgrade keeps them from this record (K1).
+    // A record that cannot be written leaves nothing kept next time; it never fails a completed upgrade.
+    if (!flags.has('rollback') && (receipt as {state?: unknown}).state === 'completed') {
+      await recordSetUpProviderDirectories({home, workspace, providerDirectory}).catch(() => {});
+    }
     return receipt;
   });
 }
@@ -3744,7 +3811,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
     };
   }
   const {launcher, autostart} = flags.has('no-relay-daemon')
-    ? {launcher: await step(() => installStableRepositoryLauncher(workspace)),
+    ? {launcher: await step(() => installStableRepositoryLauncher(workspace, [provider])),
       autostart: {state: 'disabled' as const, backend: null}}
     : await step(() => withOnboardingStage('autostart', String(onboarded.workspaceId || ''),
       `dharma bootstrap --resume --complete --portal-url ${hqUrl} --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`
@@ -3754,7 +3821,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         await assertBootstrapStartupAnchor(organizationId, config.deviceId, step);
         // Keep previous launcher bytes intact until startup ownership and version
         // admit this operation; the supported upgrade relies on those exact bytes.
-        const launcher = await step(() => installStableRepositoryLauncher(workspace));
+        const launcher = await step(() => installStableRepositoryLauncher(workspace, [provider]));
         const autostart = await step(() => enableRelayAutostart({ home, workspace, policy: resolve(workspace, '.dharma', 'approved-policy.json'),
           launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell),
           version: VERSION, preserveStandardAnchor: true,
@@ -3802,6 +3869,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
   if (!sharedRepositoryReady && relay.state === 'running') {
     const workspaceId = String(onboarded.workspaceId || '');
     const resumeCommand = `dharma onboard --resume --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision} --provider ${provider}`;
+    const waitStartedAt = Date.now();
     repositoryReadiness = await step(() => withOnboardingStage('readiness', workspaceId, resumeCommand,
       () => waitForRepositoryReadiness(async () => {
         const current = (await step(() => registry())).find(item => item.workspaceId === workspaceId
@@ -3809,14 +3877,18 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
         if (!current) throw new Error('Enrolled repository workspace disappeared during publication.');
         return {
           state: current.repositoryPackage?.state || 'absent',
-          ready: await repositorySharedReady(current),
+          ready: await setupProviderSharedReady(current, provider),
           candidateId: current.repositoryPackage?.candidateId || null,
         };
       }, { onProgress: progress => {
         if (progress.attempts % 6 !== 1) return;
         process.stderr.write(`Waiting for the shared repository package to install on this device (package ${progress.state}, `
           + `${Math.round(progress.elapsedMs / 1000)} s of ${Math.round(progress.maximumWaitMs / 1000)} s).\n`);
-      } })));
+      }, explainPending: async () => repositoryReadinessPendingCode(
+        await readRelaySkillActivationState(dharmaHome(), workspaceId), provider, waitStartedAt) })));
+    if (repositoryReadiness.code) {
+      process.stderr.write(`The shared repository package did not install on this device: ${repositoryReadiness.code}.\n`);
+    }
     sharedRepositoryReady = repositoryReadiness.outcome === 'ready';
   }
   const apiFlags = new Map<string, string | boolean>([
@@ -3889,6 +3961,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       : !roleReady ? 'role_registration_pending'
       : !relayReady ? 'synchronization_pending'
       : !startupReady ? 'autostart_pending' : 'complete',
+    ...(!sharedRepositoryReady && repositoryReadiness?.code ? { code: repositoryReadiness.code } : {}),
     repositorySelection,
     localStage: 'complete',
     sharedRepositoryReady,
@@ -3901,7 +3974,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       recipientApproval,
       rebind,
     },
-    repository: onboarded,
+    repository: repositoryAfterReadiness(onboarded, repositoryReadiness),
     launcher,
     autostart: observedAutostart,
     provider,
@@ -4159,13 +4232,7 @@ async function openVerificationUri(url: string) {
           ['rundll32.exe', ['url.dll,FileProtocolHandler', url]],
           ['xdg-open', [url]],
         ];
-  for (const [command, argv] of attempts) {
-    try {
-      await execFileAsync(command, argv, { timeout: 10_000 });
-      return true;
-    } catch {}
-  }
-  return false;
+  return openWithFirstAvailableOpener(attempts);
 }
 
 export type ControlAgentCliClient = Pick<AgentFabricClient,
@@ -5037,6 +5104,41 @@ function selectedProviderAdapters(providerIds: ProviderId[] | null) {
     : providerAdapters;
 }
 
+async function providersHoldingInstalledBundle(workspace: WorkspaceRecord): Promise<ProviderId[]> {
+  const installed: ProviderId[] = [];
+  for (const provider of LOCAL_PROVIDER_IDS) {
+    // An unreadable native tree counts as holding a bundle, so its provider stays on the launcher PATH.
+    const holdsBundle = await nativeSkillDirectoryForWorkspace({ provider, workspaceId: workspace.workspaceId, workspace: workspace.path })
+      .then(root => pathExists(resolve(root, '.dharma-managed', 'workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE')), () => true);
+    if (holdsBundle) installed.push(provider);
+  }
+  return installed;
+}
+
+/** The bundle a provider has active for the workspace and when it became active, for status only. */
+async function activeSkillBundle(workspace: WorkspaceRecord, provider: ProviderId): Promise<{ bundleId: string; at: string } | null> {
+  try {
+    const root = await nativeSkillDirectoryForWorkspace({ provider, workspaceId: workspace.workspaceId, workspace: workspace.path });
+    const pointer = resolve(root, '.dharma-managed', 'workspaces', workspace.workspaceId, 'ACTIVE_BUNDLE');
+    const [bundleId, metadata] = await Promise.all([readFile(pointer, 'utf8'), stat(pointer)]);
+    return { bundleId: bundleId.trim(), at: metadata.mtime.toISOString() };
+  } catch {
+    return null;
+  }
+}
+
+/** The providers holding an installed bundle whose executable passes setup's protection check. */
+async function protectedBundleHolders(workspace: WorkspaceRecord): Promise<ProviderId[]> {
+  const holders: ProviderId[] = [];
+  for (const provider of await providersHoldingInstalledBundle(workspace)) {
+    // The first one on the relay PATH can belong to another user; such a holder is not put on the launcher PATH.
+    const protectedExecutable = await resolveRepositoryProviderDirectory({provider,
+      searchPath: providerProcessEnvironment(process.env).PATH}).then(() => true, () => false);
+    if (protectedExecutable) holders.push(provider);
+  }
+  return holders;
+}
+
 export async function receiptAwareProviderCapabilities(
   providers: ProviderCapability[],
   now = new Date(),
@@ -5126,6 +5228,25 @@ export async function repositorySharedReady(
 ) {
   try { return Boolean(await loadInstalled(item)); }
   catch { return false; }
+}
+
+/** Setup is ready only when the provider it set up holds the release, not when any provider on this device does. */
+export function setupProviderSharedReady(
+  item: WorkspaceRecord,
+  provider: ProviderId,
+  loadInstalled: (workspace: WorkspaceRecord, provider: ProviderId) => Promise<unknown> = installedRepositoryKnowledge,
+) {
+  return repositorySharedReady(item, workspace => loadInstalled(workspace, provider));
+}
+
+/** The onboard result with the readiness wait's outcome, so the inner block agrees with the top level. */
+export function repositoryAfterReadiness<T extends Record<string, unknown>>(onboarded: T,
+  readiness: Pick<RepositoryReadinessResult, 'outcome'> | null): T {
+  if (readiness?.outcome === 'blocked') return { ...onboarded, stage: 'shared_repository_blocked' };
+  if (readiness?.outcome !== 'ready') return onboarded;
+  const shared = onboarded.sharedRepository as Record<string, unknown> | undefined;
+  return { ...onboarded, stage: 'ready', sharedRepositoryReady: true,
+    sharedRepository: { ...shared, authority: 'signed_repository_release', activation: true } };
 }
 
 export function canonicalRepositoryPackage(value: unknown): NonNullable<WorkspaceRecord['repositoryPackage']> {
@@ -5859,7 +5980,7 @@ async function syncWorkspacePolicy(
 // of a policy sync. A slow CLI must not stall every signed request on this device.
 async function providerCapabilitiesForWorkspacePolicy(providerIds: ProviderId[] | null) {
   return receiptAwareProviderCapabilities(
-    await Promise.all(selectedProviderAdapters(providerIds).map((adapter) => adapter.capability())),
+    await Promise.all(selectedProviderAdapters(providerIds).map(async (adapter) => (await relayProviderCapability(adapter)).capability)),
   );
 }
 
@@ -6047,7 +6168,8 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
     workspace, workspaceId: item.workspaceId, organizationId: config.organizationId, hqUrl: config.hqUrl });
   const relay = flags.has('no-relay-daemon') ? { started: false, state: 'not_started' }
     : await startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json'));
-  const sharedRepositoryReady = await repositorySharedReady(item);
+  // As onboard's, join readiness counts only a release installed for the provider it set up.
+  const sharedRepositoryReady = await setupProviderSharedReady(item, provider);
   return { ok: true, stage: sharedRepositoryReady ? 'ready' : 'shared_repository_pending',
     localStage: 'ready', sharedRepositoryReady, organizationId: config.organizationId,
     workspaceId: item.workspaceId, deviceId: config.deviceId, accessMode: 'knowledge_only',
@@ -6881,7 +7003,8 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const relay = flags.has('no-relay-daemon')
     ? { started: false, state: 'not_started' }
     : await staged('relay_start', async () => startRelayDaemon(resolve(workspace, '.dharma', 'approved-policy.json')));
-  const sharedRepositoryReady = await staged('readiness', async () => repositorySharedReady(registered));
+  const sharedRepositoryReady = await staged('readiness', async () => providerIds?.length === 1
+    ? setupProviderSharedReady(registered, providerIds[0]!) : repositorySharedReady(registered));
   return {
     ok: true,
     stage: sharedRepositoryReady ? 'ready' : 'shared_repository_pending',
@@ -7550,6 +7673,10 @@ async function executeOneTask(
     fabric,
   );
   assertTaskWorkspacePolicy({ task, workspace, policy: taskPolicy });
+  if (await relayProviderUnsafePath(task.target.provider)) {
+    await fabric.postTaskEvent(task.taskId, 'failed', { phase: 'preflight', code: PROVIDER_UNSAFE_PATH });
+    return { ok: false, taskId: task.taskId, code: PROVIDER_UNSAFE_PATH };
+  }
   const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
   const waitingHeartbeats: Promise<unknown>[] = [];
   const waitingHeartbeat = setInterval(() => {
@@ -8721,10 +8848,15 @@ async function activatePreparedSkillUpdate(input: {
   provider: ProviderId;
   policyPath: string;
   flags: Map<string, string | boolean>;
-}): Promise<Output> {
+}): Promise<{ ok: true; rolloutId: string; bundleId: string; status: string; changed: true }> {
   const { prepared, workspaceId, provider, policyPath, flags } = input;
   const { workspace, policy, config, destination, fabric, rollout, bundle, sourceRoot, repositoryDelivery } = prepared;
   try {
+    const organizationApprovalId = typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined;
+    if ((bundle.riskClass === 'R3' || bundle.riskClass === 'R4') && !organizationApprovalId) {
+      throw new SkillActivationError('approval_required',
+        `${bundle.riskClass} skill bundles require organization approval; run dharma skills sync with --approval-id.`);
+    }
     const previousAnchor = await loadActiveSkillAuthorizationAnchor({
       config,
       workspaceId,
@@ -8754,7 +8886,7 @@ async function activatePreparedSkillUpdate(input: {
       workspaceId,
       provider,
       smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
-      organizationApprovalId: typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined,
+      organizationApprovalId,
       ...(provider === 'agy' ? {
         providerActivationCheck: () => attestAgySkillBundleActivation({
           bundle,
@@ -8959,8 +9091,10 @@ async function currentSessionOpenFailure() {
       failure = current;
     }
   }
-  return failure && Date.parse(String(failure.at)) > latestSuccess ? { code: failure.failureCode ?? 'repository_relay_failed',
-    at: failure.at, stage: failure.stage, category: failure.category } : null;
+  if (!failure || !(Date.parse(String(failure.at)) > latestSuccess)) return null;
+  const remedy = await relayOpenFailureRemedyForHost(failure.failureCode);
+  return { code: failure.failureCode ?? 'repository_relay_failed',
+    at: failure.at, stage: failure.stage, category: failure.category, ...(remedy ? { remedy } : {}) };
 }
 
 async function relayStart(flags: Map<string, string | boolean>,
@@ -9146,12 +9280,15 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let skillActivationsCompleted = 0;
   let skillActivationFailures = 0;
   const skillActivationFailuresByProvider: Partial<Record<ProviderId, number>> = {};
+  // Seed from the record setup and `dharma status` read, so a relay restart does not erase the last reason.
+  const skillActivationResults: Partial<Record<ProviderId, SkillActivationResult>> = {
+    ...(await readRelaySkillActivationState(dharmaHome(), canonicalWorkspace.workspaceId))?.providers };
   let nextSkillActivationAt = 0;
   const skillPreparationPump = startSkillPreparationPump({
     prepare: async assertRunning => {
       await prepareProvidersIndependently(providerAdapters, assertRunning, async adapter => {
         assertRunning();
-        const capability = await adapter.capability();
+        const capability = (await relayProviderCapability(adapter)).capability;
         assertRunning();
         if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) return;
         const provider = adapter.providerId;
@@ -9363,8 +9500,19 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
       if (typeof result.failureCategory === 'string') lastProviderFailureCategory = result.failureCategory;
       if (!stopping && !result.taskId && performance.now() >= nextSkillActivationAt) {
         for (const adapter of providerAdapters) {
+          let activating: NonNullable<Awaited<ReturnType<typeof prepareSkillUpdate>>> | null = null;
+          const record = (result: Omit<SkillActivationResult, 'at' | 'rolloutId' | 'bundleId'>,
+            installed?: Awaited<ReturnType<typeof activeSkillBundle>>) => {
+            if (!isLocalProviderId(adapter.providerId)) return;
+            skillActivationResults[adapter.providerId] = nextSkillActivationResult(skillActivationResults[adapter.providerId],
+              { at: new Date().toISOString(), rolloutId: activating?.rollout.id ?? null,
+                bundleId: activating?.bundle.bundleId ?? null, ...result }, installed);
+          };
           try {
-            const capability = await adapter.capability();
+            // Setup refuses a provider whose first executable on PATH is unsafe; the relay never runs it either.
+            const probed = await relayProviderCapability(adapter);
+            if (probed.unsafePath) { record({ outcome: 'failed', errorCode: PROVIDER_UNSAFE_PATH }); continue; }
+            const capability = probed.capability;
             if (capability.skillInstall === 'unavailable' || !isLocalProviderId(adapter.providerId)) continue;
             const provider = adapter.providerId;
             await withWorkspaceSkillActivationLock(canonicalWorkspace.workspaceId, provider, async () => {
@@ -9376,16 +9524,32 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                   provider, policyPath, fabric, automatic: true });
                 if (!prepared) return;
                 if (!cached) skillPreparationsCompleted += 1;
-                await activatePreparedSkillUpdate({ prepared, workspaceId: canonicalWorkspace.workspaceId,
+                activating = prepared;
+                const activated = await activatePreparedSkillUpdate({ prepared, workspaceId: canonicalWorkspace.workspaceId,
                   provider, policyPath, flags: new Map() });
+                requireActiveSkillInstall(activated.status);
                 skillActivationsCompleted += 1;
               });
             });
-          } catch {
+            // An empty poll after a failure clears it only once the provider's active bundle shows a current install.
+            const installed = !activating && skillActivationResults[provider]?.outcome === 'failed'
+              ? await activeSkillBundle(canonicalWorkspace, provider) : null;
+            record({ outcome: activating ? 'activated' : 'no_rollout', errorCode: null }, installed);
+          } catch (error) {
             skillActivationFailures += 1;
             skillActivationFailuresByProvider[adapter.providerId] = (skillActivationFailuresByProvider[adapter.providerId] || 0) + 1;
+            const stage: SkillActivationStage = activating ? 'activation' : 'preparation';
+            record({ outcome: 'failed', errorCode: skillActivationErrorCode(error, stage) });
           }
         }
+        // Setup's readiness wait and `dharma status` read this; a write failure must not stop the relay.
+        await writeJsonAtomic(relaySkillActivationPath(dharmaHome(), canonicalWorkspace.workspaceId), {
+          schema: 'dharma.relay-skill-activation/v1', workspaceId: canonicalWorkspace.workspaceId,
+          updatedAt: new Date().toISOString(),
+          counters: { preparationsCompleted: skillPreparationsCompleted, preparationFailures: skillPreparationFailures,
+            activationsCompleted: skillActivationsCompleted, activationFailures: skillActivationFailures },
+          providers: skillActivationResults,
+        }).catch(() => {});
         nextSkillActivationAt = performance.now() + 60_000;
       }
       if (canonicalWorkspace.accessMode !== 'knowledge_only' && !stopping && !sourceScanFlight
@@ -9598,7 +9762,7 @@ export async function run(argv: string[]): Promise<Output> {
           verifyDemoDevice(scope, await createDemoDeviceTransport(scope))); },
         exclusive: operation => withRelayStartupMutation(operation),
         prepareStartup: async () => {
-          const launcher = await installStableRepositoryLauncher(workspace);
+          const launcher = await installStableRepositoryLauncher(workspace, [provider]);
           await enableRelayAutostart({ home: dharmaHome(), workspace, policy: null, version: VERSION,
             launcher: resolve(workspace, process.platform === 'win32' ? launcher.windows : launcher.shell) });
         },
@@ -9798,10 +9962,20 @@ export async function run(argv: string[]): Promise<Output> {
                 organizationId: config.organizationId, deviceId: config.deviceId,
                 workspaceId: row.workspaceId, pid: relayPid, relayPidMtimeMs: relayPidState?.relayPidMtimeMs ?? null,
                 relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt: lastSuccess });
+              const skillActivation = await readRelaySkillActivationState(dharmaHome(), row.workspaceId);
+              // The record keeps only codes; name the PATH entry the relay refuses, and the fix, from this host.
+              const providerPathRemedies: Record<string, { path: string; remedy: string }> = {};
+              for (const [provider, result] of Object.entries(skillActivation?.providers ?? {})) {
+                if (isLocalProviderId(provider) && result?.errorCode === PROVIDER_UNSAFE_PATH) {
+                  const remedy = await relayProviderUnsafePathRemedy(provider);
+                  if (remedy) providerPathRemedies[provider] = remedy;
+                }
+              }
               observations.push({ workspaceId: row.workspaceId,
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
-                lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}) });
+                lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}),
+                skillActivation, ...(Object.keys(providerPathRemedies).length ? { providerPathRemedies } : {}) });
             }
             status.repositoryRelays = { state: 'observed', repositories: observations };
           }
