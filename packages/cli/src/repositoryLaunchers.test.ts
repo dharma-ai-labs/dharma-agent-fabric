@@ -833,3 +833,38 @@ test('the real directory of a symlinked entry keeps the place on PATH of the ent
       'a kept directory no PATH entry reaches follows');
   } finally {await rm(root, {recursive: true, force: true});}
 });
+
+// CLI 0.2.224 review F1 (2x8=16): the provider executable's own link chain was resolved with plain realpath and only
+// the final directory was checked, so a link on the way to the executable that sat in a directory another user can
+// write (bin/claude -> shared/claude -> real/claude, shared 0777) passed, and could be repointed after the check while
+// the relay runs the provider by name through PATH. codex's sibling node had the same gap. The executable, and codex's
+// node, are now resolved with the same component walk as the PATH entry, by both relay and setup.
+test('relay and setup refuse a provider executable whose link chain passes a directory others can write', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-link-chain-')));
+  const shared = join(root, 'shared');
+  try {
+    const bin = join(root, 'bin'), real = join(root, 'real');
+    for (const directory of [bin, real, shared]) await mkdir(directory, {mode: 0o700});
+    for (const provider of ['claude', 'codex']) {
+      await writeFile(join(real, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+      await symlink(join(real, provider), join(shared, provider));
+      await symlink(join('..', 'shared', provider), join(bin, provider));
+    }
+    await copyFile(process.execPath, join(real, 'node')); await chmod(join(real, 'node'), 0o700);
+    await symlink(join(real, 'node'), join(shared, 'node'));
+    const codexBin = join(root, 'codex-bin'); await mkdir(codexBin, {mode: 0o700});
+    await writeFile(join(codexBin, 'codex'), '#!/bin/sh\nprintf "own-codex"\n', {mode: 0o700});
+    await symlink(join('..', 'shared', 'node'), join(codexBin, 'node'));
+    // Every link and directory on the way is this user's and closed to others: all pass.
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), false);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}), bin);
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: codexBin}), codexBin);
+    await chmod(shared, 0o777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin}), true, 'relay: link in a 0777 directory');
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: bin}),
+      /^Error: relay_startup_claude_path_invalid/, 'setup: claude link in a 0777 directory');
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'codex', searchPath: codexBin}),
+      /^Error: relay_startup_codex_path_invalid/, "setup: codex's node link in a 0777 directory");
+  } finally {await chmod(shared, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
