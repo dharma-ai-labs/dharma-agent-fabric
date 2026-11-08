@@ -229,6 +229,10 @@ async function ownPrivateGroups(accounts: AccountFiles = {}): Promise<PrivateGro
   return found;
 }
 
+// A path that ends at a name missing from a directory no other user can write: no one else can create it, so it stays
+// missing as execvp sees it (CLI 0.2.224 review N1b).
+class AbsentEntry extends Error {}
+
 // Names the entry a provider check refused, so `dharma status` can say which one and how to fix it.
 class UnsafeProviderEntry extends Error {
   constructor(readonly path: string, readonly writable: boolean, readonly group?: number) {
@@ -276,7 +280,9 @@ async function protectParents(path: string, privateGroups: PrivateGroups) {
 // (a root-owned sticky directory above the end excepted), so no other user can repoint the path after the check. A
 // link's own mode is not checked: Linux ignores it. Protected links, such as a linked bin directory or fnm's per-shell
 // directory in the user's own state directory, pass; a link in a directory others can write does not (CLI 0.2.224 R2b).
-// With `file`, the path may end in a regular file, such as a provider executable, whose own checks follow (F1).
+// With `file`, the path may end in a regular file, such as a provider executable, whose own checks follow (F1). A name
+// missing on the way throws AbsentEntry when its directory is closed to others, with no sticky exemption, and names
+// that directory as unsafe when it is not (N1b).
 async function protectedPathResolution(path: string, privateGroups: PrivateGroups, file = false) {
   providerDirectoryPath(path);
   const pending = path.split('/').filter(Boolean);
@@ -292,7 +298,12 @@ async function protectedPathResolution(path: string, privateGroups: PrivateGroup
     if (name === '.') continue;
     if (name === '..') {resolved = posix.dirname(resolved); continue;}
     const next = posix.join(resolved, name);
-    const stat = await lstat(next);
+    let stat;
+    try {stat = await lstat(next);} catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      protectedEntry(resolved, await lstat(resolved), privateGroups);
+      throw new AbsentEntry();
+    }
     if (stat.isSymbolicLink()) {
       protectedEntry(next, stat, privateGroups, true);
       if (++links > 40) throw Error();
@@ -332,16 +343,26 @@ async function protectedExecutableFile(executable: string, privateGroups: Privat
 
 // The node beside a provider is the env-node a node-script provider, and npm's CLI child, run with: the launcher and
 // the relay put the provider directory before the recorded Node directory on PATH. When there is one, its own link
-// chain and file are checked as the provider executable's are, for every provider (CLI 0.2.224 review N1).
-async function protectedSiblingNode(directory: string, privateGroups: PrivateGroups) {
+// chain and file are checked as the provider executable's are, for every provider (CLI 0.2.224 review N1). Beside a
+// provider other than codex, a node that execvp skips, a link to a name missing from directories closed to others or
+// a protected file without an exec bit, counts as absent, as before 0.2.224; codex keeps the 0.2.223 rule and refuses
+// it (N1b).
+async function protectedSiblingNode(directory: string, provider: ProviderCommand, privateGroups: PrivateGroups) {
   try {await lstat(join(directory, 'node'));} catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;
   }
-  const selected = await protectedPathResolution(join(directory, 'node'), privateGroups, true);
+  let selected: string;
+  try {selected = await protectedPathResolution(join(directory, 'node'), privateGroups, true);} catch (error) {
+    if (provider !== 'codex' && error instanceof AbsentEntry) return undefined;
+    throw error;
+  }
   await protectParents(dirname(selected), privateGroups);
   await protectedExecutableFile(selected, privateGroups);
-  if (!((await lstat(selected)).mode & 0o111)) throw Error();
+  if (!((await lstat(selected)).mode & 0o111)) {
+    if (provider !== 'codex') return undefined;
+    throw Error();
+  }
   return selected;
 }
 
@@ -352,7 +373,7 @@ async function protectedProviderDirectory(path: string, provider: ProviderComman
   // A native Claude binary can exceed the hashing bound; its ownership and mode are what protect it.
   else await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
-  const selectedNode = await protectedSiblingNode(directory, privateGroups);
+  const selectedNode = await protectedSiblingNode(directory, provider, privateGroups);
   // Only codex is held to the launcher's own Node, as in 0.2.223: npm's CLI child uses env-node, and provider priority
   // must not replace its runtime. Another provider's protected node is the user's runtime, such as fnm's Node beside
   // claude (CLI 0.2.224 review R2).
@@ -423,7 +444,7 @@ async function relayProviderExecutable(directory: string, provider: ProviderComm
   const {directory: real, executable} = await protectedProviderExecutable(directory, provider, privateGroups);
   await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
-  await protectedSiblingNode(real, privateGroups);
+  await protectedSiblingNode(real, provider, privateGroups);
 }
 
 /**
