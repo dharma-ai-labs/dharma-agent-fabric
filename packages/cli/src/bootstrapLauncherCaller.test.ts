@@ -33,8 +33,10 @@ async function caller(overrides: Record<string, unknown> = {}) {
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const nodes = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'installStableRepositoryLauncher');
   assert.equal(nodes.length, 1);
-  // The bundle-holder helper it may call runs as written; its filesystem readers stay fixtures.
-  const helpers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'protectedBundleHolders')
+  // The bundle-holder helper and the reader of the launcher being replaced run as written; their filesystem
+  // readers and protection checks stay fixtures.
+  const helpers = ast.statements.filter(node => ts.isFunctionDeclaration(node)
+    && ['protectedBundleHolders', 'currentLauncherProviders'].includes(node.name?.text ?? ''))
     .map(node => node.getText(ast).replace(/^export\s+/, ''));
   const output = ts.transpileModule([nodes[0]!.getText(ast), ...helpers].join('\n'), {compilerOptions: {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None}, reportDiagnostics: true});
@@ -43,6 +45,7 @@ async function caller(overrides: Record<string, unknown> = {}) {
     currentBootstrapHostScope, writeBootstrapHostText, stableRepositoryLauncherContents,
     readDeviceConfig: async () => null, registry: async () => [], selectDeviceWorkspace,
     providersHoldingInstalledBundle: async () => [],
+    protectedLauncherProviderDirectories: async () => [],
     providerDirectoriesInPathOrder: (launcherModule as Record<string, unknown>).providerDirectoriesInPathOrder,
     resolveRepositoryNpmCli: async () => npmCliPath,
     providerProcessEnvironment: () => ({PATH: '/synthetic/codex/bin:/synthetic/fallback/bin'}),
@@ -204,5 +207,30 @@ test('actual launcher installer leaves out a bundle holder whose executable fail
   const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
     nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
     ...(linux ? {providerDirectory: '/synthetic/claude/bin'} : {})});
+  assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell);
+});
+
+// CLI 0.2.224 review R1: codex set up first, with its shared package still pending (no ACTIVE_BUNDLE, so it holds no
+// bundle), then Claude Code set up in the same checkout. The launcher dropped codex's bin directory and the relay never
+// reached codex again. The installer keeps each protected provider directory the launcher being replaced carries.
+test('actual launcher installer keeps the provider directories of the launcher it replaces', async t => {
+  const linux = process.platform === 'linux', f = await fixture(t), seen: unknown[] = [];
+  const first = await caller();
+  await runCodexBootstrapHost(f.input, () => first(f.root, ['codex']));
+  const prior = {shell: await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), windows: await fs.readFile(resolve(f.bin, 'dharma.cmd'), 'utf8')};
+  const second = await caller({
+    providerProcessEnvironment: () => ({PATH: '/synthetic/codex/bin:/synthetic/claude/bin'}),
+    resolveRepositoryProviderDirectory: async (input: {provider: string}) => {
+      assert.equal(input.provider, 'claude', 'a kept directory is not resolved again'); return linux ? '/synthetic/claude/bin' : undefined;
+    },
+    protectedLauncherProviderDirectories: async (launchers: unknown) => {
+      seen.push(launchers); return linux ? [{provider: 'codex', directory: '/synthetic/codex/bin'}] : [];
+    },
+  });
+  await runCodexBootstrapHost(f.input, () => second(f.root, ['claude']));
+  assert.deepEqual(JSON.parse(JSON.stringify(seen)), [prior], 'the installer reads the launcher it replaces');
+  const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
+    nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
+    ...(linux ? {providerDirectory: ['/synthetic/codex/bin', '/synthetic/claude/bin']} : {})});
   assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell);
 });
