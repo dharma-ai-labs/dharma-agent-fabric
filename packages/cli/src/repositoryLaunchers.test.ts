@@ -577,6 +577,33 @@ test('the unsafe-path diagnosis names the failing entry and the command that fix
   });
 });
 
+// CLI 0.2.224 review S1 (1x6=6): the provider on each PATH entry was probed at path.join(entry, provider), which
+// drops a '..' part as text, while execvp hands '<entry>/claude' to the kernel, which follows links first. An entry
+// '/home/u/link/../bin' with link pointing elsewhere was skipped, so the relay and setup passed the next, protected
+// claude while the shell ran a claude from a directory others can write. The entry is now probed as execvp does, so a
+// '..' entry that holds the provider is checked, and refused as a relative entry.
+test('relay and setup refuse a provider found through a .. PATH entry that crosses a link', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-dotdot-entry-')));
+  const open = join(root, 'other', 'bin');
+  try {
+    await mkdir(join(root, 'a'), {mode: 0o700});
+    await mkdir(join(root, 'other', 'deep'), {recursive: true, mode: 0o700});
+    await mkdir(open, {mode: 0o700});
+    await symlink(join(root, 'other', 'deep'), join(root, 'a', 'link'));
+    await writeFile(join(open, 'claude'), '#!/bin/sh\nprintf "other-claude"\n', {mode: 0o755});
+    await chmod(open, 0o777);
+    const safe = join(root, 'safe'); await mkdir(safe, {mode: 0o700});
+    await writeFile(join(safe, 'claude'), '#!/bin/sh\nprintf "own-claude"\n', {mode: 0o700});
+    // The kernel resolves a/link/.. to other, so the shell runs other/bin/claude, not the protected one in safe.
+    const entry = `${root}/a/link/../bin`, searchPath = `${entry}:${safe}`;
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath}), true, 'relay: claude through a .. entry');
+    await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath}),
+      /^Error: relay_startup_claude_path_invalid/, 'setup: claude through a .. entry');
+    assert.equal((await launchers.providerUnsafePathDiagnosis('claude', {searchPath}))?.path, entry, 'status names the .. entry');
+  } finally {await chmod(open, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
+});
+
 // CLI 0.2.224 review R1: setup and relay upgrade rewrote the launcher with only the bundle holders and the provider
 // set up, so a first agent whose shared package was still pending (no ACTIVE_BUNDLE) dropped off the relay PATH.
 // 0.2.223 always carried codex. The directories the launcher being replaced carries are kept while they still pass.
