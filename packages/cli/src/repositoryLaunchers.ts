@@ -18,11 +18,15 @@ const unsafeProviderOnPath = (provider: ProviderCommand) => `relay_startup_${pro
   + `belongs to another user or is not protected. Put your own ${provider} first on PATH, or remove the other one from PATH.`
   + ` If you set up another provider, pass --provider <${PROVIDER_COMMANDS.join('|')}>.`;
 
-/** The resolved provider bin directories, once each, in the order of the PATH they were resolved from. */
+/**
+ * The resolved provider bin directories, once each, in the order of the PATH they were resolved from. One not on that
+ * PATH (a symlinked entry's real directory, or one kept from the launcher being replaced) follows, in the given order.
+ */
 export function providerDirectoriesInPathOrder(directories: readonly (string | undefined)[], searchPath: string | undefined): string[] {
   const order = (searchPath ?? '').split(':');
+  const rank = (directory: string) => order.includes(directory) ? order.indexOf(directory) : order.length;
   return [...new Set(directories.filter((directory): directory is string => directory !== undefined))]
-    .sort((left, right) => order.indexOf(left) - order.indexOf(right));
+    .sort((left, right) => rank(left) - rank(right));
 }
 
 function providerDirectoryPath(value: string) {
@@ -243,14 +247,17 @@ async function protectParents(path: string, privateGroups: PrivateGroups) {
 }
 
 // The provider bin directory and the executable it resolves to are owned by this user or root, and neither they
-// nor their parents can be written by anyone else; the user's own private group is not anyone else.
+// nor their parents can be written by anyone else; the user's own private group is not anyone else. A codex PATH
+// entry must be its own real path, as in 0.2.223. Another provider's entry may be a symlink, as fnm's per-shell bin
+// directory is: its real directory is checked and is the one the launcher records (CLI 0.2.224 review R2).
 async function protectedProviderExecutable(directory: string, provider: ProviderCommand, privateGroups: PrivateGroups) {
   providerDirectoryPath(directory);
-  if (await realpath(directory) !== directory) throw Error();
-  await protectParents(directory, privateGroups);
-  const executable = await realpath(join(directory, provider));
+  const real = await realpath(directory);
+  if (real !== directory && (provider === 'codex' || providerDirectoryPath(real) !== real)) throw Error();
+  await protectParents(real, privateGroups);
+  const executable = await realpath(join(real, provider));
   await protectParents(dirname(executable), privateGroups);
-  return executable;
+  return {directory: real, executable};
 }
 
 async function protectedExecutableFile(executable: string, privateGroups: PrivateGroups) {
@@ -259,13 +266,16 @@ async function protectedExecutableFile(executable: string, privateGroups: Privat
   protectedEntry(executable, stat, privateGroups);
 }
 
-async function protectedProviderDirectory(directory: string, provider: ProviderCommand, nodePath: string,
+async function protectedProviderDirectory(path: string, provider: ProviderCommand, nodePath: string,
   privateGroups: PrivateGroups) {
-  const executable = await protectedProviderExecutable(directory, provider, privateGroups);
+  const {directory, executable} = await protectedProviderExecutable(path, provider, privateGroups);
   if (provider === 'codex') await protectedBinaryHash(executable, 'linux');
   // A native Claude binary can exceed the hashing bound; its ownership and mode are what protect it.
   else await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
+  // Only codex is held to the Node rule below, as in 0.2.223; another provider's own protected directory is the
+  // user's runtime, such as fnm's Node beside claude (CLI 0.2.224 review R2).
+  if (provider !== 'codex') return directory;
   let hasNode = true;
   try {await lstat(join(directory, 'node'));} catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -328,7 +338,7 @@ export async function providerFirstOnPathUnsafe(provider: ProviderCommand,
 }
 
 async function relayProviderExecutable(directory: string, provider: ProviderCommand, privateGroups: PrivateGroups) {
-  const executable = await protectedProviderExecutable(directory, provider, privateGroups);
+  const {executable} = await protectedProviderExecutable(directory, provider, privateGroups);
   await protectedExecutableFile(executable, privateGroups);
   if (!((await lstat(executable)).mode & 0o111)) throw Error();
 }
@@ -365,14 +375,33 @@ export async function providerUnsafePathDiagnosis(provider: ProviderCommand,
   return null;
 }
 
-// A recorded launcher names only the directories. Verify each for one of the set-up providers; when none is known,
-// accept a directory once any provider command in it passes.
+// A recorded launcher names only the directories, each written as its real path. Verify each for one of the set-up
+// providers; when none is known, accept a directory once any provider command in it passes. Returns that command.
 async function protectedRecordedProviderDirectory(directory: string, providers: ProviderCommand | readonly ProviderCommand[] | undefined,
-  nodePath: string, privateGroups: PrivateGroups) {
+  nodePath: string, privateGroups: PrivateGroups): Promise<ProviderCommand> {
   for (const command of providers === undefined ? PROVIDER_COMMANDS : typeof providers === 'string' ? [providers] : providers) {
-    try {return await protectedProviderDirectory(directory, command, nodePath, privateGroups);} catch {}
+    try {if (await protectedProviderDirectory(directory, command, nodePath, privateGroups) === directory) return command;} catch {}
   }
   throw Error();
+}
+
+/**
+ * The provider bin directories the launcher being replaced carries, written by any agent-fabric version, that still
+ * pass setup's check today, each with the provider command it passes for. Setup and relay upgrade keep them, so an
+ * agent whose shared package is still pending stays on the relay PATH (CLI 0.2.224 review R1). Linux only.
+ */
+export async function protectedLauncherProviderDirectories(launchers: Launchers | null,
+  platform: NodeJS.Platform = process.platform): Promise<{provider: ProviderCommand; directory: string}[]> {
+  if (platform !== 'linux' || typeof launchers?.shell !== 'string') return [];
+  const version = launchers.shell.match(/ -- @dharma-ai-labs\/agent-fabric@([^\s"]+) "\$@"\n$/)?.[1];
+  const recorded = version && VERSION.test(version) ? recordedRuntime(version, launchers, platform) : undefined;
+  const kept: {provider: ProviderCommand; directory: string}[] = [];
+  const privateGroups = await ownPrivateGroups();
+  for (const directory of [recorded?.providerDirectory ?? []].flat()) {
+    try {kept.push({provider: await protectedRecordedProviderDirectory(directory, undefined, process.execPath, privateGroups), directory});}
+    catch {}
+  }
+  return kept;
 }
 
 async function protectedBinaryHash(path: string, platform: NodeJS.Platform) {
