@@ -290,6 +290,14 @@ export async function resolveRepositoryProviderDirectory(options: {provider?: Pr
     directory => protectedProviderDirectory(directory, provider, process.execPath, privateGroups));
 }
 
+// execvp moves past an entry that holds no such provider (ENOENT), that this user cannot search (EACCES) or that is not
+// a directory (ENOTDIR). Every provider but codex skips those entries as execvp does; codex keeps the 0.2.223 rule and
+// skips only a missing one (CLI 0.2.224 review R5-1).
+function skippedPathEntry(provider: ProviderCommand, error: unknown) {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || (provider !== 'codex' && (code === 'EACCES' || code === 'ENOTDIR'));
+}
+
 async function firstProviderOnPath<T>(provider: ProviderCommand, searchPath: string | undefined,
   check: (directory: string) => Promise<T>): Promise<T | undefined> {
   for (const directory of (searchPath ?? process.env.PATH ?? '').split(':')) {
@@ -297,7 +305,7 @@ async function firstProviderOnPath<T>(provider: ProviderCommand, searchPath: str
     // Probed as execvp finds it, at '<entry>/<provider>' resolved by the kernel: path.join drops a '..' part as text,
     // and so missed a provider reached through a link (CLI 0.2.224 review S1).
     try {await lstat(`${directory}/${provider}`);} catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      if (skippedPathEntry(provider, error)) continue;
       throw new Error(unsafeProviderOnPath(provider));
     }
     // Do not skip an unsafe first match and silently select a different executable.
@@ -337,7 +345,7 @@ export async function providerUnsafePathDiagnosis(provider: ProviderCommand,
     if (!directory) continue;
     try {
       try {await lstat(`${directory}/${provider}`);} catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        if (skippedPathEntry(provider, error)) continue;
         throw error;
       }
       await relayProviderExecutable(directory, provider, privateGroups);
