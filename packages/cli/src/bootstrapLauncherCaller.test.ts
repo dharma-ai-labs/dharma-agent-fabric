@@ -234,3 +234,37 @@ test('actual launcher installer keeps the provider directories of the launcher i
     ...(linux ? {providerDirectory: ['/synthetic/codex/bin', '/synthetic/claude/bin']} : {})});
   assert.equal(await fs.readFile(resolve(f.bin, 'dharma'), 'utf8'), expected.shell);
 });
+
+// CLI 0.2.224 review K1 (3x8=24): setup read the provider directories to keep from <workspace>/.dharma/bin/dharma,
+// which anyone who writes to the repository can commit, and put each one that passed the check ahead of the user's
+// PATH. A planted launcher naming <workspace>/tools, with a git-tracked tools/claude, put repository code first on the
+// relay PATH. Setup keeps only directories this device recorded in its own state, never one inside the workspace.
+test('actual launcher installer never keeps a provider directory a committed launcher names', {skip: process.platform !== 'linux'}, async t => {
+  const linux = process.platform === 'linux', f = await fixture(t);
+  const home = await fs.realpath(await fs.mkdtemp(resolve(tmpdir(), 'dharma-launcher-home-')));
+  t.after(() => fs.rm(home, {recursive: true, force: true}));
+  const tools = resolve(f.root, 'tools');
+  await fs.mkdir(tools, {mode: 0o755}); await fs.chmod(tools, 0o755);
+  for (const name of ['claude', 'git']) {
+    await fs.writeFile(resolve(tools, name), '#!/bin/sh\necho PLANTED\n'); await fs.chmod(resolve(tools, name), 0o755);
+  }
+  // As a repository author writes them: a 0.2.223-format launcher naming guessed checkout paths and the real one.
+  const planted = stableRepositoryLauncherContents('0.2.223', {platform: 'linux', nodeDirectory: '/usr/bin',
+    providerDirectory: ['/workspaces/repo/tools', '/home/ubuntu/repo/tools', tools]});
+  await fs.mkdir(f.bin, {recursive: true, mode: 0o755});
+  for (const directory of [resolve(f.root, '.dharma'), f.bin]) await fs.chmod(directory, 0o755);
+  await fs.writeFile(resolve(f.bin, 'dharma'), planted.shell, {mode: 0o755});
+  await fs.writeFile(resolve(f.bin, 'dharma.cmd'), planted.windows, {mode: 0o644});
+  const install = await caller({...launcherModule, dharmaHome: () => home,
+    resolveRepositoryNpmCli: async () => npmCliPath,
+    resolveRepositoryProviderDirectory: async (input: {provider: string}) => {
+      assert.equal(input.provider, 'codex'); return providerDirectory;
+    }});
+  await runCodexBootstrapHost(f.input, () => install(f.root, ['codex']));
+  const shell = await fs.readFile(resolve(f.bin, 'dharma'), 'utf8');
+  assert.ok(!shell.includes(tools), `no workspace directory on the relay PATH: ${shell}`);
+  const expected = stableRepositoryLauncherContents('0.2.153', {platform: process.platform,
+    nodeDirectory: dirname(process.execPath), ...(npmCliPath === undefined ? {} : {npmCliPath}),
+    ...(linux ? {providerDirectory: '/synthetic/codex/bin'} : {})});
+  assert.equal(shell, expected.shell);
+});
