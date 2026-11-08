@@ -328,10 +328,19 @@ export async function resolveRepositoryProviderDirectory(options: {provider?: Pr
     directory => protectedProviderDirectory(directory, provider, process.execPath, privateGroups));
 }
 
+// An absolute PATH entry in its normal form: a trailing '/', a doubled '/' or a '.' part, which the shell resolves the
+// same way, are dropped, so 'dir/', '//dir' and '/./dir' are checked, and recorded, as '/dir' (CLI 0.2.224 review
+// R424-1). A '..' part stays, since the kernel resolves it after links, and the checks refuse it as a relative entry.
+function normalPathEntry(entry: string) {
+  if (!entry.startsWith('/')) return entry;
+  return `/${entry.split('/').filter(part => part && part !== '.').join('/')}`;
+}
+
 async function firstProviderOnPath<T>(provider: ProviderCommand, searchPath: string | undefined,
   check: (directory: string) => Promise<T>): Promise<T | undefined> {
-  for (const directory of (searchPath ?? process.env.PATH ?? '').split(':')) {
-    if (!directory) continue;
+  for (const entry of (searchPath ?? process.env.PATH ?? '').split(':')) {
+    if (!entry) continue;
+    const directory = normalPathEntry(entry);
     try {await lstat(join(directory, provider));} catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw new Error(unsafeProviderOnPath(provider));
@@ -373,8 +382,9 @@ export async function providerUnsafePathDiagnosis(provider: ProviderCommand,
   options: {searchPath?: string; platform?: NodeJS.Platform; accounts?: AccountFiles} = {}): Promise<{path: string; remedy: string} | null> {
   if ((options.platform ?? process.platform) !== 'linux') return null;
   const privateGroups = await ownPrivateGroups(options.accounts);
-  for (const directory of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
-    if (!directory) continue;
+  for (const entry of (options.searchPath ?? process.env.PATH ?? '').split(':')) {
+    if (!entry) continue;
+    const directory = normalPathEntry(entry);
     try {
       try {await lstat(join(directory, provider));} catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
