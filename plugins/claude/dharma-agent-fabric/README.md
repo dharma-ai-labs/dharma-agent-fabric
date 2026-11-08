@@ -2,7 +2,7 @@
 
 **Your agents, learning together.**
 
-Dharma Agent Fabric brings your organization's agents together to share knowledge, learn from real work and collaborate across devices, member accounts and AI providers. This plugin connects your AI agent client (Claude Code, Grok or another MCP-capable client) to your organization's Fabric control plane and adds a role-aware setup skill for onboarding team agents.
+Dharma Agent Fabric brings your organization's agents together to share knowledge, learn from real work and collaborate across devices, member accounts and AI providers. This plugin connects your AI agent client (Claude Code, Grok (preview) or another MCP-capable client) to your organization's Fabric control plane and adds a role-aware setup skill for onboarding team agents.
 
 - Build a shared understanding of your business: the same vocabulary, project context and working methods for every agent, with clear roles and access.
 - Turn experience into better skills: capture lessons from each agent's local work and share signed skill improvements across the organization.
@@ -37,7 +37,7 @@ Manual publication checks require a nonzero immutable `GITHUB_SHA` matching the
 checkout; this validates that selected payload, not its change since a prior release.
 PR and push checks retain their separate base/before content-version comparison.
 
-This source candidate is Claude/Grok `1.0.5`; Codex remains `0.1.0`. A later change
+This source candidate is Claude/Grok `1.0.6`; Codex remains `0.1.0`. A later change
 to shared content requires each affected route's own version increment, not
 synchronized version numbers. A source change does not alter a previously
 reviewed or submitted bundle. Publisher review, strict client validation,
@@ -57,7 +57,7 @@ identifier echo proves those states.
 
 Then run `/mcp`, select `dharma-agent-fabric` and choose **Authenticate**. Sign in with your Dharma account in the browser and select your organization. The server uses standard MCP OAuth (dynamic client registration with PKCE), so no API key or client secret is needed.
 
-### Grok CLI (Grok Build)
+### Grok CLI (Grok Build) (preview, not GA)
 
 ```
 grok plugin marketplace add dharma-ai-labs/dharma-agent-fabric
@@ -66,7 +66,7 @@ grok plugin install dharma-agent-fabric --trust
 
 `--trust` activates the plugin's MCP server and skill; omit it to review the source first. Then run `/mcps` in Grok, select `dharma-agent-fabric` and press `i` to authenticate. Sign in with your Dharma account in the browser and select your organization. `grok mcp doctor` reports `Auth required` until you complete this sign-in.
 
-### Grok Bot and grok.com (custom connector)
+### Grok Bot and grok.com (custom connector) (preview, not GA)
 
 Grok chat surfaces use the remote MCP server directly and carry neither bundled skill (`dharma-agent-fabric-setup` nor `dharma-agent-fabric`) through that connector alone. Do not infer either skill's delivery, activation or use without separately evidenced installation. In Connectors, choose **New Connector** → **Custom**, enter `https://mcp.dharma-ai.io/mcp`, then authenticate with your Dharma account. On Business and Enterprise workspaces an administrator may need to provision the connector first.
 
@@ -101,7 +101,7 @@ Fabric tools take your organization ID (`org_...`) as `organizationId`, and no t
 ## Requirements
 
 - A Dharma AI account with membership in an organization that has Agent Fabric enabled.
-- Claude Code or the Grok CLI with plugin support, or any client that supports remote MCP servers with OAuth (for example Grok Bot or grok.com custom connectors).
+- Claude Code or the Grok CLI (preview) with plugin support, or any client that supports remote MCP servers with OAuth (for example Grok Bot or grok.com custom connectors, also preview).
 
 ## Support and policies
 

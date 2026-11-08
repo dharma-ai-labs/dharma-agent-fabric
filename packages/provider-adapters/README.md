@@ -1,6 +1,6 @@
 # `@dharma-ai-labs/agent-fabric-provider-adapters`
 
-Capability-scoped local adapters for Codex, Claude Code, Agy, and Hermes Agent. Each adapter
+Capability-scoped local adapters for Codex, Claude Code, Agy (preview), and Hermes Agent (preview). Each adapter
 reports evidence discovery, task execution, continuation, Skill installation,
 activation, rollback, and usage support independently. Evidence support never
 implies that another capability is available. Agy 1.1.13 remains limited to
@@ -11,9 +11,11 @@ effect acknowledgements.
 
 Hermes 0.20.4 uses its supported redacted JSONL session export, safe-mode
 one-shot task interface, project Skill trust command, and local Skill listing.
-The adapter permits read-only tasks only after Hermes reports a configured
-inference provider. Skill discovery and activation do not imply that model
-execution is configured.
+The adapter enables read-only tasks from the Hermes version alone. It does not
+check for a configured inference provider before dispatch: a missing inference
+provider shows as a task failure after the run ("Hermes returned no task result.
+Configure an inference provider with hermes model."). Skill discovery and
+activation do not imply that model execution is configured.
 
 - [Released host capability evidence](https://github.com/dharma-ai-labs/dharma-agent-fabric#initial-host-support)
 - [Customer onboarding](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/onboarding/customer-guide.md)
