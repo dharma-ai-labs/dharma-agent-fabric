@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, chown, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, chown, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import { tmpdir, userInfo } from 'node:os';
@@ -559,6 +559,40 @@ test('relay guard and setup accept a 0775 provider tree whose primary group is a
         /^Error: relay_startup_claude_path_invalid: /, why);
       const diagnosis = await launchers.providerUnsafePathDiagnosis('claude', {searchPath: bin, accounts: shared});
       assert.ok(diagnosis?.remedy.includes(`getent group ${gid}`), `status names the private-group case: ${diagnosis?.remedy}`);
+    }
+  });
+});
+
+// Writes the access ACL user::rwx, user:65534:rwx, group::r-x, mask::rwx, other::r-x on `path` as the raw xattr, since
+// setfacl is often not installed. False when this host cannot (no python3, or a file system without ACLs).
+async function grantOtherUserByAcl(path: string) {
+  const script = 'import os,struct,sys\n'
+    + 'e=[(1,7,0xffffffff),(2,7,65534),(4,5,0xffffffff),(16,7,0xffffffff),(32,5,0xffffffff)]\n'
+    + "os.setxattr(sys.argv[1],'system.posix_acl_access',struct.pack('<I',2)+b''.join(struct.pack('<HHI',*x) for x in e))\n";
+  try {await promisify(execFile)('python3', ['-I', '-c', script, path], {timeout: 10000}); return true;} catch {return false;}
+}
+
+// CLI 0.2.224 review A1 (1x7=7): with a POSIX ACL, the group bits of st_mode are the ACL mask, which also bounds named
+// users and named groups. A 0775 directory of the user's private group with the entry user:<other>:rwx passed the
+// private-group exemption, though that other user can create, rename or replace entries in it. For codex this was a
+// regression: 0.2.223 refused any group write bit. The exemption now holds only for an entry with no ACL.
+test('relay and setup refuse a private-group provider directory that an ACL opens to another user', {skip: process.platform !== 'linux'}, async t => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  await privateGroupHost(async ({bin, accounts}) => {
+    await writeFile(join(bin, 'codex'), '#!/bin/sh\nexit 0\n'); await chmod(join(bin, 'codex'), 0o755);
+    const own = await accounts('<user>:x:<gid>:');
+    for (const provider of ['claude', 'codex']) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe(provider, {searchPath: bin, accounts: own}), false, `relay: ${provider} with no ACL`);
+      assert.equal(await launchers.resolveRepositoryProviderDirectory({provider, searchPath: bin, accounts: own}), bin, `setup: ${provider} with no ACL`);
+    }
+    if (!await grantOtherUserByAcl(bin)) {t.skip('this host cannot write a POSIX ACL'); return;}
+    assert.equal((await lstat(bin)).mode & 0o777, 0o775, 'the ACL mask shows as the group bits');
+    for (const provider of ['claude', 'codex']) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe(provider, {searchPath: bin, accounts: own}), true, `relay: ${provider} behind an ACL`);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider, searchPath: bin, accounts: own}),
+        new RegExp(`^Error: relay_startup_${provider}_path_invalid: `), `setup: ${provider} behind an ACL`);
+      assert.equal((await launchers.providerUnsafePathDiagnosis(provider, {searchPath: bin, accounts: own}))?.path, bin,
+        `status names the directory the ACL opens: ${provider}`);
     }
   });
 });
