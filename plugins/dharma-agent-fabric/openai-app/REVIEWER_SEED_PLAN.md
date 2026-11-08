@@ -263,12 +263,33 @@ the receipt. If the seed is 60 days old or older, rebuild it (see Reset).
 3. Each result must match its expected output in `chatgpt-app-submission.json`.
    Fields the expected output does not name (timestamps, correlation IDs) may
    differ.
-4. Capture `tools/list` with the reviewer session, project it with
-   `scripts/mcp-tools-list-project.mjs`, and run
-   `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json> --profile chatgpt`.
-   The reviewer session is a ChatGPT-client capture, so it lists only the
-   20-tool profile and is checked against that profile. The verdict must be
-   `compatible`. Never refresh the 65-tool snapshot from this capture.
+4. Capture `tools/list` with a non-ChatGPT MCP client (for example MCP
+   Inspector or `curl`) signed in as the reviewer account, project it with
+   `scripts/mcp-tools-list-project.mjs`, and run the full comparison without
+   `--profile`:
+   `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`.
+   A non-ChatGPT client is served every tool, so the verdict must be
+   `compatible`, with all 65 tools. ChatGPT developer mode never shows the raw
+   `tools/list`, so check the ChatGPT side there, on the connector from step
+   1. The tool list ChatGPT shows for the connector must be exactly the 20
+   tools marked `chatgptProfile: true` in `mcp-tool-catalog.json`:
+   `fabric_get_identity`, `fabric_list_devices`, `fabric_list_agents`,
+   `fabric_list_repository_agents`, `fabric_get_instructions`,
+   `fabric_list_workspaces`, `fabric_list_trajectories`,
+   `fabric_get_trajectory_evidence`, `fabric_list_failure_atlas`,
+   `fabric_list_remediations`, `fabric_list_tasks`, `fabric_list_a2a`,
+   `fabric_list_skills`, `fabric_list_evals`, `fabric_list_usage`,
+   `fabric_dispatch_task`, `fabric_control_agent_list_sessions`,
+   `fabric_control_agent_create_session`, `fabric_control_agent_send_message`
+   and `fabric_control_agent_list_events`. Then ask ChatGPT to call a tool
+   outside that list. A call to a tool outside the profile, for example
+   `fabric_list_learning_policies` (read-only, so no write runs), must be
+   refused: ChatGPT does not offer the tool, and the server refuses the call.
+   `--profile chatgpt` is only for a capture that really came through a
+   ChatGPT-registered OAuth client (one registered dynamically with every
+   redirect URI on `https://chatgpt.com`); the usual operator cannot make one,
+   because that client's OAuth redirect goes to ChatGPT, not to the operator's
+   tool.
 5. Repeat steps 2 and 3 after 48 hours with the relay still stopped, to show
    that the Codex endpoint stays `active` and TC-2 is unchanged.
 6. In the guided-check organization, after its guided checks have run (a

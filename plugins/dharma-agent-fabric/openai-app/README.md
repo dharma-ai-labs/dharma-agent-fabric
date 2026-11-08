@@ -88,12 +88,20 @@ for submission is met; the submission itself is still the owner's action.
 - `npm run mcp:catalog:verify` checks that the catalog and the test cases
   match `live-mcp-tools.snapshot.json`, and that the submission declares
   exactly the ChatGPT profile.
-- Before each submission, capture `tools/list` from the hosted server, project
-  it with `scripts/mcp-tools-list-project.mjs`, and compare it. The full
-  `compatible` comparison,
-  `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`,
-  uses a capture from a non-ChatGPT client (all 65 tools). A ChatGPT-client
-  capture is checked with `--profile chatgpt` against the 20-tool profile:
+- Before each submission, capture `tools/list` from the hosted server with a
+  non-ChatGPT MCP client (for example MCP Inspector or `curl`) signed in as the
+  reviewer account, project it with `scripts/mcp-tools-list-project.mjs`, and
+  run the full comparison without `--profile`:
+  `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`.
+  The verdict must be `compatible`, with all 65 tools. ChatGPT developer mode
+  never shows the raw `tools/list`, so the ChatGPT side is checked there: the
+  connector lists exactly the 20 tools marked `chatgptProfile: true` in
+  `mcp-tool-catalog.json`, and a call to a tool outside the profile must be
+  refused (`REVIEWER_SEED_PLAN.md`, acceptance step 4). `--profile chatgpt`
+  is only for a capture that really came through a ChatGPT-registered OAuth
+  client (one registered dynamically with every redirect URI on
+  `https://chatgpt.com`); the usual operator cannot make one. Such a capture
+  is checked against the 20-tool profile with
   `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json> --profile chatgpt`.
   Refresh `live-mcp-tools.snapshot.json` only when the non-ChatGPT comparison
   is not `compatible`. Never refresh the 65-tool snapshot from a ChatGPT-client
