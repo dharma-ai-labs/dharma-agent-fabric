@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, chown, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import { tmpdir, userInfo } from 'node:os';
@@ -443,7 +443,7 @@ async function privateGroupHost(run: (host: {root: string; local: string; bin: s
     await chmod(local, 0o775); await chmod(bin, 0o775);
     await writeFile(join(bin, 'claude'), '#!/bin/sh\nexit 0\n'); await chmod(join(bin, 'claude'), 0o775);
     await run({root, local, bin, accounts: async (group, otherUsers = '') => {
-      await writeFile(join(root, 'group'), `root:x:0:\n${group.replace('<user>', user).replace('<gid>', String(gid))}\n`);
+      await writeFile(join(root, 'group'), `root:x:0:\n${group.replace(/<user>/g, user).replace('<gid>', String(gid))}\n`);
       await writeFile(join(root, 'passwd'),
         `root:x:0:0:root:/root:/bin/sh\n${user}:x:${uid}:${gid}::${root}:/bin/sh\n${otherUsers.replace('<gid>', String(gid))}`);
       return {group: join(root, 'group'), passwd: join(root, 'passwd')};
@@ -479,6 +479,51 @@ test('a group-writable provider tree stays refused when the group is shared or t
     assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), true);
     await chmod(bin, 0o775); await chmod(join(bin, 'claude'), 0o777);
     assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: bin, accounts: own}), true);
+  });
+});
+
+// CLI 0.2.224 review C1 (2x4=8): the devcontainers node feature puts nvm in /usr/local/share/nvm, owned USER:nvm with
+// g+rws under umask 0002, and adds only this user to the group nvm. Each version's bin directory is then writable by a
+// group other than the user's primary one, so the F3 rule refused claude, agy and hermes installed there by npm -g,
+// which 0.2.223 ran. A supplementary group of this user is private in effect, and accepted, when /etc/group lists no
+// member but this user and no /etc/passwd entry has it as primary group. A group with another member stays refused.
+test('relay guard and setup accept a group-writable provider tree whose supplementary group has no other member', {skip: process.platform !== 'linux'}, async t => {
+  const launchers = await import('./repositoryLaunchers.js' as string) as ProviderPathChecks;
+  const supplementary = process.getgroups!().find(gid => gid !== process.getgid!() && gid !== 0);
+  if (supplementary === undefined) {t.skip('this user has no supplementary group'); return;}
+  await privateGroupHost(async ({root, accounts}) => {
+    const share = join(root, 'share'), nvm = join(share, 'nvm'), versionBin = join(nvm, 'versions', 'node', 'v22', 'bin');
+    const pkg = join(nvm, 'versions', 'node', 'v22', 'lib', 'node_modules', '@anthropic-ai', 'claude-code');
+    await mkdir(versionBin, {recursive: true}); await mkdir(pkg, {recursive: true});
+    await writeFile(join(pkg, 'cli.js'), '#!/bin/sh\nexit 0\n');
+    await symlink(join('..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'), join(versionBin, 'claude'));
+    await symlink(join('versions', 'node', 'v22'), join(nvm, 'current'));
+    for (const path of [nvm, join(nvm, 'versions'), join(nvm, 'versions', 'node'), join(nvm, 'versions', 'node', 'v22'), versionBin,
+      join(nvm, 'versions', 'node', 'v22', 'lib'), join(nvm, 'versions', 'node', 'v22', 'lib', 'node_modules'),
+      join(nvm, 'versions', 'node', 'v22', 'lib', 'node_modules', '@anthropic-ai'), pkg]) {
+      await chown(path, -1, supplementary); await chmod(path, 0o2775);
+    }
+    await chown(join(pkg, 'cli.js'), -1, supplementary); await chmod(join(pkg, 'cli.js'), 0o775);
+    await chmod(share, 0o755);
+    // main's relay and setup take only a PATH entry that is its own real path, so this forward-port puts the version's
+    // real bin directory on PATH, where the release branch uses nvm's current link.
+    const entry = versionBin;
+    const group = (members: string) => `<user>:x:<gid>:\nnvm:x:${supplementary}:${members}`;
+    const own = await accounts(group('<user>'));
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry, accounts: own}), false, 'relay');
+    assert.equal(await launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry, accounts: own}), versionBin, 'setup');
+    assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: entry, accounts: own}), null, 'status');
+    for (const [shared, why] of [
+      [await accounts(group('<user>,alice')), 'another member'],
+      [await accounts(group('<user>'), `alice:x:4242:${supplementary}::/home/alice:/bin/sh\n`), "another user's primary group"],
+      [await accounts('<user>:x:<gid>:'), 'the group is not listed'],
+    ] as const) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry, accounts: shared}), true, why);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry, accounts: shared}),
+        /^Error: relay_startup_claude_path_invalid: /, why);
+    }
+    await chmod(versionBin, 0o2777);
+    assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry, accounts: own}), true, 'world-writable');
   });
 });
 
