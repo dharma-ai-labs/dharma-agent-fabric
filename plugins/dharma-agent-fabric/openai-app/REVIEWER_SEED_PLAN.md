@@ -264,15 +264,39 @@ the receipt. If the seed is 60 days old or older, rebuild it (see Reset).
    Fields the expected output does not name (timestamps, correlation IDs) may
    differ.
 4. Capture `tools/list` with a non-ChatGPT MCP client (for example MCP
-   Inspector or `curl`) signed in as the reviewer account, project it with
-   `scripts/mcp-tools-list-project.mjs`, and run the full comparison without
-   `--profile`:
-   `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`.
-   A non-ChatGPT client is served every tool, so the verdict must be
-   `compatible`, with all 65 tools. ChatGPT developer mode never shows the raw
-   `tools/list`, so check the ChatGPT side there, on the connector from step
-   1. The tool list ChatGPT shows for the connector must be exactly the 20
-   tools marked `chatgptProfile: true` in `mcp-tool-catalog.json`:
+   Inspector or `curl`) signed in as the reviewer account. Save the `result`
+   object of the `tools/list` response (not the JSON-RPC envelope) as
+   `tools-list.json`, and set `SERVER_NAME` and `SERVER_VERSION` to
+   `serverInfo.name` and `serverInfo.version` from the `initialize` result of
+   the same session. Then run the full comparison without `--profile`, from
+   the repository root in a POSIX shell (Git Bash on Windows):
+
+   ```sh
+   node scripts/mcp-tools-list-project.mjs --stdin --identity "$SERVER_NAME" --version "$SERVER_VERSION" < tools-list.json > server-snapshot.json
+   node scripts/mcp-snapshot-manifest-assemble.mjs --expected-identity "$SERVER_NAME" --expected-version "$SERVER_VERSION" --snapshot server-snapshot.json > manifest.json
+   node scripts/verify-mcp-catalog.mjs --snapshot-manifest manifest.json
+   ```
+
+   One capture at the `server` boundary cannot be `compatible`: `tools/list`
+   carries no confirmation flag, and the source, host, submitted and released
+   boundaries are not supplied. So the verifier exits 1, the verdict must be
+   `unknown`, and the capture passes only when the receipt shows all of this:
+   `manifestErrors` is empty; for the `server` boundary, `missingTools` and
+   `extraTools` are both empty, so the hosted server serves exactly the 65
+   catalog tools; the `server` reasons are only
+   `confirmation_evidence_missing` and `schema_reference_missing` or
+   `schema_unsupported` (the hosted server labels its schemas JSON Schema
+   draft-07, which the comparator does not digest), so there is no
+   `missing_tools`, `extra_tools` or `annotation_mismatch`; and each other
+   boundary is `unknown` with the single reason `not_supplied`. Any other
+   reason fails the capture. Do not add confirmation values, or source, host,
+   submitted or released snapshots, that nobody observed, to reach
+   `compatible`.
+
+   ChatGPT developer mode never shows the raw `tools/list`, so check the
+   ChatGPT side there, on the connector from step 1: the tool list ChatGPT
+   shows for the connector must be exactly the 20 tools marked
+   `chatgptProfile: true` in `mcp-tool-catalog.json`:
    `fabric_get_identity`, `fabric_list_devices`, `fabric_list_agents`,
    `fabric_list_repository_agents`, `fabric_get_instructions`,
    `fabric_list_workspaces`, `fabric_list_trajectories`,
@@ -282,9 +306,14 @@ the receipt. If the seed is 60 days old or older, rebuild it (see Reset).
    `fabric_dispatch_task`, `fabric_control_agent_list_sessions`,
    `fabric_control_agent_create_session`, `fabric_control_agent_send_message`
    and `fabric_control_agent_list_events`. Then ask ChatGPT to call a tool
-   outside that list. A call to a tool outside the profile, for example
-   `fabric_list_learning_policies` (read-only, so no write runs), must be
-   refused: ChatGPT does not offer the tool, and the server refuses the call.
+   outside that list, for example `fabric_list_learning_policies` (read-only,
+   so no write runs). The operator can observe only the ChatGPT side: ChatGPT
+   does not offer the tool and the conversation shows no `tools/call` to it.
+   The server-side refusal (the tool is disabled for a ChatGPT client, and the
+   route guard answers `tool_not_in_client_profile`) is covered by the
+   platform tests `src/app/mcp/chatgptToolProfile.test.ts` and
+   `src/lib/agent-fabric/chatgptToolProfile.test.ts` in
+   `dharma-ai-labs/dharma-ai-platform`, not by this manual step.
    `--profile chatgpt` is only for a capture that really came through a
    ChatGPT-registered OAuth client (one registered dynamically with every
    redirect URI on `https://chatgpt.com`); the usual operator cannot make one,

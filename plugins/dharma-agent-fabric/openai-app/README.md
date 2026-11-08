@@ -90,22 +90,49 @@ for submission is met; the submission itself is still the owner's action.
   exactly the ChatGPT profile.
 - Before each submission, capture `tools/list` from the hosted server with a
   non-ChatGPT MCP client (for example MCP Inspector or `curl`) signed in as the
-  reviewer account, project it with `scripts/mcp-tools-list-project.mjs`, and
-  run the full comparison without `--profile`:
-  `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json>`.
-  The verdict must be `compatible`, with all 65 tools. ChatGPT developer mode
-  never shows the raw `tools/list`, so the ChatGPT side is checked there: the
-  connector lists exactly the 20 tools marked `chatgptProfile: true` in
-  `mcp-tool-catalog.json`, and a call to a tool outside the profile must be
-  refused (`REVIEWER_SEED_PLAN.md`, acceptance step 4). `--profile chatgpt`
-  is only for a capture that really came through a ChatGPT-registered OAuth
-  client (one registered dynamically with every redirect URI on
-  `https://chatgpt.com`); the usual operator cannot make one. Such a capture
-  is checked against the 20-tool profile with
-  `node scripts/verify-mcp-catalog.mjs --snapshot-manifest <manifest.json> --profile chatgpt`.
-  Refresh `live-mcp-tools.snapshot.json` only when the non-ChatGPT comparison
-  is not `compatible`. Never refresh the 65-tool snapshot from a ChatGPT-client
-  capture.
+  reviewer account. Save the `result` object of the `tools/list` response (not
+  the JSON-RPC envelope) as `tools-list.json`, set `SERVER_NAME` and
+  `SERVER_VERSION` to `serverInfo.name` and `serverInfo.version` from the
+  `initialize` result of the same session, and run the full comparison without
+  `--profile`, from the repository root in a POSIX shell (Git Bash on
+  Windows):
+
+  ```sh
+  node scripts/mcp-tools-list-project.mjs --stdin --identity "$SERVER_NAME" --version "$SERVER_VERSION" < tools-list.json > server-snapshot.json
+  node scripts/mcp-snapshot-manifest-assemble.mjs --expected-identity "$SERVER_NAME" --expected-version "$SERVER_VERSION" --snapshot server-snapshot.json > manifest.json
+  node scripts/verify-mcp-catalog.mjs --snapshot-manifest manifest.json
+  ```
+
+  One `server` capture cannot be `compatible`: `tools/list` carries no
+  confirmation flag, and the other four boundaries are not supplied. So the
+  verifier exits 1, the verdict must be `unknown`, and the capture passes only
+  when `manifestErrors` is empty, the `server` boundary's `missingTools` and
+  `extraTools` are both empty (all 65 tools), its reasons are only
+  `confirmation_evidence_missing` and `schema_reference_missing` or
+  `schema_unsupported` (the hosted server labels its schemas JSON Schema
+  draft-07), so there is no `annotation_mismatch`, and each other boundary is
+  `unknown` with the single reason `not_supplied`. Do not add confirmation
+  values, or source, host, submitted or released snapshots, that nobody
+  observed. ChatGPT developer mode never shows the raw `tools/list`, so the
+  ChatGPT side is checked there: the connector lists exactly the 20 tools
+  marked `chatgptProfile: true` in `mcp-tool-catalog.json`, and when asked to
+  call a tool outside the profile, ChatGPT does not offer the tool and the
+  conversation shows no `tools/call` to it (`REVIEWER_SEED_PLAN.md`,
+  acceptance step 4). The server-side refusal (the tool is disabled for a
+  ChatGPT client, and the route guard answers `tool_not_in_client_profile`) is
+  covered by the platform tests `src/app/mcp/chatgptToolProfile.test.ts` and
+  `src/lib/agent-fabric/chatgptToolProfile.test.ts` in
+  `dharma-ai-labs/dharma-ai-platform`, not by this manual step.
+  `--profile chatgpt` is only for a capture that really came through a
+  ChatGPT-registered OAuth client (one registered dynamically with every
+  redirect URI on `https://chatgpt.com`); the usual operator cannot make one.
+  Such a capture is checked against the 20-tool profile by replacing the last
+  command with
+  `node scripts/verify-mcp-catalog.mjs --snapshot-manifest manifest.json --profile chatgpt`,
+  against the same criterion. Refresh `live-mcp-tools.snapshot.json` only when
+  a non-ChatGPT capture fails this criterion with `missing_tools`,
+  `extra_tools` or `annotation_mismatch`. Never refresh the 65-tool snapshot
+  from a ChatGPT-client capture.
 - Test cases and their seed are described in `REVIEWER_GUIDE.md` and
   `REVIEWER_SEED_PLAN.md`.
 
