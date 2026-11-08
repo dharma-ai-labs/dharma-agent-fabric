@@ -793,3 +793,30 @@ test('relay and setup refuse a provider executable whose link chain passes a dir
       "status names the directory that lets others repoint claude's node (N1)");
   } finally {await chmod(shared, 0o700).catch(() => {}); await rm(root, {recursive: true, force: true});}
 });
+
+// CLI 0.2.224 review R424-1 (2x4=8): an absolute PATH entry the shell resolves fine but written with a trailing '/',
+// a doubled '/' or a '.' part ('dir/', '//dir', '/./dir') made the provider check throw, so the relay refused claude,
+// agy and hermes (provider_unsafe_path) and setup refused them (relay_startup_claude_path_invalid). Each absolute
+// entry is now checked, and recorded, in its normal form. Relative entries, and '..' parts, which the kernel resolves
+// after links, stay refused.
+test('relay and setup accept a provider PATH entry written with a trailing or doubled slash', {skip: process.platform !== 'linux'}, async () => {
+  const launchers: Record<string, any> = await import('./repositoryLaunchers.js');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'fabric-provider-entry-form-')));
+  try {
+    const bin = join(root, 'bin'); await mkdir(bin, {mode: 0o700});
+    for (const provider of ['claude', 'codex']) await writeFile(join(bin, provider), `#!/bin/sh\nprintf "own-${provider}"\n`, {mode: 0o700});
+    for (const entry of [`${bin}/`, `/${bin}`, `${root}/./bin`, `${bin}//`]) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry}), false, `relay: ${entry}`);
+      assert.equal(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: entry}), null, `status: ${entry}`);
+      for (const provider of ['claude', 'codex']) {
+        assert.equal(await launchers.resolveRepositoryProviderDirectory({provider, searchPath: entry}), bin, `setup ${provider}: ${entry}`);
+      }
+    }
+    for (const entry of [relative(process.cwd(), bin), `${bin}/../bin`]) {
+      assert.equal(await launchers.providerFirstOnPathUnsafe('claude', {searchPath: entry}), true, `relay: ${entry}`);
+      await assert.rejects(launchers.resolveRepositoryProviderDirectory({provider: 'claude', searchPath: entry}),
+        /^Error: relay_startup_claude_path_invalid/, `setup: ${entry}`);
+      assert.notEqual(await launchers.providerUnsafePathDiagnosis('claude', {searchPath: entry}), null, `status: ${entry}`);
+    }
+  } finally {await rm(root, {recursive: true, force: true});}
+});
