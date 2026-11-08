@@ -1,8 +1,10 @@
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readdir, readFile, readlink, realpath } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, join, posix, win32 } from 'node:path';
+import { promisify } from 'node:util';
 
 type Launchers = { shell: string; windows: string };
 const VERSION = /^(?=.{1,64}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/;
@@ -174,8 +176,21 @@ export async function resolveRepositoryNpmCli(options: {npmExecPath?: string; se
   throw new Error('relay_startup_npm_unavailable');
 }
 
-/** The account databases that say whether a group of this user is private to them. Tests pass copies. */
-export type AccountFiles = {group?: string; passwd?: string};
+/**
+ * The account databases that say whether a group of this user is private to them. Tests pass copies, and a stand-in
+ * for the NSS group lookup, which returns the `getent group` line for a group id, if any. With copies and no stand-in,
+ * the copies are the whole database: NSS is not asked.
+ */
+export type AccountFiles = {group?: string; passwd?: string;
+  groupLookup?: (gid: number) => Promise<string | undefined>};
+
+// The NSS group entry for `gid`, as `getent group` prints it, run without a shell. Undefined when there is none.
+async function nssGroupEntry(gid: number) {
+  try {
+    const {stdout} = await promisify(execFile)('getent', ['group', String(gid)], {timeout: 5000, maxBuffer: 64 * 1024});
+    return stdout.split('\n')[0] || undefined;
+  } catch {return undefined;}
+}
 
 /** The group ids whose write bit grants no one but this user anything. */
 type PrivateGroups = ReadonlySet<number>;
@@ -186,6 +201,8 @@ type PrivateGroups = ReadonlySet<number>;
  * sessions use umask 0002 with such groups, so a provider installed under ~ has 0775 directories (PR #424 F3). A
  * supplementary group counts when /etc/group lists this user as its only member and no /etc/passwd entry has it as
  * primary group, as the devcontainers node feature's nvm group, which owns a g+rws /usr/local/share/nvm (PR #424 C1).
+ * NSS user private groups, as sssd's auto_private_groups and FreeIPA make them, are not in /etc/group: a primary group
+ * missing there whose id is the user's id is looked up through NSS and held to the same rule (PR #424 R424-2).
  */
 async function ownPrivateGroups(accounts: AccountFiles = {}): Promise<PrivateGroups> {
   const found = new Set<number>();
@@ -195,7 +212,12 @@ async function ownPrivateGroups(accounts: AccountFiles = {}): Promise<PrivateGro
     const groupEntries = await entries(accounts.group ?? '/etc/group');
     const passwdEntries = await entries(accounts.passwd ?? '/etc/passwd');
     for (const gid of new Set([primary, ...process.getgroups!()])) {
-      const groups = groupEntries.filter(fields => fields[2] === String(gid));
+      let groups = groupEntries.filter(fields => fields[2] === String(gid));
+      if (!groups.length && gid === primary && gid === process.getuid!()) {
+        const lookup = accounts.groupLookup ?? (accounts.group === undefined ? nssGroupEntry : undefined);
+        const fields = (await lookup?.(gid))?.split(':');
+        if (fields && fields.length >= 4 && fields[2] === String(gid)) groups = [fields];
+      }
       const members = (groups[0]?.[3] ?? '').split(',').filter(Boolean);
       const sharers = passwdEntries.filter(fields => fields[3] === String(gid) && (gid !== primary || fields[0] !== user));
       // A supplementary group must list this user, and only them: with no member listed, this user is in it by other
@@ -209,14 +231,18 @@ async function ownPrivateGroups(accounts: AccountFiles = {}): Promise<PrivateGro
 
 // Names the entry a provider check refused, so `dharma status` can say which one and how to fix it.
 class UnsafeProviderEntry extends Error {
-  constructor(readonly path: string, readonly writable: boolean) { super('unsafe_provider_entry'); }
+  constructor(readonly path: string, readonly writable: boolean, readonly group?: number) {
+    super('unsafe_provider_entry');
+  }
 }
 
 function protectedEntry(path: string, stat: {uid: number; gid: number; mode: number}, privateGroups: PrivateGroups,
   exempt = false) {
   if (![0, process.getuid!()].includes(stat.uid)) throw new UnsafeProviderEntry(path, false);
-  if (!exempt && ((stat.mode & 0o002) || ((stat.mode & 0o020) && !privateGroups.has(stat.gid)))) {
-    throw new UnsafeProviderEntry(path, true);
+  if (!exempt && (stat.mode & 0o002)) throw new UnsafeProviderEntry(path, true);
+  // Name the group, so `dharma status` can say when a group counts as private (PR #424 R424-2).
+  if (!exempt && (stat.mode & 0o020) && !privateGroups.has(stat.gid)) {
+    throw new UnsafeProviderEntry(path, true, stat.gid);
   }
 }
 
@@ -400,6 +426,9 @@ export async function providerUnsafePathDiagnosis(provider: ProviderCommand,
       const quoted = `'${path.replace(/'/g, "'\\''")}'`;
       return {path, remedy: entry?.writable
         ? `Other users can write to ${path}. Run chmod go-w ${quoted}, or put your own ${provider} first on PATH.`
+          + (entry.group === undefined ? '' : ` Its group ${entry.group} counts as private to you only when /etc/group`
+            + ' lists you as its only member or, for your primary group with your user id as its id, when'
+            + ` getent group ${entry.group} names it after you with no other member (sssd, FreeIPA).`)
         : `${path} belongs to another user or is not a protected ${provider}. Put your own ${provider} first on PATH, or remove ${directory} from PATH.`};
     }
   }
