@@ -20,8 +20,9 @@ The app authenticates the user to Dharma and exposes organization-level intent t
 
 ## Tool surface
 
-The hosted server exposes 65 tools to every authenticated client, ChatGPT
-included. `live-mcp-tools.snapshot.json` records them exactly as the server
+The hosted server registers 65 tools. Every authenticated client other than
+ChatGPT sees all 65; a ChatGPT connection sees only the 20-tool ChatGPT profile
+described below. `live-mcp-tools.snapshot.json` records them exactly as the server
 registers them: names, titles, descriptions, annotations, confirmation and
 required inputs. `mcp-tool-catalog.json` adds the backend scope, admin-only flag,
 mode and ChatGPT profile flag for each tool. `chatgpt-app-submission.json`
@@ -70,14 +71,17 @@ evidence-request writes. `npm run mcp:catalog:verify` fails if the submission
 declares any other tool, or if the profile gains a merge, release or rollout
 tool. All submitted test cases use only read-only profile tools.
 
-The declared profile is not yet what ChatGPT sees. Today the server lists all
-65 tools to every client and cannot show ChatGPT fewer tools than other
-clients.
-
 Owner decision (Nick, 2026-10-31): ship a server-side filter keyed to the ChatGPT OAuth
 client in the HQ control plane, so ChatGPT is served only the declared profile.
-AGENTS.md stays unchanged. The filter is a platform change and is not part of
-this package; until it ships, the package must not be submitted.
+AGENTS.md stays unchanged.
+
+The filter is live in production since platform #1909 (merge commit
+`724df4d7`, 2026-11-08). For a ChatGPT OAuth client, `tools/list` returns only
+the 20 profile tools and a call to any other tool is refused; if the server
+cannot tell which client it is serving, it returns an error rather than the
+full list. Other clients still see all 65 tools. The filter is a platform
+change and is not part of this package. With it live, the platform condition
+for submission is met; the submission itself is still the owner's action.
 
 ## Keeping the package in step with the server
 

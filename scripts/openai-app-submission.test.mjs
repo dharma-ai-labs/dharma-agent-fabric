@@ -72,8 +72,15 @@ test('the submission declares exactly the ChatGPT profile, with no merge or depl
   assert.match(filterDecision, /keyed to the ChatGPT OAuth\s+client/, 'README.md must record the server-side ChatGPT filter decision');
   assert.match(filterDecision, /AGENTS\.md stays unchanged/, 'the same decision paragraph must say AGENTS.md stays unchanged');
   assert.doesNotMatch(readme, /NICK-DECIDES/, 'README.md has no open owner decision left');
-  assert.match(checklist, /^- \[ \] The ChatGPT app is not given merge or deployment tools in practice\..*server-side filter/m,
-    'the checklist keeps the filter item open until the filter ships');
+  // The filter is live in production since platform #1909: the docs must say so.
+  assert.match(checklist, /^- \[x\] The ChatGPT app is not given merge or deployment tools in practice\..*server-side filter.*#1909/m,
+    'the checklist marks the filter item done, citing platform #1909');
+  assert.match(paragraphStarting(readme, 'The hosted server registers 65 tools'), /a ChatGPT connection sees only the 20-tool/,
+    'README.md must say ChatGPT is served the 20-tool profile');
+  for (const [name, text] of [['README.md', readme], ['PUBLICATION_CHECKLIST.md', checklist]]) {
+    assert.doesNotMatch(text, /must not be submitted|filter ships|not yet what ChatGPT sees|lists all 65 tools to every client/,
+      `${name} still says the ChatGPT filter has not shipped`);
+  }
 });
 
 test('the seed plan records the owner decisions on the reviewer role and organization', () => {
