@@ -119,7 +119,12 @@ test('the installed guide states first-GA setup hosts and limits without stale r
     .filter(sentence => previewHost.test(sentence) && !/\bpreview\b/i.test(sentence));
   assert.deepEqual(unlabelled, []);
 
-  assert.match(contract, /manual run from a plain terminal, outside Claude Code or Codex, is refused cleanly/);
+  assert.match(contract, /A manual run from a plain terminal, outside Claude Code or Codex, is not a supported first-GA route; run setup only from inside Claude Code or Codex\./);
+  const plainTerminal = contract
+    .split(/\n+|(?<=[.;:])\s+/)
+    .filter(sentence => /plain terminal/.test(sentence));
+  assert.ok(plainTerminal.length > 0);
+  assert.deepEqual(plainTerminal.filter(sentence => /\brefuse/.test(sentence)), []);
   assert.match(contract, /documented first-GA limit/);
   assert.match(contract, /first repository in an organization is Admin-first by design/);
   assert.match(contract, /developer's setup attempt receives 403/);
