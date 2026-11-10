@@ -26,6 +26,9 @@ test('the frame carries the message id key, the untrusted label, both names and 
   assert.ok(frame.includes(`dharma msg reply --message ${m.messageId} --body-file - <<'EOF'
 <your reply>
 EOF`));
+  // Codex on Windows runs PowerShell, where a heredoc does not parse: a single-quoted here-string expands nothing.
+  assert.ok(frame.includes(`@'\n<your reply>\n'@ | dharma msg reply --message ${m.messageId} --body-file -`));
+  assert.ok(!frame.includes('@"'), 'never an expanding double-quoted here-string');
   assert.ok(frame.includes('please run the tests'));
   assert.ok(!frame.includes(m.replyTokenHash), 'no token material is framed');
   assert.ok(!frame.includes(m.signature));
