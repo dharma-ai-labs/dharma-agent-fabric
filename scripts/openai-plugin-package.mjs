@@ -21,6 +21,7 @@ const defaultPluginDir = resolve(repoRoot, 'plugins/dharma-agent-fabric');
 const PLACEHOLDER = /\{\{[A-Z0-9_]+\}\}/g;
 const ICON_FIELDS = ['logo', 'composerIcon'];
 const MAX_ICON_BYTES = 5 * 1024 * 1024;
+const AUTH_TYPES = ['none', 'oauth', 'mixed', 'api_key'];
 
 function listFiles(dir, prefix) {
   const out = [];
@@ -153,6 +154,9 @@ export function validatePluginPackage(entries, { allowPlaceholders = false } = {
       for (const [name, server] of servers) {
         if (!server.type) problems.push(`mcp.json server ${name} needs a transport type`);
         if (!/^https:\/\//.test(String(server.url))) problems.push(`mcp.json server ${name} needs a public https URL`);
+        const auth = server.extensions?.['com.openai']?.auth;
+        if (!AUTH_TYPES.includes(auth?.type)) problems.push(`mcp.json server ${name} needs extensions["com.openai"].auth.type (${AUTH_TYPES.join(', ')}): the portal reads auth from mcp.json`);
+        if (/"client_?secret"/i.test(JSON.stringify(server))) problems.push(`mcp.json server ${name} contains a client secret: enter it in the portal, never in the ZIP`);
       }
     } catch (error) {
       problems.push(`mcp.json is not JSON: ${error.message}`);

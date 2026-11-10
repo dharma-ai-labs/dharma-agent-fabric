@@ -113,7 +113,11 @@ Rules the packager checks (`npm run plugin:openai-package:check` tests them):
 - no `test_credentials` or `reviewer_instructions`: the reviewer password is
   entered in the portal's Review details form, never in the ZIP;
 - no `{{...}}` placeholder left, unless `--allow-placeholders` builds a draft;
-- exactly one MCP server with a transport type and an `https` URL.
+- exactly one MCP server with a transport type and an `https` URL, and its
+  `extensions["com.openai"].auth` object (the portal reads auth settings from
+  `mcp.json`): `oauth` with `client.mode` `dcr`, since the server uses Clerk
+  OAuth with dynamic client registration found through discovery; no client
+  id or secret in the package.
 
 To build the ZIP for upload, from the repository root, with the substituted
 copy of `chatgpt-app-submission.json` that stays outside the repository:
