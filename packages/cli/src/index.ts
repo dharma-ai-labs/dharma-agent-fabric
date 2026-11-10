@@ -46,7 +46,7 @@ import {runDeviceSigningMaintenanceController} from './deviceSigningMaintenanceC
 import {withLegacySigningMaintenanceBoundary,type LegacySigningMaintenanceBoundary} from './legacySigningMaintenanceBoundary.js';
 import { superviseRelay } from './relaySupervisor.js';
 import { deferDailyUploadLimit, RELAY_SESSION_CAPTURE_INTERVAL_MS, RELAY_SESSION_CAPTURE_MAXIMUM_SESSIONS,
-  runRelaySessionCapture } from './relaySessionCapture.js';
+  runRelaySessionCapture, type RelaySessionQueueResult } from './relaySessionCapture.js';
 import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureReceipt } from './relayChildFailure.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
@@ -4784,10 +4784,11 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
 }
 
 /** Relay capture of one discovered session: commit and queue a capsule revision only when its
- * evidence differs from the vault's latest revision. The relay's pending-capsule sync uploads it. */
+ * evidence differs from the vault's latest revision. The relay's pending-capsule sync uploads it.
+ * A new revision is built only on a latest revision that is neither waiting for its sync nor retired by it. */
 export async function queueRelaySessionCapture(vault: Awaited<ReturnType<typeof openBootstrapVault>>, input: {
   organizationId: string; deviceId: string; workspaceId: string; policy: OrganizationPolicy; session: ProviderSession;
-}): Promise<boolean> {
+}): Promise<RelaySessionQueueResult> {
   const { session } = input;
   const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
   const rawContentId = sha256(rawTurn);
@@ -4805,7 +4806,13 @@ export async function queueRelaySessionCapture(vault: Awaited<ReturnType<typeof 
   const latestMetadata = await vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
   if (latestMetadata) {
     const latest = await vault.getLatestCapsule<ReturnType<typeof buildTrajectoryCapsule>>(firstRevision.trajectoryId);
-    if (evidenceHash(latest) === evidenceHash(firstRevision)) return false;
+    if (evidenceHash(latest) === evidenceHash(firstRevision)) return 'unchanged';
+    const state = vault.capsuleSyncState(firstRevision.trajectoryId, latestMetadata.revision);
+    // Still queued (sync deferred): upload that one first, then capture the latest state as one revision.
+    if (state === 'pending') return 'pending';
+    // The server never accepts a revision chained onto a retired one, and the sync would throw on it every cycle.
+    // `dharma evidence capture-batch --sync` rebuilds this session on the server head.
+    if (state === 'retired') throw new Error('relay_session_capture_revision_retired');
   }
   const capsule = latestMetadata ? build(latestMetadata) : firstRevision;
   const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), trajectoryCapsuleSchemaId(capsule), capsule);
@@ -4818,7 +4825,7 @@ export async function queueRelaySessionCapture(vault: Awaited<ReturnType<typeof 
       sourceLocator: session.sourcePath, status: session.coverage, observedAt: session.endedAt },
   });
   await vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
-  return true;
+  return 'queued';
 }
 
 async function evidencePreview(flags: Map<string, string | boolean>): Promise<Output> {
@@ -9335,6 +9342,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let sessionCapturesQueued = 0;
   let sessionCaptureFailures = 0;
   let nextSessionCaptureAt = 0;
+  const sessionCaptureSince = new Map<ProviderId, Date>();
   let nextPolicyRefreshAt = 0;
   let lastPollReceiptAt = 0;
   let evidencePolicyFresh = false;
@@ -9583,10 +9591,12 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
         && performance.now() >= nextSessionCaptureAt) {
         const captured = await runRelaySessionCapture({
           providers: providerAdapters.map(adapter => adapter.providerId),
+          since: sessionCaptureSince, now: Date.now(),
           // Some providers export sessions through their executable: the relay's PATH check comes first.
-          discover: async provider => await relayProviderUnsafePath(provider) ? []
+          discover: async (provider, since) => await relayProviderUnsafePath(provider) ? null
             : providerAdapter(provider)!.discover({ workspace: canonicalWorkspace.path,
-              maximumSessions: RELAY_SESSION_CAPTURE_MAXIMUM_SESSIONS, maximumBytesPerSession: 8_388_608 }),
+              maximumSessions: RELAY_SESSION_CAPTURE_MAXIMUM_SESSIONS, maximumBytesPerSession: 8_388_608,
+              ...(since ? { since } : {}) }),
           queue: session => queueRelaySessionCapture(vault, {
             organizationId: canonicalWorkspace.organizationId, deviceId: fabric.config.deviceId,
             workspaceId: canonicalWorkspace.workspaceId, policy, session }),

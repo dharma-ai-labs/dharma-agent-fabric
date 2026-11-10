@@ -1916,6 +1916,15 @@ export class LocalVault {
     `).run(trajectoryId, revision, capsule.blob_content_id, new Date().toISOString());
   }
 
+  /** 'pending' while a revision waits in the sync queue, 'retired' once its sync discarded it, otherwise null. */
+  capsuleSyncState(trajectoryId: string, revision: number): 'pending' | 'retired' | null {
+    if (this.#database.prepare('select 1 from capsule_sync_queue where trajectory_id = ? and revision = ?')
+      .get(trajectoryId, revision)) return 'pending';
+    if (this.#database.prepare('select 1 from capsule_sync_failures where trajectory_id = ? and revision = ?')
+      .get(trajectoryId, revision)) return 'retired';
+    return null;
+  }
+
   markCapsuleSynced(trajectoryId: string, revision: number): void {
     this.#database.prepare(`
       delete from capsule_sync_queue where trajectory_id = ? and revision = ?
