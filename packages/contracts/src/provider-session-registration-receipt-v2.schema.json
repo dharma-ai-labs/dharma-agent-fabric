@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/provider-session-registration-receipt/v2",
+  "title": "Named delivery-only provider session registration receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "organizationId",
+    "bindingId",
+    "name",
+    "provider",
+    "delivery",
+    "mode",
+    "membershipId",
+    "deviceId",
+    "state",
+    "revision",
+    "replay",
+    "updatedAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.provider-session-registration-receipt/v2"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "bindingId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,47}$"
+    },
+    "provider": {
+      "enum": [
+        "codex",
+        "claude"
+      ]
+    },
+    "delivery": {
+      "enum": [
+        "codex_queue",
+        "claude_hook"
+      ]
+    },
+    "mode": {
+      "const": "cooperative"
+    },
+    "membershipId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "deviceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "state": {
+      "enum": [
+        "active",
+        "detached"
+      ]
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "replay": {
+      "type": "boolean"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "provider",
+        "delivery"
+      ],
+      "properties": {
+        "provider": {
+          "const": "codex"
+        },
+        "delivery": {
+          "const": "codex_queue"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "provider",
+        "delivery"
+      ],
+      "properties": {
+        "provider": {
+          "const": "claude"
+        },
+        "delivery": {
+          "const": "claude_hook"
+        }
+      }
+    }
+  ]
+}

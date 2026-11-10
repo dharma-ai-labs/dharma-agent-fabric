@@ -5,6 +5,30 @@ envelopes, provider capabilities, evidence requests, signed tasks, and receipts.
 Schema validity establishes structure and integrity; it does not prove factual
 grounding or reasoning validity.
 
+## Named-session messages (prototype contract)
+
+`dharma.session-message/v1` is a message between two named sessions in one
+organization. The sender device signs the canonical bytes of every field except
+`signature` (`sessionMessageSigningPayload()`, `signSessionMessage()`).
+`verifySessionMessage()` refuses a malformed envelope, a foreign organization,
+a lifetime over 7 days, an envelope dated more than 5 minutes ahead, an expired
+envelope, a body that does not match `bodyHash`, an unknown signer device, a bad
+signature and, when `recipientName` is given, any other recipient.
+
+Delivery state is a separate record, `dharma.session-message-delivery/v1`, with
+exactly `queued`, `delivered` and `acknowledged`. A local queue success is not
+`delivered`, and no state means read or replied. A reply is a new message whose
+`replyTo` names the original; `verifySessionMessageReply()` checks the one-use
+reply token against the original's `replyTokenHash` and consumes it once through
+the caller's durable ledger. `classifySessionMessageSubmission()` gives the
+dedupe rule for resubmission after a lost acknowledgement.
+
+`dharma.provider-session-registration/v2` names a delivery-only session:
+`codex` with `codex_queue`, or `claude` with `claude_hook`, mode `cooperative`,
+and the existing name rule `^[a-z][a-z0-9-]{0,47}$`. It never carries a provider
+thread or session id. A valid signature proves the member and device, not the
+provider session.
+
 ## Signing-expiry recovery possession protocol
 
 `parseDeviceSigningRecoveryChallenge()`,

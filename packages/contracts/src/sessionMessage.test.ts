@@ -48,6 +48,12 @@ function signed(change: Record<string, unknown> = {}, key = senderKeys.privateKe
   return api('signSessionMessage')(unsigned(change), key) as Record<string, unknown>;
 }
 
+/** Signs without the shape checks, to prove the verifier refuses malformed envelopes. */
+function rawSigned(change: Record<string, unknown> = {}) {
+  const value = unsigned(change);
+  return { ...value, signature: contracts.signCanonicalObject(value, senderKeys.privateKey) };
+}
+
 const verify = (value: unknown, options: Record<string, unknown> = {}, at = now) =>
   api('verifySessionMessage')(value, { organizationId: ORG, resolveDevicePublicKey: resolver, ...options }, at);
 
@@ -98,7 +104,8 @@ test('an expired, future-dated or over-long envelope is refused', () => {
   assert.deepEqual(verify(signed({ createdAt: '2026-11-10T18:04:00.000Z', expiresAt: '2026-11-11T18:00:00.000Z' })),
     { ok: true }, 'five minutes of forward clock skew is tolerated');
   assert.deepEqual(verify(signed({ expiresAt: '2026-11-17T17:59:00.001Z' })), { ok: false, reason: 'validity_too_long' });
-  assert.deepEqual(verify(signed({ expiresAt: '2026-11-10T17:59:00.000Z' })), { ok: false, reason: 'schema_invalid' });
+  assert.deepEqual(verify(rawSigned({ expiresAt: '2026-11-10T17:59:00.000Z' })), { ok: false, reason: 'schema_invalid' });
+  assert.throws(() => signed({ expiresAt: '2026-11-10T17:59:00.000Z' }), /session_message_invalid/);
 });
 
 test('a wrong-org envelope is refused even when correctly signed', () => {
@@ -135,12 +142,14 @@ test('schema refuses unknown fields, bad names, provider ids, control bytes and 
     assert.deepEqual(verify(value), { ok: false, reason: 'schema_invalid' });
   }
   for (const body of ['bad\u0000byte', 'bad\u001bescape', 'lone \ud800 surrogate']) {
-    assert.deepEqual(verify(signed({ body, bodyHash: hash(body) })), { ok: false, reason: 'schema_invalid' }, JSON.stringify(body));
+    assert.deepEqual(verify(rawSigned({ body, bodyHash: hash(body) })), { ok: false, reason: 'schema_invalid' }, JSON.stringify(body));
+    assert.throws(() => signed({ body, bodyHash: hash(body) }), /session_message_invalid/);
   }
   const multiline = 'line one\nline two\ttabbed\r\n';
   assert.deepEqual(verify(signed({ body: multiline, bodyHash: hash(multiline) })), { ok: true });
   assert.deepEqual(verify(signed({ recipient: { name: 'a'.repeat(48) } })), { ok: true });
   assert.throws(() => api('signSessionMessage')({ ...unsigned(), threadId: 'x' }, senderKeys.privateKey), /session_message_invalid/);
+  assert.throws(() => signed({ bodyHash: hash('other body') }), /session_message_invalid/);
 });
 
 test('reply tokens are hashed, bound to the original message and detectably single-use', async () => {

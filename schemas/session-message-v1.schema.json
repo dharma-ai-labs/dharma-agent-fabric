@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/session-message/v1",
+  "title": "Device-signed named-session message envelope",
+  "description": "Signed by the sender device key over the canonical bytes of every field except signature. Delivery state is never part of the envelope; see session-message-delivery/v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "messageId",
+    "organizationId",
+    "sender",
+    "recipient",
+    "createdAt",
+    "expiresAt",
+    "body",
+    "bodyHash",
+    "replyTo",
+    "replyTokenHash",
+    "signature"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.session-message/v1"
+    },
+    "messageId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "sender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "membershipId",
+        "deviceId",
+        "name"
+      ],
+      "properties": {
+        "membershipId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "deviceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "name": {
+          "$ref": "#/$defs/sessionName"
+        }
+      }
+    },
+    "recipient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/sessionName"
+        }
+      }
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16000,
+      "pattern": "^[^\u0000-\b\u000b\f\u000e-\u001f]*$"
+    },
+    "bodyHash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "replyTo": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "replyTokenHash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    }
+  },
+  "$defs": {
+    "sessionName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,47}$"
+    }
+  }
+}

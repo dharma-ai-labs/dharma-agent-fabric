@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/session-message-delivery/v1",
+  "title": "Named-session message delivery state",
+  "description": "queued = platform accepted and stored the envelope; delivered = the recipient-side deliverer observed it in the exact attached conversation; acknowledged = the platform recorded the recipient ACK. None of these means read or replied.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "organizationId",
+    "messageId",
+    "recipientName",
+    "state",
+    "updatedAt"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.session-message-delivery/v1"
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "messageId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "recipientName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,47}$"
+    },
+    "state": {
+      "enum": [
+        "queued",
+        "delivered",
+        "acknowledged"
+      ]
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    }
+  }
+}
