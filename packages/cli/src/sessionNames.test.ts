@@ -201,11 +201,12 @@ test('an uncertain attach is retried once with the identical request; a definiti
   } finally { await g.cleanup(); }
 });
 
-test('a refused re-attach keeps the previous attachment; a rebind on this device sends its binding id and revision (F6)', async () => {
+test('a refused re-attach keeps the previous attachment; a rebind on this device sends its binding id (F6, S-1)', async () => {
   let refuse = false;
-  const f = await fixture({ post: async (_route, body) => {
+  const p1p = p1pAttach();
+  const f = await fixture({ post: async (route, body) => {
     if (refuse) throw Object.assign(new Error('session_name_revision_conflict'), { status: 409, definitive: true });
-    return receiptFor(body as ProviderSessionRegistrationV2);
+    return p1p(route, body);
   } });
   try {
     await sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', THREAD], ['name', 'ef'], ['yes', true]]), f.host);
@@ -220,10 +221,10 @@ test('a refused re-attach keeps the previous attachment; a rebind on this device
     await sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', other], ['name', 'ef'], ['yes', true]]), f.host);
     const rebind = f.calls.at(-1)!.body as ProviderSessionRegistrationV2;
     assert.equal(rebind.bindingId, before!.bindingId);
-    assert.equal(rebind.expectedRevision, before!.revision);
+    assert.equal(rebind.expectedRevision, 0, 'attach always carries 0; the platform treats the held binding as a replay');
     const after = await readSessionAttachment(f.home, 'ef');
     assert.equal(after?.threadId, other);
-    assert.equal(after?.revision, before!.revision + 1);
+    assert.equal(after?.revision, before!.revision);
   } finally { await f.cleanup(); }
 });
 
@@ -260,22 +261,42 @@ test('a receipt for another binding, name or state is refused and the attachment
   }
 });
 
-test('re-attaching on this device reuses its binding id and expected revision', async () => {
-  const f = await fixture();
+/** The P1p attach RPC as it is: `attach` must carry expectedRevision 0 (else 400 session_registration_invalid);
+ * a binding id it already holds is a replay at the stored revision; a new one starts at revision 1. */
+function p1pAttach() {
+  const bindings = new Map<string, number>();
+  return async (_route: string, body: unknown) => {
+    const request = body as ProviderSessionRegistrationV2;
+    if (request.action === 'attach' && request.expectedRevision !== 0) {
+      throw Object.assign(new Error('session_registration_invalid'), { status: 400, definitive: true });
+    }
+    const stored = bindings.get(request.bindingId);
+    if (stored !== undefined) return receiptFor(request, { revision: stored, replay: true });
+    bindings.set(request.bindingId, 1);
+    return receiptFor(request, { revision: 1, replay: false });
+  };
+}
+
+test('repeating an attach on this device is a replay: same binding id, expectedRevision 0, replay true (S-1)', async () => {
+  const f = await fixture({ post: p1pAttach() });
   try {
-    const attach = () => sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', THREAD],
+    const attach = (thread: string) => sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', thread],
       ['name', 'ef'], ['yes', true]]), f.host);
-    await attach();
-    await attach();
+    assert.equal((await attach(THREAD)).replay, false);
+    const again = await attach(THREAD);
+    assert.equal(again.ok, true);
+    assert.equal(again.replay, true);
+    assert.equal(again.revision, 1);
     const [first, second] = f.calls.map(call => call.body as ProviderSessionRegistrationV2);
     assert.equal(second!.bindingId, first!.bindingId);
-    assert.equal(second!.expectedRevision, 1);
-    assert.equal((await readSessionAttachment(f.home, 'ef'))?.revision, 2);
-    await sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', randomUUID()],
-      ['name', 'ef'], ['yes', true]]), f.host);
+    assert.equal(second!.expectedRevision, 0);
+    assert.equal((await readSessionAttachment(f.home, 'ef'))?.revision, 1);
+    const other = randomUUID();
+    assert.equal((await attach(other)).replay, true);
     const third = f.calls[2]!.body as ProviderSessionRegistrationV2;
-    assert.equal(third.bindingId, first!.bindingId, 'another thread under the same name on this device rebinds it');
-    assert.equal(third.expectedRevision, 2);
+    assert.equal(third.bindingId, first!.bindingId, 'another thread under the same name on this device keeps the binding');
+    assert.equal(third.expectedRevision, 0);
+    assert.equal((await readSessionAttachment(f.home, 'ef'))?.threadId, other, 'the thread id is local and follows the attach');
   } finally { await f.cleanup(); }
 });
 

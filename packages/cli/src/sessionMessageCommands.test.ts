@@ -80,8 +80,12 @@ class FakePlatform {
         if (route === '/agent-fabric/session-messages/poll') {
           const recipient = this.names.get(String(body.recipientName));
           if (!recipient || recipient.deviceId !== deviceId) throw httpError('session_not_found', 404);
-          return { messages: [...this.messages.values()]
-            .filter(item => item.envelope.recipient.name === body.recipientName && item.delivery.state === 'queued')
+          // The P2p poll's real shape (S-2): the 20 oldest `queued`, then the 20 newest `delivered` whose reply token
+          // is unused, so the recipient can still reply to them. A delivered item is not a new delivery.
+          const mine = [...this.messages.values()].filter(item => item.envelope.recipient.name === body.recipientName);
+          const queued = mine.filter(item => item.delivery.state === 'queued').slice(0, 20);
+          const delivered = mine.filter(item => item.delivery.state === 'delivered').reverse().slice(0, 20);
+          return { messages: [...queued, ...delivered].slice(0, Number(body.limit ?? 20))
             .map(item => {
               const sender = this.names.get(item.envelope.sender.name)!;
               return { envelope: item.envelope, replyToken: item.replyToken,
@@ -210,8 +214,34 @@ test('inbox is a manual pull: verified messages are recorded delivered via manua
     const received = await readReceivedSessionMessage(b.home, String(sent.messageId));
     assert.equal(received?.envelope.messageId, sent.messageId);
     assert.equal(typeof received?.replyToken, 'string');
+    const posts = () => platform.calls.filter(call => call.route.endsWith('/delivered')).length;
+    const before = posts();
     const again = await sessionMessageCommand('inbox', cmd([]), b.host);
-    assert.deepEqual(again.messages, [], 'a delivered message is not pulled twice');
+    const relisted = again.messages as Array<Record<string, unknown>>;
+    assert.deepEqual(relisted.map(item => [item.messageId, item.delivery]), [[sent.messageId, 'already_delivered']],
+      'a delivered, unreplied message is listed again, marked delivered (S-2)');
+    assert.equal(posts(), before, 'and is not reported delivered a second time');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('the deliverer view of a poll keeps only queued messages: a delivered, unreplied one is never handed out again (S-2)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ef', 'codex');
+  const b = await member(platform, 'ops-claude', 'claude');
+  try {
+    const { receiveSessionMessages } = await import('./sessionMessageCommands.js');
+    const { readSessionAttachment } = await import('./sessionNames.js');
+    const pulled = await sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body', 'pulled by hand']]), a.host);
+    await sessionMessageCommand('inbox', cmd([]), b.host);
+    const fresh = await sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body', 'still queued']]), a.host);
+    const transport = await b.host.transport();
+    const raw = await transport.signedPost('/agent-fabric/session-messages/poll', { recipientName: 'ops-claude', limit: 20 });
+    assert.deepEqual((raw.messages as Array<{ envelope: SessionMessage; delivery: { state: string } }>)
+      .map(item => [item.envelope.messageId, item.delivery.state]),
+    [[fresh.messageId, 'queued'], [pulled.messageId, 'delivered']], 'the platform poll lists both');
+    const attachment = (await readSessionAttachment(b.home, 'ops-claude'))!;
+    const { accepted } = await receiveSessionMessages(b.host, attachment, transport, await b.host.device());
+    assert.deepEqual(accepted.map(item => item.message.messageId), [fresh.messageId]);
   } finally { await a.cleanup(); await b.cleanup(); }
 });
 
@@ -307,7 +337,10 @@ test('inbox shows every message whose manual_pull report succeeded when a later 
     assert.equal(platform.messages.get(failing)!.delivery.state, 'queued');
     platform.failDelivered.clear();
     const again = await sessionMessageCommand('inbox', cmd([]), b.host);
-    assert.deepEqual((again.messages as Array<Record<string, unknown>>).map(item => item.messageId), [failing]);
+    const listed = new Map((again.messages as Array<Record<string, unknown>>).map(item => [item.messageId, item.delivery]));
+    assert.equal(listed.get(failing), 'reported', 'the message whose report failed is delivered now');
+    assert.equal(listed.get(ids[0]), 'already_delivered');
+    assert.equal(listed.get(ids[2]), 'already_delivered');
   } finally { await a.cleanup(); await b.cleanup(); }
 });
 
