@@ -172,3 +172,76 @@ test('tampered messages and platform errors inject nothing and never throw', asy
       'there is no Stop hook');
   } finally { await g.cleanup(); }
 });
+
+const contextOf = (output: string) => output === ''
+  ? '' : (JSON.parse(output) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
+const idsIn = (output: string, ids: string[]) => ids.filter(id => contextOf(output).includes(`id=${id}`));
+
+test('no new report after the internal deadline: unreported messages stay queued for the next prompt (F4)', async () => {
+  const f = await fixture();
+  try {
+    const ids = ['one', 'two', 'three'].map(body => f.platform.add(body).messageId);
+    let now = 0;
+    // Each platform call costs 5 s of hook time, so only the first report fits before the 8 s deadline.
+    const transport = f.platform.transport();
+    const slow: SessionMessageTransport = {
+      signedGet: async route => { now += 5_000; return transport.signedGet(route); },
+      signedPost: async (route, body) => { now += 5_000; return transport.signedPost(route, body); },
+    };
+    const host = { ...f.host, transport: async () => slow };
+    const first = await claudeHookCommand('inbox', { host, stdin: async () => f.prompt(), clock: () => now });
+    assert.equal(idsIn(first, ids).length, 1, 'only the message reported before the deadline is injected');
+    assert.equal(f.platform.reports.length, 1);
+    assert.equal([...f.platform.messages.values()].filter(item => item.delivery.state === 'queued').length, 2);
+    const second = await f.hook('inbox', f.prompt());
+    assert.equal(idsIn(second, ids).length, 2, 'the rest arrive on the next prompt');
+    assert.equal(idsIn(first, ids).concat(idsIn(second, ids)).sort().join(), [...ids].sort().join(), 'each exactly once');
+  } finally { await f.cleanup(); }
+});
+
+test('a frame reported by a hook that was killed before printing is injected first on the next prompt (F4)', async () => {
+  const f = await fixture();
+  try {
+    const killed = f.platform.add('reported, never printed');
+    const lost = f.platform.add('report sent, response lost');
+    const unsent = f.platform.add('spooled, report never reached the platform');
+    // What a killed hook leaves behind: its spool, with the platform already showing two of them delivered.
+    for (const message of [killed, lost]) {
+      f.platform.messages.get(message.messageId)!.delivery = { state: 'delivered', channel: 'claude_hook', outcome: 'processed' };
+    }
+    const frame = (message: SessionMessage) => `[Agent Fabric session message id=${message.messageId} from session ef to session ops-claude.]`;
+    await writeSessionStateFile(sessionStatePath(f.home, 'hook-spool', `${f.sessionId}.json`), {
+      schema: 'dharma.claude-hook-spool/v1', sessionId: f.sessionId, entries: [
+        { messageId: killed.messageId, frame: frame(killed), state: 'reported' },
+        { messageId: lost.messageId, frame: frame(lost), state: 'reporting' },
+        { messageId: unsent.messageId, frame: frame(unsent), state: 'reporting' },
+      ] });
+    const output = await f.hook('inbox', f.prompt());
+    const context = contextOf(output);
+    assert.deepEqual(idsIn(output, [killed.messageId, lost.messageId, unsent.messageId]),
+      [killed.messageId, lost.messageId, unsent.messageId]);
+    assert.ok(context.indexOf(`id=${killed.messageId}`) < context.indexOf(`id=${unsent.messageId}`), 'the spool comes first');
+    assert.equal(context.split(`id=${unsent.messageId}`).length - 1, 1, 'a queued spool entry is re-polled, injected once');
+    assert.deepEqual(f.platform.reports, [{ channel: 'claude_hook', outcome: 'processed' }], 'only the unsent one is reported now');
+    assert.equal(await f.hook('inbox', f.prompt()), '', 'the spool is empty once printed');
+  } finally { await f.cleanup(); }
+});
+
+test('one prompt injects at most 5 messages and 40,000 characters; the rest wait unreported (F4)', async () => {
+  const f = await fixture();
+  try {
+    const small = Array.from({ length: 7 }, (_, index) => f.platform.add(`small ${index}`).messageId);
+    const first = await f.hook('inbox', f.prompt());
+    assert.equal(idsIn(first, small).length, 5);
+    assert.equal(f.platform.reports.length, 5, 'nothing is reported that is not printed');
+    assert.equal(idsIn(await f.hook('inbox', f.prompt()), small).length, 2);
+  } finally { await f.cleanup(); }
+  const g = await fixture();
+  try {
+    const big = Array.from({ length: 3 }, () => g.platform.add('x'.repeat(15_000)).messageId);
+    const first = await g.hook('inbox', g.prompt());
+    assert.ok(contextOf(first).length <= 40_000, `context is ${contextOf(first).length} characters`);
+    assert.equal(idsIn(first, big).length, 2);
+    assert.equal(idsIn(await g.hook('inbox', g.prompt()), big).length, 1);
+  } finally { await g.cleanup(); }
+});

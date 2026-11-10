@@ -82,4 +82,8 @@ test('the name-session skill wraps the CLI and leaves the consent to the user', 
   assert.match(skill, /explicit/i);
   assert.match(skill, /untrusted/i);
   assert.doesNotMatch(skill, /Stop hook is/i);
+  // F5: a double-quoted body lets the shell expand $(...) or backticks that a message asked for.
+  assert.doesNotMatch(skill, /--body "/);
+  assert.match(skill, /dharma msg reply --message <id> --body-file - <<'EOF'\n<text>\nEOF/);
+  assert.match(skill, /dharma msg send --to <name> --body-file - <<'EOF'\n<text>\nEOF/);
 });

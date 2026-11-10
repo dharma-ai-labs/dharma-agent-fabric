@@ -59,7 +59,8 @@ async function inbox(host: SessionMessagingHost, stdin: () => Promise<string>) {
 
 /** `dharma hook claude session-start|inbox`, run by the 1.0.7-preview plugin hooks. Any failure
  * (no device, flag off, network, parse) prints nothing: the prompt is never blocked or changed. */
-export async function claudeHookCommand(action: string, input: { host: SessionMessagingHost; stdin: () => Promise<string> }):
+export async function claudeHookCommand(action: string, input: { host: SessionMessagingHost; stdin: () => Promise<string>;
+  clock?: () => number }):
   Promise<string> {
   if (action !== 'session-start' && action !== 'inbox') throw new Error('claude_hook_command_invalid');
   try {
