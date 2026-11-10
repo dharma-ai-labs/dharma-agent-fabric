@@ -240,7 +240,9 @@ test('a normal delivery: receipt before the queue call, queue id from stdout, de
     assert.match(String(receipt?.queueId), /^[0-9a-f-]{36}$/);
     assert.match(f.codex.calls[0]!, new RegExp(sessionMessageFrameKey(message.messageId)));
     assert.match(f.codex.calls[0]!, /untrusted/i);
-    assert.equal(f.codex.calls[0], frameSessionMessage(message));
+    // Each framing draws a fresh boundary token, so the queued frame is compared with it masked.
+    const unsealed = (frame: string) => frame.replace(/\b[0-9a-f]{24}\b/g, '<boundary>');
+    assert.equal(unsealed(f.codex.calls[0]!), unsealed(frameSessionMessage(message)));
     assert.ok(f.codex.calls[0]!.startsWith(sessionMessageFrameHeaderPrefix(message.messageId)));
     f.at(5_000);
     assert.deepEqual(actions(await f.tick()), ['waiting'], 'a pending row is waited for, never re-queued');
