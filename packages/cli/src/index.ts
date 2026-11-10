@@ -130,7 +130,7 @@ import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { readNamedSessionPackageContent, readNamedSessionRepositoryContext, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { sessionNamesCommand, type SessionMessagingHost } from './sessionNames.js';
-import { sessionMessageCommand } from './sessionMessageCommands.js';
+import { readSessionMessageStdin, sessionMessageCommand } from './sessionMessageCommands.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
@@ -6276,7 +6276,7 @@ function sessionMessagingHost(): SessionMessagingHost {
       return { organizationId: config.organizationId, deviceId: config.deviceId,
         privateKey: createPrivateKey({ key: identity.privateJwk, format: 'jwk' }) };
     },
-    transport: () => client() };
+    transport: () => client(), stdin: () => readSessionMessageStdin(process.stdin) };
 }
 
 async function readDeviceConfig(): Promise<DeviceConfig | null> {

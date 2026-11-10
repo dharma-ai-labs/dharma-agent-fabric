@@ -1,4 +1,5 @@
 import { createPublicKey, randomUUID, type KeyObject } from 'node:crypto';
+import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import {
   createSessionReplyToken,
   sessionMessageBodyHash,
@@ -12,7 +13,9 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import {
   acknowledgeSessionMessage,
+  isUncertainSessionTransportFailure,
   pollSessionMessages,
+  readSessionMessageDelivery,
   replySessionMessage,
   reportSessionMessageDelivered,
   sendSessionMessage,
@@ -127,18 +130,97 @@ function conflict(error: unknown) {
     || (error as { status?: unknown })?.status === 409;
 }
 
-/** Report one delivery; a message already delivered on another channel is reported as such, not retried. */
+/** Report one delivery; a message already delivered on another channel is reported as such, not retried.
+ * With `home`, a reply or ack the recipient parked during the delivering turn is posted right after. */
 export async function reportReceivedDelivery(transport: SessionMessageTransport, messageId: string, report: SessionDeliveredReport,
-  _home?: string) {
-  try { await reportSessionMessageDelivered(transport, messageId, report); return 'reported' as const; } catch (error) {
-    if (conflict(error)) return 'already_delivered' as const;
-    throw error;
+  home?: string) {
+  let result: 'reported' | 'already_delivered';
+  try { await reportSessionMessageDelivered(transport, messageId, report); result = 'reported'; } catch (error) {
+    if (!conflict(error)) throw error;
+    result = 'already_delivered';
   }
+  if (home !== undefined) {
+    try { await flushSessionOutbox(home, transport, messageId); } catch { /* stays parked; the next flush retries */ }
+  }
+  return result;
 }
 
-export async function flushSessionOutbox(_home: string, _transport: SessionMessageTransport, _messageId?: string):
-  Promise<Array<{ messageId: string; action: string }>> {
-  throw new Error('not_implemented');
+/** A reply or ack the recipient made while its message was still `queued` on the platform: the frozen
+ * contract allows `acknowledged` only after `delivered`, and a deliverer reports `delivered` only once the
+ * turn that carries the message has ended. The recipient's own request waits here (private file: it holds
+ * raw reply tokens) and is posted unchanged once the message is delivered. Nothing else ever acks. */
+interface ParkedSessionRequest {
+  schema: 'dharma.parked-session-request/v1';
+  messageId: string;
+  kind: 'reply' | 'ack';
+  reply: { envelope: SessionMessage; replyToken: string; nextReplyToken: string } | null;
+  parkedAt: string;
+}
+
+function outboxPath(home: string, messageId: string) {
+  if (!UUID.test(messageId)) throw new Error('session_message_id_invalid');
+  return sessionStatePath(home, 'outbox', `${messageId.toLowerCase()}.json`);
+}
+
+async function readParked(home: string, messageId: string) {
+  const value = await readSessionStateFile<ParkedSessionRequest>(outboxPath(home, messageId));
+  if (value && (value.schema !== 'dharma.parked-session-request/v1' || value.messageId !== messageId)) {
+    throw new Error('session_parked_request_invalid');
+  }
+  return value;
+}
+
+async function postParked(transport: SessionMessageTransport, parked: ParkedSessionRequest) {
+  if (parked.kind === 'ack') return acknowledgeSessionMessage(transport, parked.messageId);
+  return replySessionMessage(transport, { originalMessageId: parked.messageId, ...parked.reply! });
+}
+
+export type SessionOutboxAction = 'parked' | 'sent' | 'failed';
+
+/** Posts every parked request (or the one for `messageId`) whose message the platform no longer shows as
+ * `queued`. A request whose post is uncertain stays parked; a definitive refusal is dropped and reported. */
+export async function flushSessionOutbox(home: string, transport: SessionMessageTransport, messageId?: string):
+  Promise<Array<{ messageId: string; action: SessionOutboxAction; code?: string }>> {
+  let ids: string[];
+  if (messageId !== undefined) ids = [messageId];
+  else {
+    try {
+      ids = (await readdir(sessionStatePath(home, 'outbox'))).filter(entry => entry.endsWith('.json'))
+        .map(entry => entry.slice(0, -'.json'.length)).filter(id => UUID.test(id)).sort();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+  }
+  const results: Array<{ messageId: string; action: SessionOutboxAction; code?: string }> = [];
+  for (const id of ids) {
+    const parked = await readParked(home, id);
+    if (!parked) continue;
+    const delivery = await readSessionMessageDelivery(transport, id);
+    if (!delivery || delivery.state === 'queued') { results.push({ messageId: id, action: 'parked' }); continue; }
+    try {
+      await postParked(transport, parked);
+      results.push({ messageId: id, action: 'sent' });
+    } catch (error) {
+      if (isUncertainSessionTransportFailure(error)) { results.push({ messageId: id, action: 'parked' }); continue; }
+      results.push({ messageId: id, action: 'failed', code: error instanceof Error ? error.message.slice(0, 120) : 'unknown' });
+    }
+    await rm(outboxPath(home, id), { force: true });
+  }
+  return results;
+}
+
+/** Park the recipient's request while the platform still shows its message `queued`; post it otherwise.
+ * Returns `parked`, or the state the post left (the reply's own state, or the acknowledged original). */
+async function postOrPark(home: string, transport: SessionMessageTransport, parked: ParkedSessionRequest): Promise<string> {
+  const delivery = await readSessionMessageDelivery(transport, parked.messageId);
+  if (delivery?.state !== 'queued') return (await postParked(transport, parked)).state;
+  await writeSessionStateFile(outboxPath(home, parked.messageId), parked);
+  // A deliverer may have reported between the read and the write: flush once more, so nothing waits for
+  // a report that already happened.
+  const [flushed] = await flushSessionOutbox(home, transport, parked.messageId);
+  if (flushed?.action === 'failed') throw new Error(flushed.code ?? 'session_parked_request_failed');
+  return flushed?.action === 'sent' ? (parked.kind === 'ack' ? 'acknowledged' : 'queued') : 'parked';
 }
 
 function text(flags: Map<string, string | boolean>, key: string) {
@@ -147,14 +229,56 @@ function text(flags: Map<string, string | boolean>, key: string) {
   return value;
 }
 
+const MAX_BODY_FILE_BYTES = 262_144;
+
+/** Reads all of a bounded stream (for `--body-file -`). */
+export function readSessionMessageStdin(stream: NodeJS.ReadableStream, maxBytes = MAX_BODY_FILE_BYTES): Promise<string> {
+  return new Promise((done, fail) => {
+    let text = '';
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk: string) => {
+      text += chunk;
+      if (Buffer.byteLength(text) > maxBytes) { stream.removeAllListeners('data'); fail(new Error(OPTIONS_INVALID)); }
+    });
+    stream.once('end', () => done(text));
+    stream.once('error', fail);
+  });
+}
+
+/** `--body <text>` or `--body-file <path|->`, exactly one. A file or stdin body is taken literally, so a
+ * quoted heredoc reaches the platform with no shell expansion; one trailing newline is dropped. */
+async function bodyOption(flags: Map<string, string | boolean>, host: SessionMessagingHost) {
+  if (flags.has('body') === flags.has('body-file')) throw new Error(OPTIONS_INVALID);
+  if (flags.has('body')) return text(flags, 'body');
+  const source = text(flags, 'body-file');
+  let raw: string;
+  if (source === '-') {
+    if (!host.stdin) throw new Error(OPTIONS_INVALID);
+    raw = await host.stdin();
+  } else {
+    if ((await stat(source)).size > MAX_BODY_FILE_BYTES) throw new Error(OPTIONS_INVALID);
+    raw = await readFile(source, 'utf8');
+  }
+  const body = raw.replace(/\r?\n$/, '');
+  if (!body.trim()) throw new Error(OPTIONS_INVALID);
+  return body;
+}
+
+const dryRun = (flags: Map<string, string | boolean>) => flags.get('dry-run') === true;
+const expiry = (host: SessionMessagingHost) => new Date(host.now().getTime() + SESSION_MESSAGE_MAX_LIFETIME_MS).toISOString();
+
 async function send(flags: Map<string, string | boolean>, host: SessionMessagingHost) {
-  assertSessionFlags(flags, ['to', 'body', 'from', 'json'], ['json'], OPTIONS_INVALID);
+  assertSessionFlags(flags, ['to', 'body', 'body-file', 'from', 'dry-run', 'json'], ['dry-run', 'json'], OPTIONS_INVALID);
   const to = text(flags, 'to');
-  const body = text(flags, 'body');
   if (!SESSION_NAME_PATTERN.test(to) || flags.has('from') && !SESSION_NAME_PATTERN.test(String(flags.get('from')))) {
     throw new Error(OPTIONS_INVALID);
   }
+  const body = await bodyOption(flags, host);
   const from = await localAttachment(host.home, flags.get('from') as string | undefined, null);
+  if (dryRun(flags)) {
+    return { ok: true, stage: 'plan', effects: false, action: 'send', from: from.name, to, replyTo: null,
+      bodyCharacters: [...body].length, expiresAt: expiry(host) };
+  }
   const device = await host.device();
   await localAttachment(host.home, from.name, device);
   const { envelope, replyToken } = buildSessionMessage(device, from, { to, body, replyTo: null, now: host.now() });
@@ -173,13 +297,20 @@ async function inbox(flags: Map<string, string | boolean>, host: SessionMessagin
   const transport = await host.transport();
   const { accepted, refused } = await receiveSessionMessages(host, attachment, transport, device);
   const messages = [];
+  const reportFailed: Array<{ messageId: string; code: string }> = [];
   for (const { message, frame } of accepted) {
     // Recorded before it is shown: a manual pull stops any later automatic delivery of this message.
-    const delivery = await reportReceivedDelivery(transport, message.messageId, { channel: 'manual_pull' });
+    // A failed report is not shown (the message stays queued and comes back on the next inbox), and every
+    // message already recorded delivered is still shown.
+    let delivery: 'reported' | 'already_delivered';
+    try { delivery = await reportReceivedDelivery(transport, message.messageId, { channel: 'manual_pull' }, host.home); } catch (error) {
+      reportFailed.push({ messageId: message.messageId, code: error instanceof Error ? error.message.slice(0, 120) : 'unknown' });
+      continue;
+    }
     messages.push({ messageId: message.messageId, from: message.sender.name, to: message.recipient.name,
       sentAt: message.createdAt, replyTo: message.replyTo, delivery, frame });
   }
-  return { ok: true, channel: 'manual_pull', name: attachment.name, messages, refused };
+  return { ok: true, channel: 'manual_pull', name: attachment.name, messages, reportFailed, refused };
 }
 
 async function received(flags: Map<string, string | boolean>, host: SessionMessagingHost) {
@@ -190,26 +321,41 @@ async function received(flags: Map<string, string | boolean>, host: SessionMessa
   return record;
 }
 
+const PARKED_NOTE = 'The message is still being delivered to this session; this is sent as soon as its delivery is recorded.';
+const postedState = (state: string) => state === 'parked' ? { state, note: PARKED_NOTE } : { state };
+
 async function reply(flags: Map<string, string | boolean>, host: SessionMessagingHost) {
-  assertSessionFlags(flags, ['message', 'body', 'json'], ['json'], OPTIONS_INVALID);
-  const body = text(flags, 'body');
+  assertSessionFlags(flags, ['message', 'body', 'body-file', 'dry-run', 'json'], ['dry-run', 'json'], OPTIONS_INVALID);
+  const body = await bodyOption(flags, host);
   const original = await received(flags, host);
   if (!original.replyToken) throw new Error('session_reply_token_unavailable');
+  if (dryRun(flags)) {
+    await localAttachment(host.home, original.recipientName, null);
+    return { ok: true, stage: 'plan', effects: false, action: 'reply', from: original.recipientName,
+      to: original.envelope.sender.name, replyTo: original.envelope.messageId, bodyCharacters: [...body].length,
+      expiresAt: expiry(host) };
+  }
   const device = await host.device();
   const from = await localAttachment(host.home, original.recipientName, device);
   const { envelope, replyToken } = buildSessionMessage(device, from, { to: original.envelope.sender.name, body,
     replyTo: original.envelope.messageId, now: host.now() });
-  const result = await replySessionMessage(await host.transport(), { originalMessageId: original.envelope.messageId,
-    envelope, replyToken: original.replyToken, nextReplyToken: replyToken });
+  const state = await postOrPark(host.home, await host.transport(), { schema: 'dharma.parked-session-request/v1',
+    messageId: original.envelope.messageId, kind: 'reply',
+    reply: { envelope, replyToken: original.replyToken, nextReplyToken: replyToken }, parkedAt: host.now().toISOString() });
   return { ok: true, messageId: envelope.messageId, replyTo: original.envelope.messageId, from: from.name,
-    to: envelope.recipient.name, state: result.state };
+    to: envelope.recipient.name, ...postedState(state) };
 }
 
 async function ack(flags: Map<string, string | boolean>, host: SessionMessagingHost) {
-  assertSessionFlags(flags, ['message', 'json'], ['json'], OPTIONS_INVALID);
+  assertSessionFlags(flags, ['message', 'dry-run', 'json'], ['dry-run', 'json'], OPTIONS_INVALID);
   const original = await received(flags, host);
-  const result = await acknowledgeSessionMessage(await host.transport(), original.envelope.messageId);
-  return { ok: true, messageId: original.envelope.messageId, state: result.state };
+  if (dryRun(flags)) {
+    return { ok: true, stage: 'plan', effects: false, action: 'ack', messageId: original.envelope.messageId,
+      from: original.recipientName };
+  }
+  const state = await postOrPark(host.home, await host.transport(), { schema: 'dharma.parked-session-request/v1',
+    messageId: original.envelope.messageId, kind: 'ack', reply: null, parkedAt: host.now().toISOString() });
+  return { ok: true, messageId: original.envelope.messageId, ...postedState(state) };
 }
 
 /** `dharma msg send|inbox|reply|ack`. Inbox is the recipient's manual pull (channel `manual_pull`). */

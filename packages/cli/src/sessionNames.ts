@@ -77,8 +77,19 @@ export async function readSessionAttachment(home: string, name: string): Promise
   return value;
 }
 
-export async function readPendingSessionAttachment(_home: string, _name: string): Promise<LocalSessionAttachment | null> {
-  throw new Error('not_implemented');
+function pendingAttachmentPath(home: string, name: string) {
+  if (!SESSION_NAME_PATTERN.test(name)) throw new Error('session_name_invalid');
+  return sessionStatePath(home, 'attachments', `${name}.pending.json`);
+}
+
+/** An attach still waiting for its receipt. It sits beside the attachment, so a refused or lost
+ * re-attach never overwrites the attachment that works. */
+export async function readPendingSessionAttachment(home: string, name: string): Promise<LocalSessionAttachment | null> {
+  const value = await readSessionStateFile<LocalSessionAttachment>(pendingAttachmentPath(home, name));
+  if (value && (value.schema !== 'dharma.local-session-attachment/v1' || value.name !== name || value.pending !== true)) {
+    throw new Error('session_attachment_record_invalid');
+  }
+  return value;
 }
 
 /** Completed local attachments (not ones still waiting for their attach receipt). */
@@ -179,34 +190,44 @@ async function attach(flags: Map<string, string | boolean>, host: SessionMessagi
   if (flags.get('yes') !== true) throw new Error('session_attach_consent_required');
   const claude = options.provider === 'claude' ? await currentClaudeSession(host) : null;
   const device = await host.device();
-  const existing = await readSessionAttachment(host.home, options.name);
-  const sameSession = existing && existing.provider === options.provider && existing.organizationId === device.organizationId
-    && existing.deviceId === device.deviceId
-    && (options.provider === 'codex' ? existing.threadId === options.threadId : existing.claudeSessionId === claude!.sessionId);
-  const bindingId = sameSession ? existing.bindingId : randomUUID();
+  const onThisDevice = (record: LocalSessionAttachment | null) => record !== null
+    && record.organizationId === device.organizationId && record.deviceId === device.deviceId;
+  // A lost earlier attempt first (its binding may exist on the platform), then this device's binding
+  // for the name (a rebind to another thread or session keeps the binding id and its revision).
+  const pendingRecord = await readPendingSessionAttachment(host.home, options.name);
+  const existingRecord = await readSessionAttachment(host.home, options.name);
+  const previous = onThisDevice(pendingRecord) ? pendingRecord : onThisDevice(existingRecord) ? existingRecord : null;
+  const bindingId = previous?.bindingId ?? randomUUID();
   const request: ProviderSessionRegistrationV2 = { schema: 'dharma.provider-session-registration/v2', action: 'attach',
     organizationId: device.organizationId, deviceId: device.deviceId, bindingId, name: options.name,
     provider: options.provider, delivery: options.delivery, mode: 'cooperative',
-    expectedRevision: sameSession ? existing.revision : 0 };
+    expectedRevision: previous?.revision ?? 0 };
   if (!validateProviderSessionRegistrationV2Contract(request).ok) throw new Error('session_attach_options_invalid');
   const local: LocalSessionAttachment = { schema: 'dharma.local-session-attachment/v1', name: options.name,
     provider: options.provider, delivery: options.delivery, bindingId, organizationId: device.organizationId,
-    deviceId: device.deviceId, membershipId: sameSession ? existing.membershipId : null,
+    deviceId: device.deviceId, membershipId: previous?.membershipId ?? null,
     revision: request.expectedRevision, pending: true,
     ...(options.provider === 'codex' ? { threadId: options.threadId } : { claudeSessionId: claude!.sessionId, cwd: claude!.cwd }),
     updatedAt: host.now().toISOString() };
-  // Written before the call, so a retry after a lost response reuses this binding id.
-  await writeSessionStateFile(attachmentPath(host.home, options.name), local);
+  // Written before the call, beside the attachment, so a retry after a lost response reuses this binding id.
+  await writeSessionStateFile(pendingAttachmentPath(host.home, options.name), local);
   const transport = await host.transport();
   let receipt: Record<string, unknown>;
-  try { receipt = await transport.signedPost(SESSION_MESSAGE_ROUTES.attach, request); } catch (error) {
-    // The binding id and expected revision make the request idempotent: one identical retry.
-    if (!isUncertainSessionTransportFailure(error)) throw error;
-    receipt = await transport.signedPost(SESSION_MESSAGE_ROUTES.attach, request);
+  try {
+    try { receipt = await transport.signedPost(SESSION_MESSAGE_ROUTES.attach, request); } catch (error) {
+      // The binding id and expected revision make the request idempotent: one identical retry.
+      if (!isUncertainSessionTransportFailure(error)) throw error;
+      receipt = await transport.signedPost(SESSION_MESSAGE_ROUTES.attach, request);
+    }
+  } catch (error) {
+    // A definitive refusal took no effect: drop the pending record and keep the attachment as it was.
+    if (!isUncertainSessionTransportFailure(error)) await rm(pendingAttachmentPath(host.home, options.name), { force: true });
+    throw error;
   }
   if (!receiptMatches(receipt, request)) throw new Error('session_attach_receipt_invalid');
   await writeSessionStateFile(attachmentPath(host.home, options.name), { ...local, membershipId: receipt.membershipId,
     revision: receipt.revision, pending: false, updatedAt: receipt.updatedAt });
+  await rm(pendingAttachmentPath(host.home, options.name), { force: true });
   return { ok: true, name: receipt.name, state: receipt.state, provider: receipt.provider, delivery: receipt.delivery,
     mode: receipt.mode, revision: receipt.revision, replay: receipt.replay, consent: consentText(device.organizationId) };
 }
