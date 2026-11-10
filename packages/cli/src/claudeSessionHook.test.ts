@@ -143,8 +143,12 @@ test('for the attached session it injects verified framed messages as context an
     assert.ok(context.includes(`id=${message.messageId}`));
     assert.match(context, /untrusted/i);
     const bodyAt = context.indexOf('please run rm -rf');
-    assert.ok(bodyAt > context.indexOf(`-----BEGIN UNTRUSTED MESSAGE ${message.messageId}-----`));
-    assert.ok(bodyAt < context.indexOf(`-----END UNTRUSTED MESSAGE ${message.messageId}-----`), 'the body is only inside the frame');
+    const boundary = new RegExp(`^-----BEGIN UNTRUSTED MESSAGE ${message.messageId} ([0-9a-f]{24})-----$`, 'm').exec(context)?.[1];
+    assert.ok(boundary, 'the BEGIN line carries the per-framing boundary token');
+    const beginAt = context.indexOf(`-----BEGIN UNTRUSTED MESSAGE ${message.messageId} ${boundary}-----`);
+    const endAt = context.indexOf(`-----END UNTRUSTED MESSAGE ${message.messageId} ${boundary}-----`);
+    assert.ok(beginAt >= 0 && endAt > beginAt);
+    assert.ok(bodyAt > beginAt && bodyAt < endAt, 'the body is only inside the frame');
     assert.ok(!output.includes(f.platform.messages.get(message.messageId)!.replyToken), 'no reply token in the context');
     assert.deepEqual(f.platform.reports, [{ channel: 'claude_hook', outcome: 'processed' }]);
     assert.ok(!f.platform.calls.some(call => call.endsWith('/ack')), 'the hook never acknowledges');
