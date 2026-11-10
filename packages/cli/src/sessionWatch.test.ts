@@ -63,6 +63,8 @@ class Platform {
   readonly messages = new Map<string, { envelope: SessionMessage; replyToken: string; delivery: SessionMessageDeliveryStatus }>();
   readonly reports: Array<{ messageId: string; body: unknown }> = [];
   readonly acks: string[] = [];
+  /** Originals answered through the reply route (the recipient's own reply, never the watcher's). */
+  readonly replies: string[] = [];
 
   add(body: string): SessionMessage {
     const { token, tokenHash } = createSessionReplyToken();
@@ -94,8 +96,16 @@ class Platform {
             sender: { ...this.senderIds, publicKeyEd25519: createPublicKey(this.sender.privateKey).export({ format: 'jwk' }).x },
             delivery: item.delivery })) };
         }
-        const match = /\/session-messages\/([^/]+)\/(delivered|ack)$/.exec(route);
+        const match = /\/session-messages\/([^/]+)\/(delivered|ack|reply)$/.exec(route);
         if (match?.[2] === 'ack') { this.acks.push(match[1]!); throw new Error('watcher_must_never_ack'); }
+        if (match?.[2] === 'reply') {
+          const stored = this.messages.get(match[1]!)!;
+          stored.delivery = advanceSessionMessageDelivery(stored.delivery, { actor: 'recipient', state: 'acknowledged' });
+          this.replies.push(match[1]!);
+          const reply = body.envelope as SessionMessage;
+          this.messages.set(reply.messageId, { envelope: reply, replyToken: String(body.nextReplyToken), delivery: { state: 'queued' } });
+          return this.record(reply.messageId);
+        }
         if (match?.[2] === 'delivered') {
           const stored = this.messages.get(match[1]!)!;
           this.reports.push({ messageId: match[1]!, body });
@@ -450,5 +460,95 @@ test('watch needs --provider codex, a codex attachment and the explicit wake con
     assert.equal(result.name, 'ef');
     assert.match(String(result.consent), /starts a turn/);
     assert.deepEqual((result.entries as Array<{ action: string }>).map(entry => entry.action), ['queued']);
+  } finally { await f.cleanup(); }
+});
+
+test('two watchers on the same name never both queue: an exclusive lock per name (F2)', async () => {
+  const f = await setup(fake => [ok(fake)]);
+  try {
+    f.platform.add('only once');
+    const results = await Promise.allSettled([f.tick(), f.tick()]);
+    const fulfilled = results.filter(result => result.status === 'fulfilled');
+    const rejected = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+    assert.equal(fulfilled.length, 1);
+    assert.equal(rejected.length, 1);
+    assert.match(String(rejected[0]!.reason?.message), /session_watch_already_running/);
+    assert.equal(f.codex.calls.length, 1, 'exactly one codex queue call');
+    f.at(5_000);
+    assert.deepEqual(actions(await f.tick()), ['waiting'], 'the lock is released after each pass');
+    // A lock left by a process that no longer exists is taken over.
+    await writeFile(join(f.home, 'session-messages', 'watch', 'ef.lock'), JSON.stringify({ pid: 2_147_483_646, token: 'x' }));
+    f.at(10_000);
+    assert.deepEqual(actions(await f.tick()), ['waiting']);
+    assert.equal(f.codex.calls.length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('a turn that never ended is closed as aborted when the next turn starts, so its message is reported (F7)', async () => {
+  const thread = randomUUID();
+  const id = randomUUID();
+  const head = `${sessionMessageFrameHeaderPrefix(id)}ops-claude to session ef, sent x, new conversation.]\nbody`;
+  const killed = new Rollout(thread, START).started(START + 1, 't1').user(START + 2, 't1', head)
+    .started(START + 10, 't2').user(START + 11, 't2', 'next prompt after codex restarted');
+  const view = parseCodexRollout(killed.text(), thread);
+  assert.deepEqual(view.find(sessionMessageFrameKey(id)), { turnId: 't1', outcome: 'aborted' });
+  assert.equal(view.idleSince, null, 'the new turn is still open');
+  const f = await setup(fake => [ok(fake)]);
+  try {
+    f.platform.add('codex killed mid-turn');
+    await f.tick();
+    f.codex.drain(START + 1_000, 'open');
+    f.at(2_000);
+    assert.deepEqual(actions(await f.tick()), ['observed_turn_open']);
+    f.codex.rollout_.started(START + 3_000, randomUUID());
+    f.at(4_000);
+    assert.deepEqual(actions(await f.tick()), ['reported']);
+    assert.deepEqual(f.platform.reports[0]!.body, { channel: 'codex_queue', outcome: 'aborted' });
+  } finally { await f.cleanup(); }
+});
+
+test('a reply the recipient parked during the delivering turn is posted right after the delivered report (F1)', async () => {
+  const f = await setup(fake => [ok(fake)]);
+  try {
+    const message = f.platform.add('please answer');
+    await f.tick();
+    const turn = f.codex.drain(START + 1_000, 'open');
+    f.at(2_000);
+    assert.deepEqual(actions(await f.tick()), ['observed_turn_open']);
+    // Inside that turn the model runs `dharma msg reply`: the platform still shows queued, so it is parked.
+    const { sessionMessageCommand } = await import('./sessionMessageCommands.js');
+    const reply = await sessionMessageCommand('reply', new Map([['message', message.messageId], ['body', 'answer']]), f.host);
+    assert.equal(reply.state, 'parked');
+    assert.deepEqual(f.platform.replies, []);
+    f.codex.rollout_.complete(START + 3_000, turn);
+    f.at(4_000);
+    assert.deepEqual(actions(await f.tick()), ['reported']);
+    assert.deepEqual(f.platform.replies, [message.messageId], 'posted once, right after delivered');
+    assert.equal(f.platform.messages.get(message.messageId)!.delivery.state, 'acknowledged');
+    f.at(9_000);
+    await f.tick();
+    assert.deepEqual(f.platform.replies, [message.messageId]);
+    assert.deepEqual(f.platform.acks, [], 'the watcher never acknowledges on its own');
+  } finally { await f.cleanup(); }
+});
+
+test('watch --dry-run returns the name, thread and wake consent with no device read, lock or Codex call (F8)', async () => {
+  const f = await setup(fake => [ok(fake)]);
+  try {
+    let ports = 0;
+    const host: SessionMessagingHost = { ...f.host, device: async () => { throw new Error('device_read_in_dry_run'); },
+      transport: async () => { throw new Error('network_in_dry_run'); } };
+    const plan = await sessionWatchCommand(new Map<string, string | boolean>([['provider', 'codex'], ['dry-run', true]]), host, () => { ports += 1; return f.codex; });
+    assert.equal(plan.stage, 'plan');
+    assert.equal(plan.effects, false);
+    assert.equal(plan.name, 'ef');
+    assert.equal(plan.threadId, f.threadId);
+    assert.equal(plan.allowWake, false);
+    assert.match(String(plan.consent), /starts a turn/);
+    assert.equal(ports, 0);
+    const consented = await sessionWatchCommand(new Map<string, string | boolean>([['provider', 'codex'], ['allow-wake', true],
+      ['dry-run', true]]), host, () => f.codex);
+    assert.equal(consented.allowWake, true);
+    assert.equal(f.codex.calls.length, 0);
   } finally { await f.cleanup(); }
 });
