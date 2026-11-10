@@ -142,6 +142,7 @@ test('the built ZIP has a root plugin.json and mcp.json, the assets and the skil
   assert.equal(server.url, codexMcp.mcpServers[serverName].url, 'same endpoint as the Codex .mcp.json');
   assert.match(server.url, /^https:\/\//);
   assert.equal(server.type, 'streamable-http', 'the portable format declares a transport type');
+  assert.deepEqual(server.extensions?.['com.openai']?.auth, { type: 'oauth', client: { mode: 'dcr' } }, 'the portal reads auth from mcp.json: Clerk OAuth with dynamic client registration, no client id or secret');
 });
 
 test('the build is byte-for-byte reproducible', () => {
@@ -198,6 +199,13 @@ test('the validator rejects hooks, app references, missing icons and wrong case 
   assert.match(problems(withManifest(manifest => { manifest.extensions['com.openai'].review.test_cases.positive.push({ description: 'x', prompt: 'x', tools_triggered: 'x', expected_behavior: 'x' }); })), /exactly 5 positive/);
   assert.match(problems(withManifest(manifest => { manifest.extensions['com.openai'].review.test_cases.negative.pop(); })), /exactly 3 negative/);
   assert.match(problems(withManifest(manifest => { manifest.extensions['com.openai'].review.test_credentials = {}; })), /test_credentials/);
+  const withMcp = edit => {
+    const mcp = JSON.parse(good.get('mcp.json').toString('utf8'));
+    edit(Object.values(mcp.mcpServers)[0]);
+    return new Map([...good, ['mcp.json', Buffer.from(JSON.stringify(mcp))]]);
+  };
+  assert.match(problems(withMcp(server => { delete server.extensions; })), /auth/);
+  assert.match(problems(withMcp(server => { server.extensions['com.openai'].auth.client.clientSecret = 'x'; })), /secret/);
   const withoutRootManifest = new Map(good);
   withoutRootManifest.delete('plugin.json');
   assert.match(problems(withoutRootManifest), /plugin\.json/);
