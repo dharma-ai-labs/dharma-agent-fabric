@@ -83,6 +83,62 @@ full list. Other clients still see all 65 tools. The filter is a platform
 change and is not part of this package. With it live, the platform condition
 for submission is met; the submission itself is still the owner's action.
 
+## Plugin package (ZIP for the OpenAI plugin portal)
+
+ChatGPT and Codex share one public plugin directory, so one plugin ZIP
+uploaded at the OpenAI plugin portal covers both. Only one review can be
+active per plugin, so there is no separate Codex submission.
+
+`node scripts/openai-plugin-package.mjs` builds the ZIP and refuses to write
+it if any rule below fails. Its contents, all at the ZIP root:
+
+| ZIP path | Source |
+| --- | --- |
+| `plugin.json` | `openai-app/package/plugin.json`, plus `extensions["com.openai"].review.test_cases` generated from the submission file |
+| `mcp.json` | `openai-app/package/mcp.json` (one `streamable-http` server, the same URL as `.mcp.json`) |
+| `assets/logo.png`, `assets/composer-icon.png` | `assets/` |
+| `skills/dharma-agent-fabric/` | `skills/dharma-agent-fabric/` |
+
+Rules the packager checks (`npm run plugin:openai-package:check` tests them):
+
+- a root `plugin.json` with settings under `extensions["com.openai"]`, so the
+  `.codex-plugin/plugin.json` overlay is not used and is not shipped;
+- `interface.logo` and `interface.composerIcon` are `./`-prefixed paths to
+  square PNGs in the ZIP, 48 to 4096 pixels and at most 5 MiB each (Codex
+  package validation requires both);
+- exactly five positive and three negative review cases, each with the fields
+  OpenAI names (`description`, `prompt`, `tools_triggered`,
+  `expected_behavior`; negative cases `description` and `prompt`);
+- no lifecycle hooks and no app references (`hooks`, `apps`, `.app.json`);
+- no `test_credentials` or `reviewer_instructions`: the reviewer password is
+  entered in the portal's Review details form, never in the ZIP;
+- no `{{...}}` placeholder left, unless `--allow-placeholders` builds a draft;
+- exactly one MCP server with a transport type and an `https` URL.
+
+To build the ZIP for upload, from the repository root, with the substituted
+copy of `chatgpt-app-submission.json` that stays outside the repository:
+
+```sh
+node scripts/openai-app-submission-filled.mjs <substituted-copy.json>
+node scripts/openai-plugin-package.mjs --submission <substituted-copy.json> --demo-recording-url <https URL of the walkthrough> --out <outside-the-repo>/dharma-agent-fabric-1.0.4.zip
+```
+
+A draft from the committed file (`--allow-placeholders`) is for checking the
+layout only and must never be uploaded for review.
+
+The icons are the Dharma mark already shipped as the Claude plugin icon
+(`plugins/claude/dharma-agent-fabric/assets/logo.png`). Brand OS still lists
+the mark as proposed, so the owner confirms it, or supplies a replacement,
+before upload. Country availability (`publication.countries`) and the video
+walkthrough URL are not set in the package yet.
+
+The fifth positive case of the earlier app submission was dropped: it
+expected `fabric_list_workspaces` to fail with `insufficient_scope` for a
+`developer` member. It was the only positive case whose correct result is an
+error, which a reviewer can read as a failed case, and the other five cover
+identity, agents, trajectories, evidence and control-agent conversations. The
+former TC-6 is now TC-5.
+
 ## Keeping the package in step with the server
 
 - `npm run mcp:catalog:verify` checks that the catalog and the test cases

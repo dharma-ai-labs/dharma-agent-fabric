@@ -8,7 +8,11 @@ It contains:
 - `.mcp.json` for the OAuth-protected remote MCP server
 - `skills/dharma-agent-fabric/SKILL.md`
 - Skill-local references
+- `assets/` with the `logo` and `composerIcon` icons
 - `openai-app/` publication, security, and reviewer documentation
+- `openai-app/package/` the root `plugin.json` and `mcp.json` for the OpenAI
+  plugin portal ZIP, built with `node scripts/openai-plugin-package.mjs`
+  (see `openai-app/README.md`)
 
 The plugin connects Codex to `https://mcp.dharma-ai.io/mcp`. The MCP server
 authenticates with Clerk OAuth, enforces active Dharma organization membership,

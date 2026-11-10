@@ -11,6 +11,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
 
 const root = resolve(import.meta.dirname, '..');
@@ -21,7 +22,7 @@ const readJson = path => JSON.parse(readFileSync(path, 'utf8'));
 const submission = readJson(resolve(appDir, 'chatgpt-app-submission.json'));
 const codexManifest = readJson(resolve(pluginDir, '.codex-plugin/plugin.json'));
 const codexMcp = readJson(resolve(pluginDir, '.mcp.json'));
-const loadPackager = () => import(script);
+const loadPackager = () => import(pathToFileURL(script).href);
 
 // Reads a ZIP independently of the packager, so the packager does not check
 // its own output.

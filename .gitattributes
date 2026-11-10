@@ -18,3 +18,4 @@ plugins/claude/dharma-agent-fabric/skills/dharma-agent-fabric/references/securit
 plugins/claude/dharma-agent-fabric/skills/dharma-agent-fabric/references/skill-releases.md text eol=lf
 plugins/claude/dharma-agent-fabric/skills/dharma-agent-fabric/references/task-orchestration.md text eol=lf
 plugins/claude/dharma-agent-fabric/skills/dharma-agent-fabric/references/trajectory-sync.md text eol=lf
+plugins/dharma-agent-fabric/openai-app/package/*.json text eol=lf
