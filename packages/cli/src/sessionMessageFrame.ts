@@ -43,8 +43,11 @@ function reading(body: string): { text: string; from: number[]; to: number[] } {
   for (const char of body) {
     const end = at + char.length;
     if (!INVISIBLE.test(char)) {
-      for (const unit of [...char.normalize('NFKC').toLowerCase()].map(c => LOOKALIKES[c] ?? c).join('')) {
-        text += unit;
+      const read = [...char.normalize('NFKC').toLowerCase()].map(c => LOOKALIKES[c] ?? c).join('');
+      text += read;
+      // One entry per UTF-16 unit (not per code point): match indexes count units, and an astral
+      // character such as an emoji is two of them.
+      for (let unit = 0; unit < read.length; unit++) {
         from.push(at);
         to.push(end);
       }
