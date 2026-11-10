@@ -3662,7 +3662,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       hostScope,
       onFailureDiagnostic: diagnostic => {
         process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
-        const message = setupClaimFailureMessage(diagnostic);
+        const message = setupClaimFailureMessage(diagnostic, {home: dharmaHome(), platform: claimPlatform});
         if (message) process.stderr.write(`${message}\n`);
       },
       onRecipientApprovalRequired: async approval => {

@@ -8,7 +8,7 @@ import {
 import { createSystemSecureStore, type SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 import {HostOperationFence, type HostOperationScope} from './hostOperationScope.js';
 import {
-  loadOrCreateDeviceIdentity, normalizeHqUrl, normalizeRelayUrl, saveDeviceConfig,
+  loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, normalizeRelayUrl, saveDeviceConfig,
   saveDeviceEnrollmentAnchor, saveOrganizationApiToken,
   type DeviceConfig, type BootstrapEnrollmentResult, type BootstrapRecipientApproval,
 } from './index.js';
@@ -31,7 +31,9 @@ const SERVER_CODES = new Set([
 export type SetupClaimFailurePhase = 'input_validation' | 'store_preflight' | 'identity' | 'challenge'
   | 'signing' | 'finalize' | 'recipient_approval' | 'credential_validation' | 'credential_commit';
 export type SetupClaimFailureReason = 'approval_expired' | 'server_rejected' | 'network_unavailable'
-  | 'response_invalid' | 'canceled';
+  | 'response_invalid' | 'canceled' | 'stale_home';
+/** Local remedy context for the CLI's own line; never part of the diagnostic record. */
+export interface SetupClaimFailureContext { home?: string; platform?: DeviceConfig['platform'] }
 export interface SetupClaimFailureDiagnostic {
   schema: 'dharma.setup-claim-failure/v1';
   code: 'setup_claim_failed';
@@ -42,8 +44,20 @@ export interface SetupClaimFailureDiagnostic {
 }
 
 /** Fixed wording plus allowlisted fields only: never server text, approval URLs or caught errors. */
-export function setupClaimFailureMessage(diagnostic: Readonly<SetupClaimFailureDiagnostic>): string | undefined {
+export function setupClaimFailureMessage(diagnostic: Readonly<SetupClaimFailureDiagnostic>,
+  context: SetupClaimFailureContext = {}): string | undefined {
   if (!diagnostic.reason) return undefined;
+  if (diagnostic.reason === 'stale_home') {
+    // Suggest a sibling folder only; the old home is evidence and is never removed for the user.
+    const next = context.home ? `${context.home}-2` : undefined;
+    const command = !next ? '' : context.platform === 'windows'
+      ? ` in a new terminal: setx DHARMA_HOME "${next}"`
+      : `: export DHARMA_HOME="${next}" (add it to your shell profile to keep it)`;
+    return `${diagnostic.code} (stale_home): The Dharma home ${context.home ? `${context.home} ` : ''}belongs to an `
+      + 'earlier enrollment whose device key is no longer in this OS user\'s protected store, so setup cannot use it. '
+      + 'Nothing was changed or deleted, and this setup prompt was not used. Point DHARMA_HOME at a new empty folder, '
+      + `then run the same setup prompt again${command}. Keep the old folder until the new device is approved.`;
+  }
   const retry = 'Get a fresh setup prompt from Dharma and run it.';
   const text = {
     approval_expired: `Browser approval expired: setup did not receive an approval in time. ${retry}`,
@@ -182,9 +196,19 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     await assertScope();
     // Existing protected identity access fails before challenge/approval/effects.
     phase = 'identity';
+    const existing = input.existingConfig;
+    if (existing && existing.organizationId === input.organizationId && normalizeHqUrl(existing.hqUrl) === hqUrl
+      && existing.installationId === input.installationId) {
+      // A home whose device key is gone (or replaced) from this OS user's protected store can never
+      // claim again. Say so before minting a key that could not match its device.json.
+      try { await loadDeviceIdentity({config: existing, store}); }
+      catch (error) {
+        if (error instanceof Error && error.message === 'relay_host_device_identity_unavailable') failureReason = 'stale_home';
+        throw error;
+      }
+    }
     const identity = await loadOrCreateDeviceIdentity({ hqUrl, organizationId: input.organizationId,
       installationId: input.installationId, store });
-    const existing = input.existingConfig;
     if (existing && (existing.organizationId !== input.organizationId || normalizeHqUrl(existing.hqUrl) !== hqUrl
       || existing.publicKeyEd25519 !== identity.publicKeyEd25519 || existing.installationId !== input.installationId)) return fail();
     const encryption = generateKeyPairSync('x25519');
