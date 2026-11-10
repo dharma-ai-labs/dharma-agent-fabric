@@ -193,7 +193,8 @@ async function attach(flags: Map<string, string | boolean>, host: SessionMessagi
   const onThisDevice = (record: LocalSessionAttachment | null) => record !== null
     && record.organizationId === device.organizationId && record.deviceId === device.deviceId;
   // A lost earlier attempt first (its binding may exist on the platform), then this device's binding
-  // for the name (a rebind to another thread or session keeps the binding id and its revision).
+  // for the name (a rebind to another thread or session keeps the binding id). `attach` always carries
+  // expectedRevision 0 (the P1p rule): a binding id the platform already holds comes back as a replay.
   const pendingRecord = await readPendingSessionAttachment(host.home, options.name);
   const existingRecord = await readSessionAttachment(host.home, options.name);
   const previous = onThisDevice(pendingRecord) ? pendingRecord : onThisDevice(existingRecord) ? existingRecord : null;
@@ -201,12 +202,12 @@ async function attach(flags: Map<string, string | boolean>, host: SessionMessagi
   const request: ProviderSessionRegistrationV2 = { schema: 'dharma.provider-session-registration/v2', action: 'attach',
     organizationId: device.organizationId, deviceId: device.deviceId, bindingId, name: options.name,
     provider: options.provider, delivery: options.delivery, mode: 'cooperative',
-    expectedRevision: previous?.revision ?? 0 };
+    expectedRevision: 0 };
   if (!validateProviderSessionRegistrationV2Contract(request).ok) throw new Error('session_attach_options_invalid');
   const local: LocalSessionAttachment = { schema: 'dharma.local-session-attachment/v1', name: options.name,
     provider: options.provider, delivery: options.delivery, bindingId, organizationId: device.organizationId,
     deviceId: device.deviceId, membershipId: previous?.membershipId ?? null,
-    revision: request.expectedRevision, pending: true,
+    revision: previous?.revision ?? 0, pending: true,
     ...(options.provider === 'codex' ? { threadId: options.threadId } : { claudeSessionId: claude!.sessionId, cwd: claude!.cwd }),
     updatedAt: host.now().toISOString() };
   // Written before the call, beside the attachment, so a retry after a lost response reuses this binding id.

@@ -102,16 +102,21 @@ function attestedKey(item: PolledSessionMessage) {
   };
 }
 
-export interface AcceptedSessionMessage { message: SessionMessage; frame: string }
+export interface AcceptedSessionMessage { message: SessionMessage; frame: string; queued: boolean }
 
 /** Poll for one attached name, verify every envelope (own org, attested sender key, exact recipient),
  * and keep each verified message locally. Refused envelopes are neither stored nor delivered.
- * The caller reports `delivered` on its own channel. */
+ * The caller reports `delivered` on its own channel.
+ * The platform poll also lists `delivered` messages whose reply token is unused, so the recipient can still
+ * reply. Those are not new deliveries: a deliverer (hook, watcher) gets only `queued` ones; the manual
+ * inbox passes `includeDelivered` to list them again, marked `queued: false`. */
 export async function receiveSessionMessages(host: SessionMessagingHost, attachment: LocalSessionAttachment,
-  transport: SessionMessageTransport, device: SessionMessagingDevice) {
+  transport: SessionMessageTransport, device: SessionMessagingDevice, options: { includeDelivered?: boolean } = {}) {
   const accepted: AcceptedSessionMessage[] = [];
   const refused: Array<{ messageId: string; reason: SessionMessageVerificationReason }> = [];
   for (const item of await pollSessionMessages(transport, attachment.name)) {
+    const queued = item.delivery.state === 'queued';
+    if (!queued && (options.includeDelivered !== true || item.delivery.state !== 'delivered')) continue;
     const verified = verifySessionMessage(item.envelope, { organizationId: device.organizationId,
       resolveDevicePublicKey: attestedKey(item), recipientName: attachment.name }, host.now());
     if (!verified.ok) { refused.push({ messageId: String(item.envelope.messageId), reason: verified.reason }); continue; }
@@ -120,7 +125,7 @@ export async function receiveSessionMessages(host: SessionMessagingHost, attachm
       replyToken: sha256(item.replyToken) === message.replyTokenHash ? item.replyToken : null,
       recipientName: attachment.name, receivedAt: host.now().toISOString() };
     await writeSessionStateFile(receivedPath(host.home, message.messageId), record);
-    accepted.push({ message, frame: frameSessionMessage(message) });
+    accepted.push({ message, frame: frameSessionMessage(message), queued });
   }
   return { accepted, refused };
 }
@@ -295,15 +300,16 @@ async function inbox(flags: Map<string, string | boolean>, host: SessionMessagin
   const device = await host.device();
   const attachment = await localAttachment(host.home, name, device);
   const transport = await host.transport();
-  const { accepted, refused } = await receiveSessionMessages(host, attachment, transport, device);
+  const { accepted, refused } = await receiveSessionMessages(host, attachment, transport, device, { includeDelivered: true });
   const messages = [];
   const reportFailed: Array<{ messageId: string; code: string }> = [];
-  for (const { message, frame } of accepted) {
+  for (const { message, frame, queued } of accepted) {
     // Recorded before it is shown: a manual pull stops any later automatic delivery of this message.
     // A failed report is not shown (the message stays queued and comes back on the next inbox), and every
-    // message already recorded delivered is still shown.
-    let delivery: 'reported' | 'already_delivered';
-    try { delivery = await reportReceivedDelivery(transport, message.messageId, { channel: 'manual_pull' }, host.home); } catch (error) {
+    // message already recorded delivered is still shown. A message the platform already lists as delivered
+    // (not yet replied to) is listed again as `already_delivered`, with no second report.
+    let delivery: 'reported' | 'already_delivered' = 'already_delivered';
+    if (queued) try { delivery = await reportReceivedDelivery(transport, message.messageId, { channel: 'manual_pull' }, host.home); } catch (error) {
       reportFailed.push({ messageId: message.messageId, code: error instanceof Error ? error.message.slice(0, 120) : 'unknown' });
       continue;
     }
