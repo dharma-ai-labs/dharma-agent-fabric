@@ -20,9 +20,13 @@ async function stderrFor(diagnostic: Record<string, string>) {
   const lines: string[] = [];
   const process = {stderr: {write: (line: string) => {lines.push(line);}}};
   const message = (relayClient as unknown as Record<string, unknown>).setupClaimFailureMessage;
-  compileFunction(compiled, ['process', 'setupClaimFailureMessage'])(process, message)(diagnostic);
+  const dharmaHome = () => home;
+  compileFunction(compiled, ['process', 'setupClaimFailureMessage', 'dharmaHome', 'claimPlatform'])(
+    process, message, dharmaHome, platformName)(diagnostic);
   return lines;
 }
+let home = '/home/dev/.dharma';
+let platformName = 'linux';
 const report = {schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'finalize'};
 const correlationId = '55555555-5555-4555-8555-555555555555';
 
@@ -46,6 +50,20 @@ test('other finalize failures print their typed reason and server code', async (
     ['canceled', /Setup was canceled/]] as const) {
     assert.match((await stderrFor({...report, reason}))[1]!, text);
   }
+});
+
+// G20 finding 1: a stale Dharma home stopped setup at identity with exit 2 and no remedy text.
+test('a stale Dharma home prints the record, then the home path and the exact DHARMA_HOME remedy', async () => {
+  const diagnostic = {...report, phase: 'identity', reason: 'stale_home'};
+  home = 'C:\\Users\\dharma\\.dharma'; platformName = 'windows';
+  try {
+    const lines = await stderrFor(diagnostic);
+    assert.deepEqual(JSON.parse(lines[0]!), diagnostic);
+    assert.equal(lines.length, 2);
+    assert.match(lines[1]!, /^setup_claim_failed \(stale_home\): The Dharma home C:\\Users\\dharma\\\.dharma belongs to an earlier enrollment/);
+    assert.match(lines[1]!, /Nothing was changed or deleted/);
+    assert.match(lines[1]!, /setx DHARMA_HOME "C:\\Users\\dharma\\\.dharma-2"/);
+  } finally { home = '/home/dev/.dharma'; platformName = 'linux'; }
 });
 
 test('a phase without a typed reason keeps its existing single diagnostic line', async () => {

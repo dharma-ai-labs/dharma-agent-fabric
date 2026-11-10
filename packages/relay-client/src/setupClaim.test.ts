@@ -4,8 +4,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { claimSetupReference, parseSetupClaimRecipientApproval, setupClaimSourceRegistration } from './setupClaim.js';
-import {loadOrganizationApiToken, saveDeviceEnrollmentAnchor, type DeviceConfig} from './index.js';
+import { claimSetupReference, parseSetupClaimRecipientApproval, setupClaimFailureMessage, setupClaimSourceRegistration } from './setupClaim.js';
+import {loadOrCreateDeviceIdentity, loadOrganizationApiToken, saveDeviceEnrollmentAnchor, type DeviceConfig} from './index.js';
 import { sealSetupClaimCredential, signCanonicalObject, setupClaimSigningPayload, validateContract,
   type SetupClaimChallenge, type SealedSetupClaimCredential, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
@@ -48,6 +48,88 @@ test('claim failures expose only the locally observed phase, never vendor conten
     assert.equal(JSON.stringify(reports).includes('secret-canary'), false);
     assert.equal(requests, value.phase === 'challenge' ? 1 : 0);
   }
+});
+
+// G20 finding 1: a Dharma home whose device key is gone from this OS user's protected store failed at
+// identity with no remedy, after writing a fresh key that could never match the home's device.json.
+test('a stale Dharma home fails at identity as stale_home, before any key write or request', async () => {
+  const installationId = '44444444-4444-4444-8444-444444444444';
+  const existingConfig: DeviceConfig = {schema: 'dharma.device-config/v1', hqUrl: scope.hqUrl,
+    organizationId: scope.organizationId, installationId, deviceId: '33333333-3333-4333-8333-333333333333',
+    deviceName: 'Earlier device', platform: 'linux', publicKeyEd25519: 'A'.repeat(43),
+    serverPublicKeyEd25519: 'B'.repeat(43), relayUrl: 'wss://relay.example', enrolledAt: '2026-11-01T00:00:00.000Z'};
+  for (const storedKey of ['missing', 'different'] as const) {
+    const memory = store();
+    if (storedKey === 'different') {
+      await loadOrCreateDeviceIdentity({hqUrl: scope.hqUrl, organizationId: scope.organizationId, installationId, store: memory});
+    }
+    const writes: string[] = []; const put = memory.put;
+    memory.put = async (key, value) => { writes.push(key); return put.call(memory, key, value); };
+    const reports: unknown[] = []; let requests = 0;
+    await assert.rejects(claimSetupReference({...scope, installationId, existingConfig, store: memory,
+      onFailureDiagnostic: report => { reports.push(report); },
+      fetcher: async () => { requests++; throw new Error('unexpected request'); }}), /^Error: setup_claim_failed$/);
+    assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed',
+      phase: 'identity', reason: 'stale_home'}], storedKey);
+    assert.equal(requests, 0, storedKey);
+    assert.deepEqual(writes.filter(key => !key.startsWith('setup-claim-preflight-')), [], `${storedKey}: no key is written`);
+    const validation = await validateContract(resolve(import.meta.dirname, '../../../schemas'),
+      'https://schemas.dharma-ai.io/setup-claim-failure/v1', reports[0]);
+    assert.equal(validation.ok, true, JSON.stringify(validation));
+  }
+});
+
+test('a home of the same device with its key present is not reported stale', async () => {
+  const installationId = '44444444-4444-4444-8444-444444444444';
+  const memory = store();
+  const identity = await loadOrCreateDeviceIdentity({hqUrl: scope.hqUrl, organizationId: scope.organizationId,
+    installationId, store: memory});
+  const existingConfig: DeviceConfig = {schema: 'dharma.device-config/v1', hqUrl: scope.hqUrl,
+    organizationId: scope.organizationId, installationId, deviceId: '33333333-3333-4333-8333-333333333333',
+    deviceName: 'Same device', platform: 'linux', publicKeyEd25519: identity.publicKeyEd25519,
+    serverPublicKeyEd25519: 'B'.repeat(43), relayUrl: 'wss://relay.example', enrolledAt: '2026-11-01T00:00:00.000Z'};
+  const reports: Array<{phase?: string; reason?: string}> = []; let requests = 0;
+  await assert.rejects(claimSetupReference({...scope, installationId, existingConfig, store: memory,
+    onFailureDiagnostic: report => { reports.push(report); },
+    fetcher: async () => { requests++; throw new Error('offline'); }}), /^Error: setup_claim_failed$/);
+  assert.equal(requests, 1);
+  assert.deepEqual(reports.map(report => [report.phase, report.reason]), [['challenge', 'network_unavailable']]);
+});
+
+test('a locked protected store with an existing home is not misreported as a stale home', async () => {
+  const installationId = '44444444-4444-4444-8444-444444444444';
+  const locked = store(); const get = locked.get;
+  locked.get = async key => {
+    if (key.startsWith('setup-claim-preflight-')) return get.call(locked, key);
+    throw new Error('secret-canary');
+  };
+  const existingConfig: DeviceConfig = {schema: 'dharma.device-config/v1', hqUrl: scope.hqUrl,
+    organizationId: scope.organizationId, installationId, deviceId: '33333333-3333-4333-8333-333333333333',
+    deviceName: 'Earlier device', platform: 'linux', publicKeyEd25519: 'A'.repeat(43),
+    serverPublicKeyEd25519: 'B'.repeat(43), relayUrl: 'wss://relay.example', enrolledAt: '2026-11-01T00:00:00.000Z'};
+  const reports: unknown[] = [];
+  await assert.rejects(claimSetupReference({...scope, installationId, existingConfig, store: locked,
+    onFailureDiagnostic: report => { reports.push(report); }}), /^Error: setup_claim_failed$/);
+  assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'identity'}]);
+});
+
+test('the stale-home message names the home, the exact DHARMA_HOME remedy and that nothing was deleted', () => {
+  const diagnostic = {schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'identity',
+    reason: 'stale_home'} as const;
+  // Untyped call: the red commit's message function takes one argument.
+  const message = setupClaimFailureMessage as unknown as (...args: unknown[]) => string | undefined;
+  const stale = 'belongs to an earlier enrollment whose device key is no longer in this OS user\'s protected store, '
+    + 'so setup cannot use it. Nothing was changed or deleted, and this setup prompt was not used. '
+    + 'Point DHARMA_HOME at a new empty folder, then run the same setup prompt again';
+  assert.equal(message(diagnostic, {home: '/home/dev/.dharma', platform: 'linux'}),
+    `setup_claim_failed (stale_home): The Dharma home /home/dev/.dharma ${stale}: `
+    + 'export DHARMA_HOME="/home/dev/.dharma-2" (add it to your shell profile to keep it). '
+    + 'Keep the old folder until the new device is approved.');
+  assert.equal(message(diagnostic, {home: 'C:\\Users\\dev\\.dharma', platform: 'windows'}),
+    `setup_claim_failed (stale_home): The Dharma home C:\\Users\\dev\\.dharma ${stale} in a new terminal: `
+    + 'setx DHARMA_HOME "C:\\Users\\dev\\.dharma-2". Keep the old folder until the new device is approved.');
+  assert.equal(message(diagnostic), `setup_claim_failed (stale_home): The Dharma home ${stale}. `
+    + 'Keep the old folder until the new device is approved.');
 });
 
 test('diagnostic observer failure cannot replace the sanitized claim failure', async () => {
