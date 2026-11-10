@@ -56,7 +56,8 @@ class Rollout {
   text() { return this.lines.map(line => `${line}\n`).join(''); }
 }
 
-/** Platform stand-in: poll returns queued messages for `ef`; it records delivered reports and refuses any ack. */
+/** Platform stand-in: poll in the P2p shape (queued first, then delivered messages whose reply token is unused);
+ * it records delivered reports and refuses any ack. */
 class Platform {
   readonly sender = generateKeyPairSync('ed25519');
   readonly senderIds = { membershipId: randomUUID(), deviceId: randomUUID(), name: 'ops-claude' };
@@ -91,7 +92,9 @@ class Platform {
       signedPost: async (route, raw) => {
         const body = JSON.parse(JSON.stringify(raw)) as Record<string, unknown>;
         if (route === '/agent-fabric/session-messages/poll') {
-          return { messages: [...this.messages.values()].filter(item => item.delivery.state === 'queued').map(item => ({
+          const ef = [...this.messages.values()].filter(item => item.envelope.recipient.name === 'ef');
+          return { messages: [...ef.filter(item => item.delivery.state === 'queued'),
+            ...ef.filter(item => item.delivery.state === 'delivered').reverse()].slice(0, 20).map(item => ({
             envelope: item.envelope, replyToken: item.replyToken,
             sender: { ...this.senderIds, publicKeyEd25519: createPublicKey(this.sender.privateKey).export({ format: 'jwk' }).x },
             delivery: item.delivery })) };
@@ -109,8 +112,9 @@ class Platform {
         if (match?.[2] === 'delivered') {
           const stored = this.messages.get(match[1]!)!;
           this.reports.push({ messageId: match[1]!, body });
-          stored.delivery = advanceSessionMessageDelivery(stored.delivery, { actor: 'deliverer', state: 'delivered',
-            channel: body.channel as 'codex_queue', outcome: body.outcome as 'processed' });
+          stored.delivery = advanceSessionMessageDelivery(stored.delivery, body.channel === 'manual_pull'
+            ? { actor: 'recipient', state: 'delivered', channel: 'manual_pull' }
+            : { actor: 'deliverer', state: 'delivered', channel: body.channel as 'codex_queue', outcome: body.outcome as 'processed' });
           return this.record(match[1]!);
         }
         throw httpError('route_not_found', 404);
@@ -531,6 +535,25 @@ test('a reply the recipient parked during the delivering turn is posted right af
     await f.tick();
     assert.deepEqual(f.platform.replies, [message.messageId]);
     assert.deepEqual(f.platform.acks, [], 'the watcher never acknowledges on its own');
+  } finally { await f.cleanup(); }
+});
+
+test('D-manual: a message the recipient pulled by hand is never queued into the thread by a later watcher pass (S-2)', async () => {
+  const f = await setup(fake => [ok(fake)]);
+  try {
+    const message = f.platform.add('N2-man-1');
+    const { sessionMessageCommand } = await import('./sessionMessageCommands.js');
+    const inbox = await sessionMessageCommand('inbox', new Map([['name', 'ef']]), f.host);
+    assert.deepEqual((inbox.messages as Array<Record<string, unknown>>).map(item => item.messageId), [message.messageId]);
+    assert.deepEqual(f.platform.messages.get(message.messageId)!.delivery, { state: 'delivered', channel: 'manual_pull' });
+    // The poll still lists it (delivered, reply token unused); the restarted watcher must leave it alone.
+    for (const at of [1_000, 30_000, 90_000]) {
+      f.at(at);
+      assert.deepEqual(actions(await f.tick()), []);
+    }
+    assert.deepEqual(f.codex.calls, [], 'no codex queue call for a manually pulled message');
+    assert.equal(await readSessionDeliveryReceipt(f.home, message.messageId), null);
+    assert.deepEqual(f.platform.reports.map(item => item.body), [{ channel: 'manual_pull' }]);
   } finally { await f.cleanup(); }
 });
 
