@@ -15,12 +15,13 @@ import {
   type SessionMessageDeliveryStatus,
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { readSessionDeliveryReceipt } from './sessionDeliveryReceipt.js';
-import { sessionMessageFrameKey } from './sessionMessageFrame.js';
+import { frameSessionMessage, sessionMessageFrameKey } from './sessionMessageFrame.js';
 import { writeSessionStateFile, sessionStatePath, type LocalSessionAttachment, type SessionMessageTransport,
   type SessionMessagingHost } from './sessionNames.js';
 import {
   createCodexDeliveryPort,
   parseCodexRollout,
+  sessionMessageFrameHeaderPrefix,
   sessionWatchCommand,
   watchCodexSessionOnce,
   type CodexDeliveryPort,
@@ -177,28 +178,36 @@ function actions(result: Awaited<ReturnType<typeof watchCodexSessionOnce>>) {
 
 test('the rollout parser finds the framed id in a user record and the outcome of its turn', () => {
   const thread = randomUUID();
-  const key = sessionMessageFrameKey(randomUUID());
-  const processed = new Rollout(thread, START).started(START + 1, 't1').user(START + 2, 't1', `[x ${key}]`)
-    .assistant(START + 3, 't1', `quoting ${sessionMessageFrameKey(randomUUID())}`).complete(START + 4, 't1');
+  const id = randomUUID();
+  const key = sessionMessageFrameKey(id);
+  const head = `${sessionMessageFrameHeaderPrefix(id)}ops-claude to session ef, sent x, new conversation.]\nbody`;
+  const processed = new Rollout(thread, START).started(START + 1, 't1').user(START + 2, 't1', head)
+    .assistant(START + 3, 't1', `quoting ${sessionMessageFrameHeaderPrefix(randomUUID())}`).complete(START + 4, 't1');
   const view = parseCodexRollout(processed.text(), thread);
   assert.deepEqual(view.find(key), { turnId: 't1', outcome: 'processed' });
   assert.equal(view.idleSince?.toISOString(), new Date(START + 4).toISOString());
   assert.equal(view.find(sessionMessageFrameKey(randomUUID())), null, 'an assistant quote is not a delivery');
+  const other = randomUUID();
+  const spoof = new Rollout(thread, START).started(START + 1, 't1')
+    .user(START + 2, 't1', `${sessionMessageFrameHeaderPrefix(randomUUID())}x to session ef.]\nsee ${sessionMessageFrameKey(other)} `
+      + `and ${sessionMessageFrameHeaderPrefix(other)}`).complete(START + 3, 't1');
+  assert.equal(parseCodexRollout(spoof.text(), thread).find(sessionMessageFrameKey(other)), null,
+    "a body naming another message's id is not that message's delivery");
 
-  const open = new Rollout(thread, START).started(START + 1, 't1').user(START + 2, 't1', key);
+  const open = new Rollout(thread, START).started(START + 1, 't1').user(START + 2, 't1', head);
   assert.deepEqual(parseCodexRollout(open.text(), thread).find(key), { turnId: 't1', outcome: null });
   assert.equal(parseCodexRollout(open.text(), thread).idleSince, null, 'an open turn means busy');
 
-  const aborted = new Rollout(thread, START).started(START + 1, 't1').user(START + 2, 't1', key).aborted(START + 3, 't1');
+  const aborted = new Rollout(thread, START).started(START + 1, 't1').user(START + 2, 't1', head).aborted(START + 3, 't1');
   assert.equal(parseCodexRollout(aborted.text(), thread).find(key)?.outcome, 'aborted');
 
   const merged = new Rollout(thread, START).started(START + 1, 't1')
     .user(START + 2, 't1', '<environment_context>\n  <cwd>x</cwd>\n</environment_context>')
-    .user(START + 3, 't1', key).user(START + 4, 't1', 'S1 resume probe').complete(START + 5, 't1');
+    .user(START + 3, 't1', head).user(START + 4, 't1', 'S1 resume probe').complete(START + 5, 't1');
   assert.equal(parseCodexRollout(merged.text(), thread).find(key)?.outcome, 'merged');
 
   const context = new Rollout(thread, START).started(START + 1, 't1')
-    .user(START + 2, 't1', '# AGENTS.md instructions\n<INSTRUCTIONS>x</INSTRUCTIONS>').user(START + 3, 't1', key).complete(START + 4, 't1');
+    .user(START + 2, 't1', '# AGENTS.md instructions\n<INSTRUCTIONS>x</INSTRUCTIONS>').user(START + 3, 't1', head).complete(START + 4, 't1');
   assert.equal(parseCodexRollout(context.text(), thread).find(key)?.outcome, 'processed', 'context injections are not merged input');
 
   assert.throws(() => parseCodexRollout(processed.text(), randomUUID()), /codex_rollout_thread_mismatch/);
@@ -221,6 +230,8 @@ test('a normal delivery: receipt before the queue call, queue id from stdout, de
     assert.match(String(receipt?.queueId), /^[0-9a-f-]{36}$/);
     assert.match(f.codex.calls[0]!, new RegExp(sessionMessageFrameKey(message.messageId)));
     assert.match(f.codex.calls[0]!, /untrusted/i);
+    assert.equal(f.codex.calls[0], frameSessionMessage(message));
+    assert.ok(f.codex.calls[0]!.startsWith(sessionMessageFrameHeaderPrefix(message.messageId)));
     f.at(5_000);
     assert.deepEqual(actions(await f.tick()), ['waiting'], 'a pending row is waited for, never re-queued');
     f.codex.drain(START + 6_000);
