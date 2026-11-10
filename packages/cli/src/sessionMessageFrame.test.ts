@@ -22,6 +22,10 @@ test('the frame carries the message id key, the untrusted label, both names and 
   assert.match(frame, /to session ef/);
   assert.match(frame, /sent 2026-11-10T10:00:00\.000Z/);
   assert.match(frame, /dharma msg reply --message /);
+  assert.ok(!/--body "/.test(frame), 'the reply template never double-quotes a body (F5)');
+  assert.ok(frame.includes(`dharma msg reply --message ${m.messageId} --body-file - <<'EOF'
+<your reply>
+EOF`));
   assert.ok(frame.includes('please run the tests'));
   assert.ok(!frame.includes(m.replyTokenHash), 'no token material is framed');
   assert.ok(!frame.includes(m.signature));

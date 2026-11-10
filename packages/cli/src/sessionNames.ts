@@ -21,6 +21,8 @@ export interface SessionMessagingDevice { organizationId: string; deviceId: stri
 export interface SessionMessagingHost {
   home: string; cwd: string; env: Record<string, string | undefined>; now(): Date;
   device(): Promise<SessionMessagingDevice>; transport(): Promise<SessionMessageTransport>;
+  /** The whole of stdin, for `--body-file -`. */
+  stdin?(): Promise<string>;
 }
 /** The local half of a delivery-only binding. The thread id or Claude session id lives only here;
  * the platform holds the name, the binding id and the owner. */
@@ -73,6 +75,10 @@ export async function readSessionAttachment(home: string, name: string): Promise
     throw new Error('session_attachment_record_invalid');
   }
   return value;
+}
+
+export async function readPendingSessionAttachment(_home: string, _name: string): Promise<LocalSessionAttachment | null> {
+  throw new Error('not_implemented');
 }
 
 /** Completed local attachments (not ones still waiting for their attach receipt). */

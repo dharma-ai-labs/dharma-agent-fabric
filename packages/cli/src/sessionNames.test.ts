@@ -9,6 +9,7 @@ import {
   type ProviderSessionRegistrationV2,
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import {
+  readPendingSessionAttachment,
   readSessionAttachment,
   recordClaudeSessionStart,
   sessionNamesCommand,
@@ -195,8 +196,55 @@ test('an uncertain attach is retried once with the identical request; a definiti
     await assert.rejects(sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', THREAD],
       ['name', 'ef'], ['yes', true]]), g.host), /session_messaging_forbidden/);
     assert.equal(g.calls.length, 1);
-    assert.equal((await readSessionAttachment(g.home, 'ef'))?.pending, true);
+    assert.equal(await readSessionAttachment(g.home, 'ef'), null);
+    assert.equal(await readPendingSessionAttachment(g.home, 'ef'), null, 'a definitive refusal leaves no pending record');
   } finally { await g.cleanup(); }
+});
+
+test('a refused re-attach keeps the previous attachment; a rebind on this device sends its binding id and revision (F6)', async () => {
+  let refuse = false;
+  const f = await fixture({ post: async (_route, body) => {
+    if (refuse) throw Object.assign(new Error('session_name_revision_conflict'), { status: 409, definitive: true });
+    return receiptFor(body as ProviderSessionRegistrationV2);
+  } });
+  try {
+    await sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', THREAD], ['name', 'ef'], ['yes', true]]), f.host);
+    const before = await readSessionAttachment(f.home, 'ef');
+    refuse = true;
+    const other = randomUUID();
+    await assert.rejects(sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', other], ['name', 'ef'], ['yes', true]]),
+      f.host), /session_name_revision_conflict/);
+    assert.deepEqual(await readSessionAttachment(f.home, 'ef'), before, 'the old attachment still works');
+    assert.equal(await readPendingSessionAttachment(f.home, 'ef'), null);
+    refuse = false;
+    await sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', other], ['name', 'ef'], ['yes', true]]), f.host);
+    const rebind = f.calls.at(-1)!.body as ProviderSessionRegistrationV2;
+    assert.equal(rebind.bindingId, before!.bindingId);
+    assert.equal(rebind.expectedRevision, before!.revision);
+    const after = await readSessionAttachment(f.home, 'ef');
+    assert.equal(after?.threadId, other);
+    assert.equal(after?.revision, before!.revision + 1);
+  } finally { await f.cleanup(); }
+});
+
+test('a lost attach response keeps a pending record beside the attachment and the retry reuses its binding id', async () => {
+  let lose = true;
+  const f = await fixture({ post: async (_route, body) => {
+    if (lose) throw new Error('fetch failed');
+    return receiptFor(body as ProviderSessionRegistrationV2, { replay: true });
+  } });
+  try {
+    await assert.rejects(sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', THREAD], ['name', 'ef'], ['yes', true]]),
+      f.host), /fetch failed/);
+    assert.equal(await readSessionAttachment(f.home, 'ef'), null);
+    const pending = await readPendingSessionAttachment(f.home, 'ef');
+    assert.equal(pending?.pending, true);
+    lose = false;
+    await sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', THREAD], ['name', 'ef'], ['yes', true]]), f.host);
+    assert.equal((f.calls.at(-1)!.body as ProviderSessionRegistrationV2).bindingId, pending!.bindingId);
+    assert.equal(await readPendingSessionAttachment(f.home, 'ef'), null);
+    assert.equal((await readSessionAttachment(f.home, 'ef'))?.pending, false);
+  } finally { await f.cleanup(); }
 });
 
 test('a receipt for another binding, name or state is refused and the attachment stays pending', async () => {
@@ -206,12 +254,13 @@ test('a receipt for another binding, name or state is refused and the attachment
     try {
       await assert.rejects(sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', THREAD],
         ['name', 'ef'], ['yes', true]]), f.host), /session_attach_receipt_invalid/, JSON.stringify(overrides));
-      assert.equal((await readSessionAttachment(f.home, 'ef'))?.pending, true);
+      assert.equal(await readSessionAttachment(f.home, 'ef'), null);
+      assert.equal((await readPendingSessionAttachment(f.home, 'ef'))?.pending, true);
     } finally { await f.cleanup(); }
   }
 });
 
-test('re-attaching the same session reuses its binding id and expected revision', async () => {
+test('re-attaching on this device reuses its binding id and expected revision', async () => {
   const f = await fixture();
   try {
     const attach = () => sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', THREAD],
@@ -225,8 +274,8 @@ test('re-attaching the same session reuses its binding id and expected revision'
     await sessionNamesCommand('attach', flags([['provider', 'codex'], ['thread', randomUUID()],
       ['name', 'ef'], ['yes', true]]), f.host);
     const third = f.calls[2]!.body as ProviderSessionRegistrationV2;
-    assert.notEqual(third.bindingId, first!.bindingId, 'another thread under the same name is a new binding');
-    assert.equal(third.expectedRevision, 0);
+    assert.equal(third.bindingId, first!.bindingId, 'another thread under the same name on this device rebinds it');
+    assert.equal(third.expectedRevision, 2);
   } finally { await f.cleanup(); }
 });
 

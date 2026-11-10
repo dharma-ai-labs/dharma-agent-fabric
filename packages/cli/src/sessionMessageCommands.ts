@@ -128,11 +128,17 @@ function conflict(error: unknown) {
 }
 
 /** Report one delivery; a message already delivered on another channel is reported as such, not retried. */
-export async function reportReceivedDelivery(transport: SessionMessageTransport, messageId: string, report: SessionDeliveredReport) {
+export async function reportReceivedDelivery(transport: SessionMessageTransport, messageId: string, report: SessionDeliveredReport,
+  _home?: string) {
   try { await reportSessionMessageDelivered(transport, messageId, report); return 'reported' as const; } catch (error) {
     if (conflict(error)) return 'already_delivered' as const;
     throw error;
   }
+}
+
+export async function flushSessionOutbox(_home: string, _transport: SessionMessageTransport, _messageId?: string):
+  Promise<Array<{ messageId: string; action: string }>> {
+  throw new Error('not_implemented');
 }
 
 function text(flags: Map<string, string | boolean>, key: string) {

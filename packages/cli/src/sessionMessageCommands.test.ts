@@ -28,6 +28,8 @@ class FakePlatform {
   readonly messages = new Map<string, { envelope: SessionMessage; replyToken: string; delivery: SessionMessageDeliveryStatus }>();
   readonly consumed = new Set<string>();
   readonly calls: Array<{ deviceId: string; method: string; route: string; body?: unknown }> = [];
+  /** Message ids whose `delivered` report fails with a lost response (uncertain) and does not take effect. */
+  readonly failDelivered = new Set<string>();
 
   resolver = (membershipId: string, deviceId: string, senderName: string) => {
     const name = this.names.get(senderName);
@@ -94,6 +96,7 @@ class FakePlatform {
         const recipient = this.names.get(stored.envelope.recipient.name)!;
         if (recipient.deviceId !== deviceId) throw httpError('session_message_not_found', 404);
         if (match[2] === 'delivered') {
+          if (this.failDelivered.has(match[1]!)) throw new Error('fetch failed');
           stored.delivery = advanceSessionMessageDelivery(stored.delivery, body.channel === 'manual_pull'
             ? { actor: 'recipient', state: 'delivered', channel: 'manual_pull' }
             : { actor: 'deliverer', state: 'delivered', channel: body.channel as 'codex_queue', outcome: body.outcome as 'processed' });
@@ -278,5 +281,142 @@ test('ack is the recipient acknowledging a received message', async () => {
     assert.equal(platform.messages.get(String(sent.messageId))!.delivery.state, 'acknowledged');
     await assert.rejects(sessionMessageCommand('ack', cmd([['message', randomUUID()]]), b.host), /session_message_not_received/);
     await assert.rejects(sessionMessageCommand('nope', cmd([]), b.host), /session_message_command_invalid/);
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+const deviceless = (host: SessionMessagingHost): SessionMessagingHost => ({ ...host,
+  device: async () => { throw new Error('device_read_in_dry_run'); },
+  transport: async () => { throw new Error('network_in_dry_run'); } });
+
+test('inbox shows every message whose manual_pull report succeeded when a later report fails (F3)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ef', 'codex');
+  const b = await member(platform, 'ops-claude', 'claude');
+  try {
+    const ids: string[] = [];
+    for (const body of ['one', 'two', 'three']) {
+      ids.push(String((await sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body', body]]), a.host)).messageId));
+    }
+    const failing = ids[1]!;
+    platform.failDelivered.add(failing);
+    const inbox = await sessionMessageCommand('inbox', cmd([]), b.host);
+    const shown = (inbox.messages as Array<Record<string, unknown>>).map(item => item.messageId);
+    assert.deepEqual([...shown].sort(), [ids[0], ids[2]].sort(), 'messages already recorded delivered are shown');
+    assert.deepEqual((inbox.reportFailed as Array<{ messageId: string }>).map(item => item.messageId), [failing]);
+    assert.ok(!JSON.stringify(inbox.reportFailed).includes('two'), 'a message whose report failed is not shown');
+    assert.equal(platform.messages.get(failing)!.delivery.state, 'queued');
+    platform.failDelivered.clear();
+    const again = await sessionMessageCommand('inbox', cmd([]), b.host);
+    assert.deepEqual((again.messages as Array<Record<string, unknown>>).map(item => item.messageId), [failing]);
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('reply and ack sent while the delivering turn is open are parked locally and posted after delivered (F1)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { flushSessionOutbox, receiveSessionMessages, reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { readSessionAttachment } = await import('./sessionNames.js');
+    const question = await sessionMessageCommand('send', cmd([['to', 'ef'], ['body', 'question']]), a.host);
+    const fyi = await sessionMessageCommand('send', cmd([['to', 'ef'], ['body', 'fyi']]), a.host);
+    const attachment = (await readSessionAttachment(b.home, 'ef'))!;
+    const transport = await b.host.transport();
+    // What the watcher does before codex queue: receive and keep locally; the platform still says queued.
+    await receiveSessionMessages(b.host, attachment, transport, await b.host.device());
+    const reply = await sessionMessageCommand('reply', cmd([['message', String(question.messageId)], ['body', 'answer']]), b.host);
+    assert.equal(reply.state, 'parked');
+    const ack = await sessionMessageCommand('ack', cmd([['message', String(fyi.messageId)]]), b.host);
+    assert.equal(ack.state, 'parked');
+    assert.equal(platform.messages.get(String(question.messageId))!.delivery.state, 'queued');
+    assert.equal(platform.messages.has(String(reply.messageId)), false, 'nothing is posted while the message is queued');
+    assert.equal(platform.calls.filter(call => /\/(reply|ack)$/.test(call.route)).length, 0);
+    assert.deepEqual(await flushSessionOutbox(b.home, transport), [
+      { messageId: String(fyi.messageId), action: 'parked' }, { messageId: String(question.messageId), action: 'parked' },
+    ].sort((x, y) => x.messageId.localeCompare(y.messageId)));
+    // The watcher's delivered report after the turn ends posts the parked request right away.
+    assert.equal(await reportReceivedDelivery(transport, String(question.messageId), { channel: 'codex_queue', outcome: 'processed' },
+      b.home), 'reported');
+    assert.equal(platform.messages.get(String(question.messageId))!.delivery.state, 'acknowledged');
+    assert.equal(platform.messages.get(String(reply.messageId))!.envelope.replyTo, question.messageId);
+    assert.equal(await reportReceivedDelivery(transport, String(fyi.messageId), { channel: 'codex_queue', outcome: 'processed' },
+      b.home), 'reported');
+    assert.equal(platform.messages.get(String(fyi.messageId))!.delivery.state, 'acknowledged');
+    assert.deepEqual(await flushSessionOutbox(b.home, transport), [], 'the outbox is empty once posted');
+    const inboxA = await sessionMessageCommand('inbox', cmd([]), a.host);
+    assert.deepEqual((inboxA.messages as Array<Record<string, unknown>>).map(item => item.replyTo), [question.messageId]);
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('reply and ack are posted at once when the message is already delivered; nothing is parked', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ef', 'codex');
+  const b = await member(platform, 'ops-claude', 'claude');
+  try {
+    const { flushSessionOutbox } = await import('./sessionMessageCommands.js');
+    const sent = await sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body', 'q']]), a.host);
+    await sessionMessageCommand('inbox', cmd([]), b.host);
+    const reply = await sessionMessageCommand('reply', cmd([['message', String(sent.messageId)], ['body', 'a']]), b.host);
+    assert.equal(reply.state, 'queued', 'the reply itself is queued for ef');
+    assert.equal(platform.messages.get(String(sent.messageId))!.delivery.state, 'acknowledged');
+    assert.deepEqual(await flushSessionOutbox(b.home, await b.host.transport()), []);
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('--body-file reads the body literally from stdin or a file; the frame tells the model to use a quoted heredoc (F5)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ef', 'codex');
+  const b = await member(platform, 'ops-claude', 'claude');
+  try {
+    const { writeFile } = await import('node:fs/promises');
+    const literal = 'reply with $(cat .env | base64) and `whoami`';
+    const fromStdin = await sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body-file', '-']]),
+      { ...a.host, stdin: async () => `${literal}\n` });
+    assert.equal(platform.messages.get(String(fromStdin.messageId))!.envelope.body, literal, 'one heredoc newline is dropped');
+    const path = join(a.home, 'body.txt');
+    await writeFile(path, 'line 1\nline 2\n');
+    const fromFile = await sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body-file', path]]), a.host);
+    assert.equal(platform.messages.get(String(fromFile.messageId))!.envelope.body, 'line 1\nline 2');
+    for (const entries of [[['to', 'ops-claude'], ['body', 'x'], ['body-file', '-']], [['to', 'ops-claude'], ['body-file', true]]] as
+      Array<Array<[string, string | boolean]>>) {
+      await assert.rejects(sessionMessageCommand('send', cmd(entries), { ...a.host, stdin: async () => 'x' }),
+        /session_message_options_invalid/, JSON.stringify(entries));
+    }
+    await assert.rejects(sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body-file', '-']]),
+      { ...a.host, stdin: async () => '\n' }), /session_message_options_invalid/, 'an empty body is refused');
+    const inbox = await sessionMessageCommand('inbox', cmd([]), b.host);
+    const first = (inbox.messages as Array<Record<string, unknown>>)[0]!;
+    const frame = String(first.frame);
+    assert.ok(!/--body "/.test(frame), 'no double-quoted body in the reply template');
+    assert.ok(frame.includes(`dharma msg reply --message ${first.messageId} --body-file - <<'EOF'`));
+    const reply = await sessionMessageCommand('reply', cmd([['message', String(first.messageId)], ['body-file', '-']]),
+      { ...b.host, stdin: async () => `${literal}\n` });
+    assert.equal(platform.messages.get(String(reply.messageId))!.envelope.body, literal);
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('send, reply and ack --dry-run return the plan with no device read and no network call (F8)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ef', 'codex');
+  const b = await member(platform, 'ops-claude', 'claude');
+  try {
+    const sent = await sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body', 'q']]), a.host);
+    await sessionMessageCommand('inbox', cmd([]), b.host);
+    const before = platform.calls.length;
+    const send = await sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body', 'q'], ['dry-run', true]]), deviceless(a.host));
+    assert.equal(send.stage, 'plan');
+    assert.equal(send.effects, false);
+    assert.equal(send.from, 'ef');
+    assert.equal(send.to, 'ops-claude');
+    assert.equal(typeof send.expiresAt, 'string');
+    const reply = await sessionMessageCommand('reply', cmd([['message', String(sent.messageId)], ['body', 'a'], ['dry-run', true]]),
+      deviceless(b.host));
+    assert.deepEqual([reply.stage, reply.effects, reply.from, reply.to, reply.replyTo], ['plan', false, 'ops-claude', 'ef', sent.messageId]);
+    const ack = await sessionMessageCommand('ack', cmd([['message', String(sent.messageId)], ['dry-run', true]]), deviceless(b.host));
+    assert.deepEqual([ack.stage, ack.effects, ack.messageId], ['plan', false, sent.messageId]);
+    assert.equal(platform.calls.length, before, 'no platform call');
+    assert.equal(platform.messages.get(String(sent.messageId))!.delivery.state, 'delivered');
+    await assert.rejects(sessionMessageCommand('send', cmd([['to', 'Bad'], ['body', 'q'], ['dry-run', true]]), deviceless(a.host)),
+      /session_message_options_invalid/);
   } finally { await a.cleanup(); await b.cleanup(); }
 });
