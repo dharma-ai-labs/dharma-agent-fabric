@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { KeyObject } from 'node:crypto';
-import { open, readdir, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -15,12 +16,13 @@ import {
   writeSessionDeliveryReceipt,
   type SessionDeliveryReceipt,
 } from './sessionDeliveryReceipt.js';
-import { receiveSessionMessages, reportReceivedDelivery } from './sessionMessageCommands.js';
+import { flushSessionOutbox, receiveSessionMessages, reportReceivedDelivery } from './sessionMessageCommands.js';
 import { sessionMessageFrameKey } from './sessionMessageFrame.js';
 import {
   assertSessionFlags,
   listSessionAttachments,
   readSessionAttachment,
+  sessionStatePath,
   type LocalSessionAttachment,
   type SessionMessageTransport,
   type SessionMessagingHost,
@@ -92,6 +94,10 @@ export class CodexRolloutTracker {
     const kind = payload.type;
     const turnId = typeof payload.turn_id === 'string' ? payload.turn_id : null;
     if (kind === 'task_started' && turnId) {
+      // A turn with no task_complete or turn_aborted before the next one starts (Codex was killed mid-turn)
+      // is over: close it as aborted, so its message is reported instead of waiting forever.
+      const open = this.#openTurn && this.#turns.get(this.#openTurn);
+      if (open && open.ended === null && this.#openTurn !== turnId) open.ended = 'aborted';
       this.#openTurn = turnId;
       this.#turns.set(turnId, { ended: null, realUsers: 0 });
       this.#idleSince = null;
@@ -226,6 +232,44 @@ export function createCodexDeliveryPort(input: { codexHome: string; codexCommand
   };
 }
 
+/** One watcher pass at a time per name on this device (`session-messages/watch/<name>.lock`, created
+ * exclusively). Two watchers would both find no trace and both run `codex queue`. A lock whose process no
+ * longer exists is taken over. */
+export async function withSessionWatchLock<T>(home: string, name: string, run: () => Promise<T>): Promise<T> {
+  if (!SESSION_NAME_PATTERN.test(name)) throw new Error('session_name_invalid');
+  const path = sessionStatePath(home, 'watch', `${name}.lock`);
+  await mkdir(sessionStatePath(home, 'watch'), { recursive: true, mode: 0o700 });
+  const token = randomUUID();
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const handle = await open(path, 'wx', 0o600);
+      try { await handle.writeFile(JSON.stringify({ pid: process.pid, token })); } finally { await handle.close(); }
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || attempt > 0) {
+        throw (error as NodeJS.ErrnoException).code === 'EEXIST' ? new Error('session_watch_already_running') : error;
+      }
+      let holder: { pid?: unknown } | null = null;
+      try { holder = JSON.parse(await readFile(path, 'utf8')) as { pid?: unknown }; } catch { holder = null; }
+      if (holder === null || processAlive(holder.pid)) throw new Error('session_watch_already_running');
+      await rm(path, { force: true });
+    }
+  }
+  try { return await run(); } finally {
+    try {
+      const holder = JSON.parse(await readFile(path, 'utf8')) as { token?: unknown };
+      if (holder.token === token) await rm(path, { force: true });
+    } catch { /* already gone */ }
+  }
+}
+
+function processAlive(pid: unknown) {
+  if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return false;
+  try { process.kill(pid as number, 0); return true; } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 export type SessionWatchAction = 'queued' | 'submitted_unconfirmed' | 'waiting' | 'reconciling' | 'queued_not_loaded'
   | 'observed_turn_open' | 'reported' | 'already_delivered' | 'uncertain' | 'error';
 export interface SessionWatchEntry { messageId: string; action: SessionWatchAction; outcome?: SessionMessageDeliveryOutcome; code?: string }
@@ -237,9 +281,13 @@ export async function watchCodexSessionOnce(input: {
   host: SessionMessagingHost; attachment: LocalSessionAttachment; port: CodexDeliveryPort;
   transport: SessionMessageTransport; device: { organizationId: string; deviceId: string; privateKey: KeyObject };
 }) {
+  if (input.attachment.provider !== 'codex' || !input.attachment.threadId) throw new Error('session_watch_attachment_invalid');
+  return withSessionWatchLock(input.host.home, input.attachment.name, () => watchPass(input));
+}
+
+async function watchPass(input: Parameters<typeof watchCodexSessionOnce>[0]) {
   const { host, attachment, port, transport } = input;
-  if (attachment.provider !== 'codex' || !attachment.threadId) throw new Error('session_watch_attachment_invalid');
-  const threadId = attachment.threadId;
+  const threadId = attachment.threadId!;
   const { accepted, refused } = await receiveSessionMessages(host, attachment, transport, input.device);
   const entries: SessionWatchEntry[] = [];
   let rollout: CodexRolloutView | undefined;
@@ -262,7 +310,8 @@ export async function watchCodexSessionOnce(input: {
           entries.push({ messageId, action: 'observed_turn_open' });
           continue;
         }
-        const report = await reportReceivedDelivery(transport, messageId, { channel: 'codex_queue', outcome: found!.outcome });
+        // Posts a reply or ack the recipient parked during this turn right after `delivered` (never an ack of its own).
+        const report = await reportReceivedDelivery(transport, messageId, { channel: 'codex_queue', outcome: found!.outcome }, host.home);
         await save({ ...base, state: 'reported', turnId: found!.turnId, outcome: found!.outcome, report });
         entries.push({ messageId, action: report === 'reported' ? 'reported' : 'already_delivered', outcome: found!.outcome });
         continue;
@@ -305,7 +354,10 @@ export async function watchCodexSessionOnce(input: {
       entries.push({ messageId, action: 'error', code: error instanceof Error ? error.message.slice(0, 120) : 'unknown' });
     }
   }
-  return { ok: true, name: attachment.name, entries, refused };
+  // Parked requests whose post was uncertain last time; a message still queued stays parked.
+  let outbox: Awaited<ReturnType<typeof flushSessionOutbox>> = [];
+  try { outbox = (await flushSessionOutbox(host.home, transport)).filter(item => item.action !== 'parked'); } catch { outbox = []; }
+  return { ok: true, name: attachment.name, entries, refused, outbox };
 }
 
 const WAKE_CONSENT = 'Delivering with codex queue into an idle thread starts a turn with nobody at the keyboard (auto-wake). '
@@ -316,18 +368,24 @@ export async function sessionWatchCommand(flags: Map<string, string | boolean>, 
   makePort: (input: { codexHome: string; codexCommand: { file: string; args: string[] } }) => CodexDeliveryPort = createCodexDeliveryPort,
   signal?: AbortSignal): Promise<Record<string, unknown>> {
   const invalid = 'session_watch_options_invalid';
-  assertSessionFlags(flags, ['provider', 'name', 'allow-wake', 'once', 'interval-ms', 'codex-command', 'json'],
-    ['allow-wake', 'once', 'json'], invalid);
+  assertSessionFlags(flags, ['provider', 'name', 'allow-wake', 'once', 'interval-ms', 'codex-command', 'dry-run', 'json'],
+    ['allow-wake', 'once', 'dry-run', 'json'], invalid);
   if (flags.get('provider') !== 'codex') throw new Error(invalid);
   const name = flags.get('name') as string | undefined;
   if (name !== undefined && !SESSION_NAME_PATTERN.test(name)) throw new Error(invalid);
   const intervalMs = flags.has('interval-ms') ? Number(flags.get('interval-ms')) : 10_000;
   if (!Number.isSafeInteger(intervalMs) || intervalMs < 1_000 || intervalMs > 300_000) throw new Error(invalid);
-  if (flags.get('allow-wake') !== true) throw new Error('session_watch_wake_consent_required');
+  const dryRun = flags.get('dry-run') === true;
+  if (!dryRun && flags.get('allow-wake') !== true) throw new Error('session_watch_wake_consent_required');
   const codexNames = name !== undefined ? [] : (await listSessionAttachments(host.home)).filter(item => item.provider === 'codex');
   if (codexNames.length > 1) throw new Error('session_watch_attachment_ambiguous');
   const attachment = name !== undefined ? await readSessionAttachment(host.home, name) : codexNames[0] ?? null;
   if (!attachment || attachment.pending || attachment.provider !== 'codex') throw new Error('session_watch_attachment_invalid');
+  if (dryRun) {
+    return { ok: true, stage: 'plan', effects: false, action: 'watch', name: attachment.name, threadId: attachment.threadId,
+      delivery: 'codex_queue', allowWake: flags.get('allow-wake') === true, once: flags.get('once') === true, intervalMs,
+      consent: WAKE_CONSENT };
+  }
   const device = await host.device();
   if (attachment.organizationId !== device.organizationId || attachment.deviceId !== device.deviceId) {
     throw new Error('session_attachment_device_changed');
