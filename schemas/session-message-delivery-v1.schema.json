@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.dharma-ai.io/session-message-delivery/v1",
   "title": "Named-session message delivery state",
-  "description": "queued = platform accepted and stored the envelope; delivered = the recipient-side deliverer observed it in the exact attached conversation; acknowledged = the platform recorded the recipient ACK. None of these means read or replied.",
+  "description": "queued = the platform accepted and stored the envelope (set by the platform on send); delivered = the message reached the exact attached conversation, reported once by the recipient-side deliverer (channel codex_queue or claude_hook, with the observed turn outcome) or recorded by the recipient's own manual pull (channel manual_pull, no outcome); acknowledged = the recipient's own ack or reply (never the deliverer). None of these means read or replied.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -37,10 +37,39 @@
         "acknowledged"
       ]
     },
+    "channel": {
+      "enum": [
+        "codex_queue",
+        "claude_hook",
+        "manual_pull"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "processed",
+        "aborted",
+        "merged"
+      ]
+    },
     "updatedAt": {
       "type": "string",
       "format": "date-time",
       "maxLength": 40
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "queued" } } },
+      "then": { "not": { "anyOf": [{ "required": ["channel"] }, { "required": ["outcome"] }] } },
+      "else": { "required": ["channel"] }
+    },
+    {
+      "if": { "required": ["channel"], "properties": { "channel": { "const": "manual_pull" } } },
+      "then": { "not": { "required": ["outcome"] } }
+    },
+    {
+      "if": { "required": ["channel"], "properties": { "channel": { "enum": ["codex_queue", "claude_hook"] } } },
+      "then": { "required": ["outcome"] }
+    }
+  ]
 }

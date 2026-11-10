@@ -30,14 +30,38 @@ export type UnsignedSessionMessage = Omit<SessionMessage, 'signature'>;
 
 export const SESSION_MESSAGE_DELIVERY_STATES = Object.freeze(['queued', 'delivered', 'acknowledged'] as const);
 export type SessionMessageDeliveryState = typeof SESSION_MESSAGE_DELIVERY_STATES[number];
-export interface SessionMessageDelivery {
+export const SESSION_MESSAGE_DELIVERY_CHANNELS = Object.freeze(['codex_queue', 'claude_hook', 'manual_pull'] as const);
+export type SessionMessageDeliveryChannel = typeof SESSION_MESSAGE_DELIVERY_CHANNELS[number];
+/** What the deliverer observed in the attached conversation: the turn that carried the message
+ * completed (`processed`), was aborted, or the message was merged into another turn. */
+export const SESSION_MESSAGE_DELIVERY_OUTCOMES = Object.freeze(['processed', 'aborted', 'merged'] as const);
+export type SessionMessageDeliveryOutcome = typeof SESSION_MESSAGE_DELIVERY_OUTCOMES[number];
+
+/** State plus how it was delivered. `channel` is absent while queued; `outcome` is present
+ * only for the automatic channels. */
+export interface SessionMessageDeliveryStatus {
+  state: SessionMessageDeliveryState;
+  channel?: SessionMessageDeliveryChannel;
+  outcome?: SessionMessageDeliveryOutcome;
+}
+export interface SessionMessageDelivery extends SessionMessageDeliveryStatus {
   schema: 'dharma.session-message-delivery/v1';
   organizationId: string;
   messageId: string;
   recipientName: string;
-  state: SessionMessageDeliveryState;
   updatedAt: string;
 }
+
+/** Who may set each state, and with what:
+ * - `queued`: the platform, on send;
+ * - `delivered`: the recipient-side deliverer (watcher or hook) with its channel and observed outcome,
+ *   or the recipient's own manual pull (`dharma msg inbox`), labelled `manual_pull` with no outcome;
+ * - `acknowledged`: only the recipient's own ack or reply. A deliverer never acknowledges. */
+export type SessionMessageDeliveryReport =
+  | { actor: 'platform'; state: 'queued' }
+  | { actor: 'deliverer'; state: 'delivered'; channel: 'codex_queue' | 'claude_hook'; outcome: SessionMessageDeliveryOutcome }
+  | { actor: 'recipient'; state: 'delivered'; channel: 'manual_pull' }
+  | { actor: 'recipient'; state: 'acknowledged' };
 
 export type SessionProvider = 'codex' | 'claude';
 export type SessionDelivery = 'codex_queue' | 'claude_hook';
@@ -80,8 +104,9 @@ export type SessionMessageReplyVerificationResult = { ok: true } | {
 export interface SessionMessageVerifierOptions {
   /** The organization the verifier acts for (from its own config, never from the envelope). */
   organizationId: string;
-  /** Active device key of that member's device, or null when unknown, revoked or of another org. */
-  resolveDevicePublicKey(membershipId: string, deviceId: string): KeyObject | null;
+  /** Active device key of that member's device, or null when unknown, revoked, of another org,
+   * or when that member and device have not attached `senderName`. */
+  resolveDevicePublicKey(membershipId: string, deviceId: string, senderName: string): KeyObject | null;
   /** When set, the envelope must be addressed to exactly this attached session name. */
   recipientName?: string;
 }
@@ -168,7 +193,7 @@ export function verifySessionMessage(
   if (createdAt > now.getTime() + SESSION_MESSAGE_CLOCK_SKEW_MS) return { ok: false, reason: 'not_yet_valid' };
   if (now.getTime() >= expiresAt) return { ok: false, reason: 'expired' };
   if (message.bodyHash !== sessionMessageBodyHash(message.body)) return { ok: false, reason: 'body_hash_mismatch' };
-  const key = options.resolveDevicePublicKey(message.sender.membershipId, message.sender.deviceId);
+  const key = options.resolveDevicePublicKey(message.sender.membershipId, message.sender.deviceId, message.sender.name);
   if (!key) return { ok: false, reason: 'signer_unknown' };
   const { signature, ...unsigned } = message;
   let valid = false;
@@ -195,7 +220,9 @@ function tokenMatches(token: unknown, expectedHash: string): boolean {
 }
 
 /** Verifies a reply envelope against the stored original and consumes the
- * original's reply token exactly once. Nothing is consumed on any refusal. */
+ * original's reply token exactly once. Nothing is consumed on any refusal.
+ * The reply's `sender.name` must be attached by its signing member and device,
+ * exactly as on send, so holding the raw token is not enough to reply. */
 export async function verifySessionMessageReply(
   value: unknown,
   options: Omit<SessionMessageVerifierOptions, 'recipientName'> & {
@@ -220,18 +247,64 @@ export async function verifySessionMessageReply(
   return { ok: true };
 }
 
-/** Forward-only, one step at a time; repeating the current state is an idempotent no-op.
- * There is no read or replied state: a reply is a separate message with `replyTo`. */
-export function advanceSessionMessageDeliveryState(
-  current: SessionMessageDeliveryState | null,
-  next: SessionMessageDeliveryState,
-): SessionMessageDeliveryState {
-  const from = current === null ? -1 : SESSION_MESSAGE_DELIVERY_STATES.indexOf(current);
-  const to = SESSION_MESSAGE_DELIVERY_STATES.indexOf(next);
-  if ((current !== null && from < 0) || to < 0 || !(to === from + 1 || (current !== null && to === from))) {
-    throw new Error('session_message_delivery_transition_invalid');
+function deliveryReportValid(report: Record<string, unknown>): boolean {
+  const keys = Object.keys(report).sort().join(',');
+  switch (report.state) {
+    case 'queued': return report.actor === 'platform' && keys === 'actor,state';
+    case 'acknowledged': return report.actor === 'recipient' && keys === 'actor,state';
+    case 'delivered':
+      if (report.actor === 'recipient') return report.channel === 'manual_pull' && keys === 'actor,channel,state';
+      return report.actor === 'deliverer' && (report.channel === 'codex_queue' || report.channel === 'claude_hook')
+        && (SESSION_MESSAGE_DELIVERY_OUTCOMES as readonly unknown[]).includes(report.outcome)
+        && keys === 'actor,channel,outcome,state';
+    default: return false;
   }
-  return next;
+}
+
+/** Forward-only, one step at a time, each step only by its actor (see `SessionMessageDeliveryReport`).
+ * Repeating the same report is an idempotent no-op. A second `delivered` report with another channel or
+ * outcome is a conflict: once a message is delivered (including by manual pull) nobody delivers it again.
+ * There is no read or replied state: a reply is a separate message with `replyTo`. */
+export function advanceSessionMessageDelivery(
+  current: SessionMessageDeliveryStatus | null,
+  report: SessionMessageDeliveryReport,
+): SessionMessageDeliveryStatus {
+  const next = report as unknown as Record<string, unknown>;
+  const to = SESSION_MESSAGE_DELIVERY_STATES.indexOf(next.state as SessionMessageDeliveryState);
+  const from = current === null ? -1 : SESSION_MESSAGE_DELIVERY_STATES.indexOf(current.state);
+  if (to < 0 || (current !== null && from < 0)) throw new Error('session_message_delivery_transition_invalid');
+  if (!deliveryReportValid(next)) throw new Error('session_message_delivery_report_invalid');
+  if (!(to === from + 1 || (current !== null && to === from))) throw new Error('session_message_delivery_transition_invalid');
+  const status: SessionMessageDeliveryStatus = report.state === 'delivered'
+    ? { state: 'delivered', channel: report.channel, ...('outcome' in report ? { outcome: report.outcome } : {}) }
+    : { ...current, state: report.state };
+  if (current !== null && to === from) {
+    if (report.state === 'delivered' && (current.channel !== status.channel || current.outcome !== status.outcome)) {
+      throw new Error('session_message_delivery_conflict');
+    }
+    return current;
+  }
+  return status;
+}
+
+/** What the deliverer can observe about an earlier local attempt for one message. */
+export interface SessionLocalQueueEvidence {
+  /** Queue id from the local receipt or the captured `codex queue` stdout, or null when none was seen. */
+  queueId: string | null;
+  /** A pending local queue row for this message still exists. */
+  pendingRow: boolean;
+  /** The message id appears in the attached conversation (for Codex, the thread rollout). */
+  inRollout: boolean;
+}
+
+/** Run before every local queue call, including the first after a restart. The deliverer writes a
+ * `submitting` receipt before the call and the queue id after it; a local queue success alone never
+ * counts as delivered. `queue` only when no trace of an earlier attempt exists; `wait` while the attempt
+ * is committed but not yet observed; `report_delivered` once it is observed in the exact conversation. */
+export function reconcileSessionLocalDelivery(evidence: SessionLocalQueueEvidence): 'queue' | 'wait' | 'report_delivered' {
+  if (evidence.inRollout) return 'report_delivered';
+  if (evidence.pendingRow || evidence.queueId !== null) return 'wait';
+  return 'queue';
 }
 
 /** Digest of the complete signed envelope; Ed25519 signatures are deterministic. */

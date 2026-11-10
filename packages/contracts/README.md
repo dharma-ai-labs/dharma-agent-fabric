@@ -12,11 +12,18 @@ organization. The sender device signs the canonical bytes of every field except
 `signature` (`sessionMessageSigningPayload()`, `signSessionMessage()`).
 `verifySessionMessage()` refuses a malformed envelope, a foreign organization,
 a lifetime over 7 days, an envelope dated more than 5 minutes ahead, an expired
-envelope, a body that does not match `bodyHash`, an unknown signer device, a bad
+envelope, a body that does not match `bodyHash`, an unknown signer device, a
+`sender.name` that the signing member and device have not attached, a bad
 signature and, when `recipientName` is given, any other recipient.
 
 Delivery state is a separate record, `dharma.session-message-delivery/v1`, with
-exactly `queued`, `delivered` and `acknowledged`. A local queue success is not
+exactly `queued`, `delivered` and `acknowledged`. `advanceSessionMessageDelivery()`
+lets only the platform queue, only the recipient-side deliverer (`codex_queue` or
+`claude_hook`, with the observed `outcome`) or the recipient's own manual pull
+(`manual_pull`) deliver, and only the recipient acknowledge. A delivered message
+is never delivered again by another channel. `reconcileSessionLocalDelivery()`
+decides, before every local queue call, whether an earlier attempt must be waited
+for or reported instead of queued again. A local queue success is not
 `delivered`, and no state means read or replied. A reply is a new message whose
 `replyTo` names the original; `verifySessionMessageReply()` checks the one-use
 reply token against the original's `replyTokenHash` and consumes it once through
