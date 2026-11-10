@@ -20,9 +20,12 @@ const now = new Date('2026-11-10T18:00:00.000Z');
 const hash = (value: string) => `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`;
 const TOKEN_HASH = hash('fixture-reply-token');
 
-function resolver(membershipId: string, deviceId: string): KeyObject | null {
-  if (membershipId === sender.membershipId && deviceId === sender.deviceId) return senderKeys.publicKey;
-  if (membershipId === receiver.membershipId && deviceId === receiver.deviceId) return receiverKeys.publicKey;
+/** The sender member's device attached `ef`; the receiver member's device attached `ops-claude`. */
+function resolver(membershipId: string, deviceId: string, senderName: string): KeyObject | null {
+  if (membershipId === sender.membershipId && deviceId === sender.deviceId && senderName === 'ef') return senderKeys.publicKey;
+  if (membershipId === receiver.membershipId && deviceId === receiver.deviceId && senderName === 'ops-claude') {
+    return receiverKeys.publicKey;
+  }
   return null;
 }
 
@@ -85,7 +88,7 @@ test('a tampered envelope is refused: body, hash, recipient, sender, reply field
     [{ ...message, body: otherBody }, 'body_hash_mismatch'],
     [{ ...message, body: otherBody, bodyHash: hash(otherBody) }, 'signature_invalid'],
     [{ ...message, recipient: { name: 'other-session' } }, 'signature_invalid'],
-    [{ ...message, sender: { ...sender, name: 'impostor' } }, 'signature_invalid'],
+    [{ ...message, sender: { ...sender, name: 'impostor' } }, 'signer_unknown'],
     [{ ...message, replyTokenHash: hash('attacker-token') }, 'signature_invalid'],
     [{ ...message, replyTo: '62000000-0000-4000-8000-000000000099' }, 'signature_invalid'],
     [{ ...message, expiresAt: '2026-11-16T17:59:00.000Z' }, 'signature_invalid'],
@@ -116,6 +119,42 @@ test('a wrong-org envelope is refused even when correctly signed', () => {
 test('the recipient check refuses delivery to any other session name', () => {
   assert.deepEqual(verify(signed(), { recipientName: 'ops-claude' }), { ok: true });
   assert.deepEqual(verify(signed(), { recipientName: 'ops-claude-2' }), { ok: false, reason: 'recipient_mismatch' });
+});
+
+test('sender.name must be attached by the signing member and device', () => {
+  const seen: unknown[][] = [];
+  const recording = (...args: [string, string, string]) => { seen.push(args); return resolver(...args); };
+  assert.deepEqual(verify(signed(), { resolveDevicePublicKey: recording }), { ok: true });
+  assert.deepEqual(seen, [[sender.membershipId, sender.deviceId, 'ef']], 'the resolver receives sender.name');
+  const forged = signed({ sender: { ...receiver, name: 'ef' } }, receiverKeys.privateKey);
+  assert.deepEqual(verify(forged), { ok: false, reason: 'signer_unknown' }, 'another member device cannot sign as ef');
+  assert.deepEqual(verify(forged, { recipientName: 'ops-claude' }), { ok: false, reason: 'signer_unknown' });
+});
+
+test('a reply is refused when its sender.name is not attached by the signing device', async () => {
+  const minted = api('createSessionReplyToken')() as { token: string; tokenHash: string };
+  const original = signed({ replyTokenHash: minted.tokenHash });
+  const consumed = new Set<string>();
+  const ledger = { consume: async (messageId: string) => !consumed.has(messageId) && Boolean(consumed.add(messageId)) };
+  const forgedReply = signed({
+    messageId: '62000000-0000-4000-8000-000000000002',
+    sender: { ...sender, name: 'ops-claude' }, recipient: { name: 'ef' },
+    body: 'forged reply', bodyHash: hash('forged reply'),
+    replyTo: original.messageId, replyTokenHash: hash('next-token'),
+  }, senderKeys.privateKey);
+  const check = (value: unknown) => api('verifySessionMessageReply')(value, {
+    organizationId: ORG, resolveDevicePublicKey: resolver, original, replyToken: minted.token, ledger,
+  }, now) as Promise<unknown>;
+  assert.deepEqual(await check(forgedReply), { ok: false, reason: 'signer_unknown' },
+    'the original sender holds the raw token but cannot reply as ops-claude');
+  assert.equal(consumed.size, 0, 'the forged reply consumed nothing');
+  const genuine = signed({
+    messageId: '62000000-0000-4000-8000-000000000003',
+    sender: { ...receiver, name: 'ops-claude' }, recipient: { name: 'ef' },
+    body: 'genuine reply', bodyHash: hash('genuine reply'),
+    replyTo: original.messageId, replyTokenHash: hash('next-token'),
+  }, receiverKeys.privateKey);
+  assert.deepEqual(await check(genuine), { ok: true }, 'the attached recipient can still reply');
 });
 
 test('schema refuses unknown fields, bad names, provider ids, control bytes and lone surrogates', () => {
@@ -184,26 +223,132 @@ test('reply tokens are hashed, bound to the original message and detectably sing
     { ok: false, reason: 'reply_token_reused' }, 'a fresh message id cannot reuse the token');
 });
 
-test('delivery states are queued, delivered and acknowledged, separate and forward-only', () => {
-  const advance = api('advanceSessionMessageDeliveryState');
-  assert.deepEqual((contracts as unknown as Record<string, unknown>).SESSION_MESSAGE_DELIVERY_STATES, ['queued', 'delivered', 'acknowledged']);
-  assert.equal(advance(null, 'queued'), 'queued');
-  assert.equal(advance('queued', 'delivered'), 'delivered');
-  assert.equal(advance('delivered', 'acknowledged'), 'acknowledged');
-  for (const state of ['queued', 'delivered', 'acknowledged']) assert.equal(advance(state, state), state, 'idempotent repeat');
-  for (const [from, to] of [[null, 'delivered'], [null, 'acknowledged'], ['queued', 'acknowledged'],
-    ['delivered', 'queued'], ['acknowledged', 'delivered'], ['acknowledged', 'queued'],
-    ['queued', 'read'], ['delivered', 'replied'], ['queued', 'local_queue_succeeded']]) {
-    assert.throws(() => advance(from, to), /session_message_delivery_transition_invalid/, `${from}->${to}`);
+test('delivery states are queued, delivered and acknowledged, each set by one actor, forward-only', () => {
+  const advance = api('advanceSessionMessageDelivery');
+  const exported = contracts as unknown as Record<string, unknown>;
+  assert.deepEqual(exported.SESSION_MESSAGE_DELIVERY_STATES, ['queued', 'delivered', 'acknowledged']);
+  assert.deepEqual(exported.SESSION_MESSAGE_DELIVERY_CHANNELS, ['codex_queue', 'claude_hook', 'manual_pull']);
+  assert.deepEqual(exported.SESSION_MESSAGE_DELIVERY_OUTCOMES, ['processed', 'aborted', 'merged']);
+  const queue = { actor: 'platform', state: 'queued' };
+  const watcher = { actor: 'deliverer', state: 'delivered', channel: 'codex_queue', outcome: 'aborted' };
+  const ack = { actor: 'recipient', state: 'acknowledged' };
+  const queued = advance(null, queue);
+  assert.deepEqual(queued, { state: 'queued' });
+  const delivered = advance(queued, watcher);
+  assert.deepEqual(delivered, { state: 'delivered', channel: 'codex_queue', outcome: 'aborted' });
+  const acknowledged = advance(delivered, ack);
+  assert.deepEqual(acknowledged, { state: 'acknowledged', channel: 'codex_queue', outcome: 'aborted' });
+  assert.deepEqual(advance(queued, queue), queued, 'idempotent repeat');
+  assert.deepEqual(advance(delivered, watcher), delivered, 'idempotent repeat of the same delivery report');
+  assert.deepEqual(advance(acknowledged, ack), acknowledged, 'idempotent repeat');
+  assert.deepEqual(advance(queued, { actor: 'deliverer', state: 'delivered', channel: 'claude_hook', outcome: 'processed' }),
+    { state: 'delivered', channel: 'claude_hook', outcome: 'processed' });
+  assert.deepEqual(advance(queued, { actor: 'deliverer', state: 'delivered', channel: 'codex_queue', outcome: 'merged' }),
+    { state: 'delivered', channel: 'codex_queue', outcome: 'merged' });
+  for (const [from, to] of [[null, watcher], [null, ack], [queued, ack], [delivered, queue], [acknowledged, watcher],
+    [acknowledged, queue], [queued, { actor: 'recipient', state: 'read' }], [delivered, { actor: 'recipient', state: 'replied' }],
+    [queued, { actor: 'deliverer', state: 'local_queue_succeeded' }]]) {
+    assert.throws(() => advance(from, to), /session_message_delivery_transition_invalid/, `${JSON.stringify(from)}->${JSON.stringify(to)}`);
   }
+  const wrongActor: Array<Record<string, unknown>> = [
+    { actor: 'deliverer', state: 'acknowledged' },
+    { actor: 'platform', state: 'acknowledged' },
+    { actor: 'platform', state: 'delivered', channel: 'codex_queue', outcome: 'processed' },
+    { actor: 'recipient', state: 'delivered', channel: 'codex_queue', outcome: 'processed' },
+    { actor: 'deliverer', state: 'delivered', channel: 'manual_pull' },
+    { actor: 'recipient', state: 'delivered', channel: 'manual_pull', outcome: 'processed' },
+    { actor: 'deliverer', state: 'delivered', channel: 'codex_queue' },
+    { actor: 'deliverer', state: 'delivered', channel: 'shell', outcome: 'processed' },
+    { actor: 'deliverer', state: 'delivered', channel: 'codex_queue', outcome: 'read' },
+    { actor: 'recipient', state: 'queued' },
+  ];
+  for (const report of wrongActor) {
+    const from = report.state === 'acknowledged' ? delivered : report.state === 'queued' ? null : queued;
+    assert.throws(() => advance(from, report), /session_message_delivery_report_invalid/, JSON.stringify(report));
+  }
+});
+
+test('a manual pull is recorded and labelled manual, so no deliverer delivers it again', () => {
+  const advance = api('advanceSessionMessageDelivery');
+  const queued = advance(null, { actor: 'platform', state: 'queued' });
+  const pull = { actor: 'recipient', state: 'delivered', channel: 'manual_pull' };
+  const pulled = advance(queued, pull);
+  assert.deepEqual(pulled, { state: 'delivered', channel: 'manual_pull' });
+  assert.deepEqual(advance(pulled, pull), pulled, 'a second inbox read of the same message is a no-op');
+  for (const channel of ['codex_queue', 'claude_hook']) {
+    assert.throws(() => advance(pulled, { actor: 'deliverer', state: 'delivered', channel, outcome: 'processed' }),
+      /session_message_delivery_conflict/, `${channel} after a manual pull`);
+  }
+  const delivered = advance(queued, { actor: 'deliverer', state: 'delivered', channel: 'codex_queue', outcome: 'processed' });
+  assert.throws(() => advance(delivered, pull), /session_message_delivery_conflict/);
+  assert.throws(() => advance(delivered, { actor: 'deliverer', state: 'delivered', channel: 'codex_queue', outcome: 'merged' }),
+    /session_message_delivery_conflict/, 'a second, different delivery report is refused');
+  assert.deepEqual(advance(pulled, { actor: 'recipient', state: 'acknowledged' }),
+    { state: 'acknowledged', channel: 'manual_pull' });
+});
+
+test('delivery record schema carries channel and outcome only where the state allows them', () => {
   const validate = api('validateSessionMessageDeliveryContract');
-  const record = { schema: 'dharma.session-message-delivery/v1', organizationId: ORG,
-    messageId: '62000000-0000-4000-8000-000000000001', recipientName: 'ops-claude', state: 'delivered',
+  const base = { schema: 'dharma.session-message-delivery/v1', organizationId: ORG,
+    messageId: '62000000-0000-4000-8000-000000000001', recipientName: 'ops-claude',
     updatedAt: '2026-11-10T18:00:00.000Z' };
-  assert.deepEqual(validate(record), { ok: true });
-  for (const change of [{ state: 'read' }, { state: 'replied' }, { threadId: 'x' }, { recipientName: 'Bad' }]) {
-    assert.equal((validate({ ...record, ...change }) as { ok: boolean }).ok, false);
+  const accepted = [
+    { state: 'queued' },
+    { state: 'delivered', channel: 'codex_queue', outcome: 'processed' },
+    { state: 'delivered', channel: 'claude_hook', outcome: 'processed' },
+    { state: 'delivered', channel: 'codex_queue', outcome: 'aborted' },
+    { state: 'delivered', channel: 'manual_pull' },
+    { state: 'acknowledged', channel: 'codex_queue', outcome: 'merged' },
+    { state: 'acknowledged', channel: 'manual_pull' },
+  ];
+  for (const change of accepted) assert.deepEqual(validate({ ...base, ...change }), { ok: true }, JSON.stringify(change));
+  const refused = [
+    { state: 'queued', channel: 'codex_queue', outcome: 'processed' },
+    { state: 'queued', outcome: 'processed' },
+    { state: 'delivered' },
+    { state: 'delivered', channel: 'codex_queue' },
+    { state: 'delivered', channel: 'manual_pull', outcome: 'processed' },
+    { state: 'acknowledged' },
+    { state: 'delivered', channel: 'shell', outcome: 'processed' },
+    { state: 'delivered', channel: 'codex_queue', outcome: 'read' },
+    { state: 'read' }, { state: 'replied' },
+    { state: 'queued', threadId: 'x' }, { state: 'queued', recipientName: 'Bad' },
+  ];
+  for (const change of refused) {
+    assert.equal((validate({ ...base, ...change }) as { ok: boolean }).ok, false, JSON.stringify(change));
   }
+});
+
+test('an uncertain local queue is reconciled before any retry, so a crash never queues twice', () => {
+  const reconcile = api('reconcileSessionLocalDelivery');
+  const none = { queueId: null, pendingRow: false, inRollout: false };
+  assert.equal(reconcile({ ...none }), 'queue', 'no evidence of an earlier attempt');
+  assert.equal(reconcile({ ...none, pendingRow: true }), 'wait', 'the row is committed but not yet taken');
+  assert.equal(reconcile({ ...none, queueId: 'q-1' }), 'wait', 'the queue committed; the turn has not shown it yet');
+  assert.equal(reconcile({ ...none, queueId: 'q-1', pendingRow: true }), 'wait');
+  assert.equal(reconcile({ ...none, inRollout: true }), 'report_delivered');
+  assert.equal(reconcile({ queueId: 'q-1', pendingRow: true, inRollout: true }), 'report_delivered');
+
+  // Fake codex: the queue call commits the row, then the watcher is killed (exit 137) before stdout or receipt update.
+  const receipts = new Map<string, { stage: 'submitting' | 'submitted'; queueId: string | null }>();
+  const codex = { rows: 0, deliveries: 0, rollout: false };
+  const fakeQueue = (kill: boolean) => { codex.rows += 1; return kill ? null : 'q-1'; };
+  const watcherRun = (kill: boolean) => {
+    const receipt = receipts.get('m-1');
+    const action = reconcile({ queueId: receipt?.queueId ?? null, pendingRow: codex.rows > 0, inRollout: codex.rollout });
+    if (action !== 'queue') return action;
+    receipts.set('m-1', { stage: 'submitting', queueId: null });
+    const queueId = fakeQueue(kill);
+    if (queueId === null) return 'killed';
+    receipts.set('m-1', { stage: 'submitted', queueId });
+    return 'queued';
+  };
+  assert.equal(watcherRun(true), 'killed');
+  assert.deepEqual(receipts.get('m-1'), { stage: 'submitting', queueId: null }, 'the receipt was written before the queue call');
+  assert.equal(watcherRun(false), 'wait', 'restart finds the pending row and does not queue again');
+  codex.rows -= 1; codex.deliveries += 1; codex.rollout = true;
+  assert.equal(watcherRun(false), 'report_delivered');
+  assert.equal(codex.deliveries, 1, 'exactly one delivery');
 });
 
 test('lost ACK: resubmitting the same envelope is a replay, a changed one is a conflict', () => {
