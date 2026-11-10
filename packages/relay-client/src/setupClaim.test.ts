@@ -118,18 +118,27 @@ test('the stale-home message names the home, the exact DHARMA_HOME remedy and th
     reason: 'stale_home'} as const;
   // Untyped call: the red commit's message function takes one argument.
   const message = setupClaimFailureMessage as unknown as (...args: unknown[]) => string | undefined;
+  // Review B8: a selected repository may already be cloned into the home, so "nothing was changed" was false.
   const stale = 'belongs to an earlier enrollment whose device key is no longer in this OS user\'s protected store, '
-    + 'so setup cannot use it. Nothing was changed or deleted, and this setup prompt was not used. '
-    + 'Point DHARMA_HOME at a new empty folder, then run the same setup prompt again';
-  assert.equal(message(diagnostic, {home: '/home/dev/.dharma', platform: 'linux'}),
-    `setup_claim_failed (stale_home): The Dharma home /home/dev/.dharma ${stale}: `
-    + 'export DHARMA_HOME="/home/dev/.dharma-2" (add it to your shell profile to keep it). '
-    + 'Keep the old folder until the new device is approved.');
+    + 'so setup cannot use it. No device key was written, nothing was deleted, and this setup prompt was not used. '
+    + 'Point DHARMA_HOME at a new empty folder.';
+  const retry = 'run the same setup prompt again; if it expired, get a fresh one. '
+    + 'Keep the old folder until the new device is approved.';
+  // Review B7: the old home owns this OS user's startup unit, so the new home first needs it released.
+  for (const platform of ['linux', 'wsl', 'macos'] as const) {
+    assert.equal(message(diagnostic, {home: '/home/dev/.dharma', platform}),
+      `setup_claim_failed (stale_home): The Dharma home /home/dev/.dharma ${stale} `
+      + 'First release the old home\'s startup entry: DHARMA_HOME="/home/dev/.dharma" dharma relay autostart disable. '
+      + 'Then run: export DHARMA_HOME="/home/dev/.dharma-2", add that line to your shell profile, '
+      + 'fully restart the app or terminal you run setup from (a running app keeps the old value) and '
+      + retry, platform);
+  }
+  // Review B5: setx reaches only processes started later, never the agent app that runs setup.
   assert.equal(message(diagnostic, {home: 'C:\\Users\\dev\\.dharma', platform: 'windows'}),
-    `setup_claim_failed (stale_home): The Dharma home C:\\Users\\dev\\.dharma ${stale} in a new terminal: `
-    + 'setx DHARMA_HOME "C:\\Users\\dev\\.dharma-2". Keep the old folder until the new device is approved.');
-  assert.equal(message(diagnostic), `setup_claim_failed (stale_home): The Dharma home ${stale}. `
-    + 'Keep the old folder until the new device is approved.');
+    `setup_claim_failed (stale_home): The Dharma home C:\\Users\\dev\\.dharma ${stale} `
+    + 'Run: setx DHARMA_HOME "C:\\Users\\dev\\.dharma-2". Then fully restart the app or terminal you run setup from '
+    + '(a running app keeps the old value) and ' + retry);
+  assert.equal(message(diagnostic), `setup_claim_failed (stale_home): The Dharma home ${stale} Then ${retry}`);
 });
 
 test('diagnostic observer failure cannot replace the sanitized claim failure', async () => {

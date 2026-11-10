@@ -61,8 +61,8 @@ test('a stale Dharma home prints the record, then the home path and the exact DH
     assert.deepEqual(JSON.parse(lines[0]!), diagnostic);
     assert.equal(lines.length, 2);
     assert.match(lines[1]!, /^setup_claim_failed \(stale_home\): The Dharma home C:\\Users\\dharma\\\.dharma belongs to an earlier enrollment/);
-    assert.match(lines[1]!, /Nothing was changed or deleted/);
-    assert.match(lines[1]!, /setx DHARMA_HOME "C:\\Users\\dharma\\\.dharma-2"/);
+    assert.match(lines[1]!, /No device key was written, nothing was deleted/);
+    assert.match(lines[1]!, /Run: setx DHARMA_HOME "C:\\Users\\dharma\\\.dharma-2"\. Then fully restart the app or terminal/);
   } finally { home = '/home/dev/.dharma'; platformName = 'linux'; }
 });
 

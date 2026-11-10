@@ -175,6 +175,25 @@ test('Linux startup preflight rejects a second device home without modifying its
   assert.deepEqual(calls, [], 'preflight may not run any startup control');
 });
 
+// Review B7: the stale-home remedy moves setup to a sibling DHARMA_HOME, but the old home owns this OS user's
+// one systemd unit. Its first step, `relay autostart disable` under the old home, must clear the new home's preflight.
+test('Linux stale-home remedy: disabling the old home startup entry lets a new home pass startup preflight', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-startup-stale-home-'));
+  const options = { platform: 'linux' as const, home: join(root, '.dharma'), userHome: root,
+    workspace: '/fixtures/accepted', launcher: '/fixtures/accepted/.dharma/bin/dharma',
+    policy: '/fixtures/accepted/.dharma/approved-policy.json', version: '0.2.174',
+    run: async () => ({ stdout: 'enabled\n' }) };
+  try {
+    await enableRelayAutostart(options);
+    const fresh = { ...options, home: join(root, '.dharma-2') };
+    await assert.rejects(startupPreflight(fresh), /autostart_conflict/);
+    assert.equal((await disableRelayAutostart({ ...options, home: join(root, '.dharma') })).state, 'disabled');
+    await startupPreflight(fresh);
+    await enableRelayAutostart(fresh);
+    assert.equal((await relayAutostartStatus(fresh)).state, 'enabled');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('Linux startup preflight permits an absent or exactly owned current and legacy anchor', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-startup-preflight-owned-'));
   const options = { platform: 'linux' as const, home: join(root, 'device'), userHome: root,
