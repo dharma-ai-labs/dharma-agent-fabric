@@ -48,7 +48,9 @@ class Platform {
         this.calls.push(`POST ${route}`);
         if (this.failWith) throw this.failWith;
         const body = JSON.parse(JSON.stringify(raw)) as Record<string, unknown>;
+        // The P2p poll's real shape (S-2): queued first, then delivered messages whose reply token is unused.
         if (route.endsWith('/poll')) return { messages: [...this.messages.values()].filter(item => item.delivery.state === 'queued')
+          .concat([...this.messages.values()].filter(item => item.delivery.state === 'delivered').reverse()).slice(0, 20)
           .map(item => ({ envelope: item.envelope, replyToken: item.replyToken,
             sender: { ...this.senderIds, publicKeyEd25519: createPublicKey(this.sender.privateKey).export({ format: 'jwk' }).x },
             delivery: item.delivery })) };
@@ -153,6 +155,26 @@ test('for the attached session it injects verified framed messages as context an
     assert.deepEqual(f.platform.reports, [{ channel: 'claude_hook', outcome: 'processed' }]);
     assert.ok(!f.platform.calls.some(call => call.endsWith('/ack')), 'the hook never acknowledges');
     assert.equal(await f.hook('inbox', f.prompt()), '', 'nothing is injected twice');
+  } finally { await f.cleanup(); }
+});
+
+test('a delivered, unreplied message the poll still lists is never injected again, whoever delivered it (S-2)', async () => {
+  const f = await fixture();
+  try {
+    const hooked = f.platform.add('NEG-7 body');
+    assert.ok((await f.hook('inbox', f.prompt())).includes(`id=${hooked.messageId}`));
+    const { sessionMessageCommand } = await import('./sessionMessageCommands.js');
+    const pulled = f.platform.add('pulled by hand');
+    const inbox = await sessionMessageCommand('inbox', new Map([['name', 'ops-claude']]), f.host);
+    assert.ok((inbox.messages as Array<Record<string, unknown>>).some(item => item.messageId === pulled.messageId));
+    assert.equal(f.platform.messages.get(pulled.messageId)!.delivery.state, 'delivered');
+    const fresh = f.platform.add('still queued');
+    const next = await f.hook('inbox', f.prompt());
+    assert.ok(next.includes(`id=${fresh.messageId}`), 'a queued message is still injected');
+    assert.ok(!next.includes(`id=${hooked.messageId}`) && !next.includes(`id=${pulled.messageId}`));
+    for (let prompt = 0; prompt < 3; prompt += 1) assert.equal(await f.hook('inbox', f.prompt()), '', 'later prompts inject nothing');
+    assert.deepEqual(f.platform.reports, [{ channel: 'claude_hook', outcome: 'processed' }, { channel: 'manual_pull' },
+      { channel: 'claude_hook', outcome: 'processed' }], 'one delivered report per message, none repeated');
   } finally { await f.cleanup(); }
 });
 
