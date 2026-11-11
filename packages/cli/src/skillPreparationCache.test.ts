@@ -14,6 +14,8 @@ import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { prepareProvidersIndependently } from './skillPreparationPump.js';
 import { withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+import { deferDailyUploadLimit, RELAY_SESSION_CAPTURE_INTERVAL_MS, RELAY_SESSION_CAPTURE_MAXIMUM_SESSIONS,
+  runRelaySessionCapture } from './relaySessionCapture.js';
 import { currentBootstrapHostScope } from './bootstrapHostScope.js';
 import { nextSkillActivationResult, relaySkillActivationPath, requireActiveSkillInstall, skillActivationErrorCode }
   from './skillActivationResult.js';
@@ -331,6 +333,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
   let releaseSourceScan: (() => void) | undefined;
   let elapsedMs = 0; let activations = 0;
   const events: string[] = [];
+  const sessionDiscoveries: Array<Date | undefined> = [];
   const flags = new Map<string, string | boolean>([['policy', join(f.home, '.dharma', 'approved-policy.json')]]);
   if (!holdSourceScan) flags.set('once', true);
   const workspace = { path: f.home, workspaceId: WORKSPACE, organizationId: 'org_test',
@@ -361,7 +364,8 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       serverAuthorization: { workspaceId: workspace.workspaceId },
     }),
     loadVerifiedWorkspacePolicy: async () => policy,
-    client: async () => Object.freeze({ fixture: true }), relayAutostartReport: async () => ({}), dharmaHome: () => f.home,
+    client: async () => Object.freeze({ fixture: true,
+      config: Object.freeze({ organizationId: 'org_test', deviceId: f.record.deviceId }) }), relayAutostartReport: async () => ({}), dharmaHome: () => f.home,
     acquireRelayProcessLease: async () => async () => {},
     RepositorySourceWatcher: class { invalidate() {} },
     BlockedRepositorySourceRetry: class { consider() { return false; } },
@@ -393,6 +397,14 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       return { requestStop: () => { stopped = true; }, stop: async () => { await flight; stopped = true; } };
     },
     withRepositoryRelayStage,
+    // Scheduled session capture (G20 finding 2): the real cycle runner over a synthetic provider and vault queue.
+    runRelaySessionCapture, RELAY_SESSION_CAPTURE_INTERVAL_MS, RELAY_SESSION_CAPTURE_MAXIMUM_SESSIONS, deferDailyUploadLimit,
+    relayProviderUnsafePath: async () => false,
+    providerAdapter: (provider: string) => ({ discover: async (request: { since?: Date }) => {
+      events.push(`session-discover-${provider}`); sessionDiscoveries.push(request.since);
+      return [{ sessionId: 'fixture-session', endedAt: '2026-01-01T00:00:00.000Z' }];
+    } }),
+    queueRelaySessionCapture: async () => { events.push('session-queue'); return 'queued'; },
     deferUnavailableRelayRetention: async (operation: () => Promise<unknown>) => ({ state: 'completed', value: await operation() }),
     finalizeRecoveredSignedTaskTrajectories: async () => [], syncWorkspacePolicy: async () => {},
     pollRepositoryCandidate: async () => { candidatePolls++; return null; },
@@ -410,7 +422,8 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
       }
     },
     repositorySharedReady: async () => false,
-    installedRepositoryKnowledge: async () => null, syncPendingRetentionCapsules: async () => 0,
+    installedRepositoryKnowledge: async () => null,
+    syncPendingRetentionCapsules: async () => { events.push('pending-sync'); return 0; },
     processEvidenceRequest: async () => ({}),
     executeOneTask: async () => {
       transportCalls++; events.push(`task-${transportCalls}`); await flight;
@@ -433,6 +446,13 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     && events.indexOf('activate-2') < events.indexOf('scan-end'),
   'task polling and signed activation must continue during source reconciliation');
   assert.equal(preparedCount, cycles, 'production staging callback must actually execute');
+  assert.deepEqual(events.filter(event => event.startsWith('session-')), ['session-discover-codex', 'session-queue'],
+    'scheduled capture runs once per interval');
+  assert.deepEqual(sessionDiscoveries, [undefined], 'the first cycle discovers the newest sessions');
+  assert.ok(events.indexOf('session-queue') < events.indexOf('pending-sync')
+    && events.indexOf('pending-sync') < events.indexOf('task-1'),
+  'captured sessions are queued before the same cycle\'s pending sync and task polling');
+  assert.equal(result.sessionCapturesQueued, 1); assert.equal(result.sessionCaptureFailures, 0);
   assert.equal(processFixture.listenerCount('SIGINT'), 0); assert.equal(processFixture.listenerCount('SIGTERM'), 0);
   return { result, roots };
 }

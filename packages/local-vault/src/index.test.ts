@@ -860,6 +860,28 @@ test('vault durably queues and acknowledges an explicit capsule sync', async () 
   vault.close();
 });
 
+// The relay's scheduled capture builds a session's next revision only on one the sync did not hold or retire.
+test('vault reports whether a capsule revision waits for sync, was retired by it, or neither', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-vault-sync-state-'));
+  const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
+  const state = (vault as unknown as { capsuleSyncState?: (trajectoryId: string, revision: number) => unknown })
+    .capsuleSyncState?.bind(vault);
+  assert.equal(typeof state, 'function');
+  for (const revision of [1, 2]) {
+    const blobContentId = await vault.putBlob(Buffer.from(JSON.stringify({ revision })), 'trajectory-capsule');
+    vault.recordCapsule('trajectory-state', revision, `sha256:${String(revision).repeat(64)}`, blobContentId);
+  }
+  assert.equal(state!('trajectory-state', 1), null);
+  vault.queueCapsuleSync('trajectory-state', 1);
+  assert.equal(state!('trajectory-state', 1), 'pending');
+  vault.markCapsuleSynced('trajectory-state', 1);
+  assert.equal(state!('trajectory-state', 1), null);
+  vault.queueCapsuleSync('trajectory-state', 2);
+  vault.discardPendingCapsuleSync('trajectory-state', 2, 'local_path_disclosure_superseded');
+  assert.equal(state!('trajectory-state', 2), 'retired');
+  vault.close();
+});
+
 test('raw retention drains every expired batch and creates lookup indexes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-vault-retention-'));
   const vault = await LocalVault.open({ root, masterKey: randomBytes(32) });
