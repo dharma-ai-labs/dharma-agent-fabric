@@ -22,6 +22,7 @@ export * from './signingRecoveryOffer.js';
 export * from './signingRecoveryDelivery.js';
 export * from './signingMaintenanceContext.js';
 export * from './setupClaimCredential.js';
+export * from './sessionMessage.js';
 
 const require = createRequire(import.meta.url);
 const Ajv2020 = require('ajv/dist/2020').default as new (options: Record<string, unknown>) => {

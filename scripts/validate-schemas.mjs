@@ -162,6 +162,15 @@ if (JSON.stringify(runtimeTaskActionSchema) !== JSON.stringify(canonicalTaskActi
   throw new Error('Runtime task-action schema copy is out of sync with the canonical schema.');
 }
 
+for (const name of ['session-message-v1', 'session-message-delivery-v1', 'provider-session-registration-v2',
+  'provider-session-registration-receipt-v2']) {
+  const runtime = JSON.parse(await readFile(resolve(root, `packages/contracts/src/${name}.schema.json`), 'utf8'));
+  const canonical = JSON.parse(await readFile(resolve(schemaDir, `${name}.schema.json`), 'utf8'));
+  if (JSON.stringify(runtime) !== JSON.stringify(canonical)) {
+    throw new Error(`Runtime ${name} schema copy is out of sync with the canonical schema.`);
+  }
+}
+
 for (const name of names) {
   const schema = JSON.parse(await readFile(resolve(schemaDir, name), 'utf8'));
   if (!schema.$id || !ajv.getSchema(schema.$id)) {
