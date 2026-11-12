@@ -1,0 +1,18 @@
+{
+  "name": "dharma-agent-fabric-preview",
+  "version": "1.0.7-preview",
+  "description": "Preview add-on (prototype, HQ allowlist only): name this Claude Code session for Agent Fabric session messages and receive them, framed as untrusted text, at your next prompt. Needs the Dharma CLI with session messaging. Install beside dharma-agent-fabric 1.0.6; it does not replace it.",
+  "author": {
+    "name": "Dharma AI Labs, Inc",
+    "email": "nikita@dharma-ai.io",
+    "url": "https://www.dharma-ai.io"
+  },
+  "homepage": "https://dharma-ai.io/",
+  "repository": "https://github.com/dharma-ai-labs/dharma-agent-fabric",
+  "license": "MIT",
+  "keywords": [
+    "agent-fabric",
+    "session-messages",
+    "preview"
+  ]
+}
