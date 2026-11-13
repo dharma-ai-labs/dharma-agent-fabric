@@ -219,9 +219,15 @@ export async function flushSessionOutbox(home: string, transport: SessionMessage
  * Returns `parked`, or the state the post left (the reply's own state, or the acknowledged original). */
 async function postOrPark(home: string, transport: SessionMessageTransport, parked: ParkedSessionRequest): Promise<string> {
   const delivery = await readSessionMessageDelivery(transport, parked.messageId);
+  // One parked request per message: a second reply or ack would replace or overtake the first, which was
+  // already reported accepted. Once the message is no longer queued (a flush after delivered may have failed),
+  // the earlier request is posted first; this one goes ahead only when that one is no longer parked.
+  if (await readParked(home, parked.messageId)) {
+    if (delivery?.state === 'queued') throw new Error('session_parked_request_exists');
+    const [flushed] = await flushSessionOutbox(home, transport, parked.messageId);
+    if (flushed?.action === 'parked') throw new Error('session_parked_request_exists');
+  }
   if (delivery?.state !== 'queued') return (await postParked(transport, parked)).state;
-  // One parked request per message: a second reply or ack would replace the first, which was already reported accepted.
-  if (await readParked(home, parked.messageId)) throw new Error('session_parked_request_exists');
   await writeSessionStateFile(outboxPath(home, parked.messageId), parked);
   // A deliverer may have reported between the read and the write: flush once more, so nothing waits for
   // a report that already happened.
