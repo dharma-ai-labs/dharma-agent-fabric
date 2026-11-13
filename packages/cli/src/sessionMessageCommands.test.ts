@@ -525,3 +525,60 @@ test('send, reply and ack --dry-run return the plan with no device read and no n
       /session_message_options_invalid/);
   } finally { await a.cleanup(); await b.cleanup(); }
 });
+
+type Member = Awaited<ReturnType<typeof member>>;
+
+/** The reply post loses its response (uncertain): the reconcile finds no reply, the retry loses it again. */
+const lossyReplies = (transport: SessionMessageTransport): SessionMessageTransport => ({ ...transport,
+  signedPost: async (route, body) => {
+    if (/\/reply$/.test(route)) throw new Error('fetch failed');
+    return transport.signedPost(route, body);
+  } });
+
+/** The platform definitively refuses the reply post. */
+const refusingReplies = (transport: SessionMessageTransport): SessionMessageTransport => ({ ...transport,
+  signedPost: async (route, body) => {
+    if (/\/reply$/.test(route)) throw httpError('session_reply_refused:reply_token_used', 400);
+    return transport.signedPost(route, body);
+  } });
+
+/** a asks ef; ef's watcher keeps the question while the platform still says queued; ef replies, which parks. */
+async function replyLeftParked(a: Member, b: Member) {
+  const { receiveSessionMessages } = await import('./sessionMessageCommands.js');
+  const { readSessionAttachment } = await import('./sessionNames.js');
+  const question = await sessionMessageCommand('send', cmd([['to', 'ef'], ['body', 'question']]), a.host);
+  const transport = await b.host.transport();
+  await receiveSessionMessages(b.host, (await readSessionAttachment(b.home, 'ef'))!, transport, await b.host.device());
+  const reply = await sessionMessageCommand('reply', cmd([['message', String(question.messageId)], ['body', 'answer']]), b.host);
+  assert.equal(reply.state, 'parked');
+  return { questionId: String(question.messageId), replyId: String(reply.messageId), transport };
+}
+
+test('every msg inbox first sends a reply left parked by a failed flush and lists each parked request with its result (O1)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { questionId, replyId, transport } = await replyLeftParked(a, b);
+    await assert.rejects(sessionMessageCommand('ack', cmd([['message', questionId]]), b.host),
+      (error: Error) => /session_parked_request_exists/.test(error.message) && /\breply\b/.test(error.message)
+        && /dharma msg inbox/.test(error.message), 'the refusal names the parked reply and how it is retried');
+    // The delivered report succeeds, but the flush inside it loses the reply post's response: the reply stays parked.
+    assert.equal(await reportReceivedDelivery(lossyReplies(transport), questionId, { channel: 'codex_queue', outcome: 'processed' },
+      b.home), 'reported');
+    assert.equal(platform.messages.has(replyId), false);
+    // An inbox whose reply post also loses its response: still parked, listed with its code and how it is retried.
+    const lossy = await sessionMessageCommand('inbox', cmd([]), { ...b.host, transport: async () => lossyReplies(transport) });
+    const [still] = (lossy.outbox ?? []) as Array<Record<string, unknown>>;
+    assert.deepEqual([still?.messageId, still?.kind, still?.action, still?.code],
+      [questionId, 'reply', 'parked', 'session_message_reply_uncertain']);
+    assert.match(String(still?.note), /dharma msg inbox/);
+    assert.equal(platform.messages.has(replyId), false);
+    const inbox = await sessionMessageCommand('inbox', cmd([]), b.host);
+    assert.deepEqual(inbox.outbox, [{ messageId: questionId, kind: 'reply', action: 'sent' }]);
+    assert.equal(platform.messages.get(replyId)?.envelope.replyTo, questionId, 'the inbox posts the parked reply');
+    assert.equal(platform.messages.get(questionId)!.delivery.state, 'acknowledged');
+    assert.deepEqual((await sessionMessageCommand('inbox', cmd([]), b.host)).outbox, [], 'nothing stays parked');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
