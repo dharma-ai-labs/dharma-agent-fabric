@@ -282,6 +282,22 @@ test('empty outbox does not refresh authority or send network requests', async (
   } finally { vault.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('issue #464: a staged export with no upload route is held locally without authority refresh or a request', async () => {
+  const q = await queuedExportFixture();
+  let refreshes = 0;
+  try {
+    // No `send`: this is how the client calls the sync while no server route accepts task exports.
+    const result = await syncNamedSessionTaskExports({ vault: q.vault, bindingId: q.f.input.binding.bindingId,
+      identity: q.scope, loadPolicy: async () => { refreshes++; return q.f.input.policy; } } as Parameters<typeof syncNamedSessionTaskExports>[0]);
+    assert.deepEqual(result, { state: 'pending', pending: 1, delivered: 0, code: 'task_export_upload_not_available',
+      acceptedLearningObservation: false });
+    assert.equal(refreshes, 0);
+    const held = q.vault.listProviderSessionTaskExports(q.f.input.binding.bindingId, q.scope);
+    assert.deepEqual(held.map(row => row.workKey), [q.staged.outbox!.workKey]);
+    assert.equal((await q.vault.getBlob(q.request.exportHash)).toString('utf8'), q.request.exportBytes);
+  } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
+});
+
 test('expired raw evidence blocks export without recreating content or executing a provider', async () => {
   const q = await queuedExportFixture();
   try {
