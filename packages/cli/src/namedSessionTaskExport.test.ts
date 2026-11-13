@@ -9,7 +9,8 @@ import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-a
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
 import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { prepareNamedSessionTaskExport } from './namedSessionTaskExport.js';
-import { stageNamedSessionTaskExport, syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
+import { CODEX_TASK_EXPORT_UPLOAD_ENABLED, codexTaskExportUpload, stageNamedSessionTaskExport,
+  syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
 import { inventoryRepositoryPackage } from './repositoryPackage.js';
 import { initializeRepositoryKnowledge } from './repositoryKnowledge.js';
@@ -288,13 +289,46 @@ test('issue #464: a staged export with no upload route is held locally without a
   try {
     // No `send`: this is how the client calls the sync while no server route accepts task exports.
     const result = await syncNamedSessionTaskExports({ vault: q.vault, bindingId: q.f.input.binding.bindingId,
-      identity: q.scope, loadPolicy: async () => { refreshes++; return q.f.input.policy; } } as Parameters<typeof syncNamedSessionTaskExports>[0]);
+      identity: q.scope, loadPolicy: async () => { refreshes++; return q.f.input.policy; } });
     assert.deepEqual(result, { state: 'pending', pending: 1, delivered: 0, code: 'task_export_upload_not_available',
       acceptedLearningObservation: false });
     assert.equal(refreshes, 0);
     const held = q.vault.listProviderSessionTaskExports(q.f.input.binding.bindingId, q.scope);
     assert.deepEqual(held.map(row => row.workKey), [q.staged.outbox!.workKey]);
     assert.equal((await q.vault.getBlob(q.request.exportHash)).toString('utf8'), q.request.exportBytes);
+  } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
+});
+
+test('issue #464: the upload switch is off by default, so the client wiring sends nothing and keeps every staged export', async () => {
+  const q = await queuedExportFixture();
+  const posts: unknown[][] = [];
+  const fabric = { signedPost: async (...args: unknown[]) => { posts.push(args); return q.response; } };
+  try {
+    assert.equal(CODEX_TASK_EXPORT_UPLOAD_ENABLED, false);
+    assert.equal(codexTaskExportUpload(fabric), undefined);
+    for (let pass = 0; pass < 3; pass++) {
+      const health = await syncNamedSessionTaskExports({ vault: q.vault, bindingId: q.f.input.binding.bindingId,
+        identity: q.scope, loadPolicy: async () => { throw new Error('must not refresh'); }, send: codexTaskExportUpload(fabric) });
+      // This object is what the named-session service writes to its health file as `taskExports`.
+      assert.deepEqual(health, { state: 'pending', pending: 1, delivered: 0, code: 'task_export_upload_not_available',
+        acceptedLearningObservation: false });
+    }
+    assert.deepEqual(posts, []);
+    assert.equal(q.vault.listProviderSessionTaskExports(q.f.input.binding.bindingId, q.scope).length, 1);
+    assert.equal(await q.vault.latestProviderSessionTaskExportReceipt(q.f.input.binding.bindingId, q.scope), null);
+  } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
+});
+
+test('issue #464: turning the upload switch on sends exactly the request sent before', async () => {
+  const q = await queuedExportFixture();
+  const posts: unknown[][] = [];
+  const fabric = { signedPost: async (...args: unknown[]) => { posts.push(args); return q.response; } };
+  try {
+    const result = await syncNamedSessionTaskExports({ vault: q.vault, bindingId: q.f.input.binding.bindingId,
+      identity: q.scope, loadPolicy: async () => q.f.input.policy, send: codexTaskExportUpload(fabric, true) });
+    assert.deepEqual(posts, [['/agent-fabric/codex-task-exports', q.request]]);
+    assert.equal(result.state, 'delivered'); assert.equal(result.pending, 0); assert.equal(result.delivered, 1);
+    assert.deepEqual(q.vault.listProviderSessionTaskExports(q.f.input.binding.bindingId, q.scope), []);
   } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
 });
 

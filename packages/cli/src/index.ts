@@ -126,7 +126,7 @@ import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
 import {namedSessionStartupPhaseError, type NamedSessionStartupPhase} from './namedSessionStartupDiagnostic.js';
 import {verifiedCliProcessArguments} from './cliProcessIdentity.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
-import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
+import { codexTaskExportUpload, syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { readNamedSessionPackageContent, readNamedSessionRepositoryContext, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
@@ -5931,7 +5931,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       syncTaskExports: () => syncNamedSessionTaskExports({ vault, bindingId: registration!.bindingId,
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
-        send: body => fabric.signedPost('/agent-fabric/codex-task-exports', body) }),
+        send: codexTaskExportUpload(fabric) }),
       withActivationBoundary: (operation, work) => withClientSigningControl({config:fabric.config},()=>withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });

@@ -16,6 +16,7 @@ interface UploadReceipt {
   receipt: { id: string; status: 'retained' | 'duplicate'; exportHash: string; contentExpiresAt: string;
     acceptedLearningObservation: false };
 }
+export interface TaskExportUploadBody { schema: 'dharma.codex-task-export-upload/v1'; exportBytes: string; exportHash: string }
 export interface NamedSessionTaskExportSyncResult {
   state: 'idle' | 'delivered' | 'pending' | 'blocked'; pending: number | null; delivered: number;
   code?: string; lastReceipt?: UploadReceipt; acceptedLearningObservation: false;
@@ -65,10 +66,26 @@ export async function stageNamedSessionTaskExport(vault: LocalVault | ScopedLoca
   return { exported, outbox: { state: 'pending' as const, workKey, descriptorHash, acceptedLearningObservation: false as const } };
 }
 
+/**
+ * Issue #464: no server accepts POST /agent-fabric/codex-task-exports yet. The relay gateway answers
+ * 400 route_not_allowed and the platform has no such route. While this switch is off the client sends
+ * nothing: staged exports stay encrypted in the local vault and the sync reports
+ * pending / task_export_upload_not_available. Turn it on in the change that adds the server route and
+ * the gateway allowlist entry; the request is then exactly the one sent before.
+ */
+export const CODEX_TASK_EXPORT_UPLOAD_ENABLED: boolean = false;
+
+/** The `send` for `syncNamedSessionTaskExports`, or undefined while the upload is switched off (#464). */
+export function codexTaskExportUpload(fabric: { signedPost(route: string, body: unknown): Promise<unknown> },
+  enabled = CODEX_TASK_EXPORT_UPLOAD_ENABLED): ((body: TaskExportUploadBody) => Promise<unknown>) | undefined {
+  return enabled ? body => fabric.signedPost('/agent-fabric/codex-task-exports', body) : undefined;
+}
+
 export async function syncNamedSessionTaskExports(input: {
   vault: LocalVault | ScopedLocalVault; bindingId: string; identity: LocalProviderSessionIdentity;
   loadPolicy(): Promise<OrganizationPolicy>;
-  send(body: { schema: 'dharma.codex-task-export-upload/v1'; exportBytes: string; exportHash: string }): Promise<unknown>;
+  /** Absent while no server route accepts task exports (#464): staged rows are held, nothing is sent. */
+  send?: ((body: TaskExportUploadBody) => Promise<unknown>) | undefined;
 }): Promise<NamedSessionTaskExportSyncResult> {
   let delivered = 0, pending = 0, pendingKnown = false;
   let lastReceipt: UploadReceipt | undefined;
@@ -95,6 +112,8 @@ export async function syncNamedSessionTaskExports(input: {
     }
   } catch { return result('blocked', 'task_export_saved_receipt_unavailable'); }
   if (!pending) return result('idle');
+  const send = input.send;
+  if (!send) return result('pending', 'task_export_upload_not_available');
   for (const row of rows.slice(0, 5)) {
     let descriptor: Descriptor, capture: CodexLocalWorkCapture, contextBytes: Buffer, retained: string;
     try {
@@ -136,7 +155,7 @@ export async function syncNamedSessionTaskExports(input: {
       assertPolicy(policy);
     } catch { return result('blocked', 'task_export_current_authority_unavailable'); }
     let response: unknown;
-    try { response = await input.send({ schema: 'dharma.codex-task-export-upload/v1', exportBytes: retained, exportHash: descriptor.exportHash }); }
+    try { response = await send({ schema: 'dharma.codex-task-export-upload/v1', exportBytes: retained, exportHash: descriptor.exportHash }); }
     catch (error) {
       if (error instanceof AgentFabricRequestError && error.definitive) {
         const code = error.message.split(':', 1)[0]!;
