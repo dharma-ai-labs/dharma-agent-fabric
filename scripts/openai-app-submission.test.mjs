@@ -51,7 +51,7 @@ test('catalog matches the checked-in live tool snapshot exactly', () => {
 });
 
 test('every test case names only live catalog tools in the proposed ChatGPT profile', () => {
-  assert.ok(submission.test_cases.length >= 5);
+  assert.equal(submission.test_cases.length, 5, 'initial MCP app review requires exactly five positive cases');
   submission.test_cases.forEach((testCase, index) => {
     assert.ok(testCase.description.startsWith(`TC-${index + 1}. `), `test case ${index + 1} must be numbered TC-${index + 1}`);
     const tools = toolsOf(testCase);
@@ -277,7 +277,7 @@ test('trajectory IDs are recorded per seed build, so a rebuild or a second organ
   assert.match(seedPlan, /own\s+(organi[sz]ation|seed\s+build)[^.]*own\s+placeholder\s+values/i, 'a guided-check copy is a separate seed build with its own values');
 });
 
-test('every declared write tool has a run-order rule and a reset, and TC-6 does not depend on the reviewer never writing', () => {
+test('every declared write tool has a run-order rule and a reset, and TC-5 does not depend on the reviewer never writing', () => {
   const writeTools = Object.keys(submission.tools).filter(name => snapshotByName.get(name).annotations.readOnlyHint === false);
   assert.ok(writeTools.length > 0);
   const reset = seedPlan.slice(seedPlan.indexOf('## Reset'));
@@ -290,8 +290,8 @@ test('every declared write tool has a run-order rule and a reset, and TC-6 does 
   assert.ok(guide.includes('## Run order') && guide.indexOf('## Run order') < guide.indexOf('## Submitted test cases'), 'REVIEWER_GUIDE.md states the run order before the cases');
   assert.match(runOrder, /after[^.]*web and[^.]*mobile/i, 'write tools run only after the web and mobile runs');
   assert.doesNotMatch(guide, /you can run them in any order/, 'order does not hold once a write tool has run');
-  const sessions = testCaseById('TC-6');
-  assert.match(sessions.expected_output, /Seed provisioning/, 'TC-6 shows the operator conversation is never listed');
+  const sessions = testCaseById('TC-5');
+  assert.match(sessions.expected_output, /Seed provisioning/, 'TC-5 shows the operator conversation is never listed');
   assert.match(sessions.expected_output, /only conversations the reviewer account created/);
 });
 
@@ -308,7 +308,7 @@ test('the seed is rebuilt before capsule retention can change TC-4', () => {
 test('the submitted cases hold whatever order they run in, including after a declared write tool', () => {
   // OpenAI receives the submitted cases, not REVIEWER_GUIDE.md, so a run-order
   // rule in the guide does not protect a case. A control-agent message records
-  // a managed trajectory and a reviewer conversation appears in TC-6, so those
+  // a managed trajectory and a reviewer conversation appears in TC-5, so those
   // two cases must tolerate both on their own.
   for (const testCase of submission.test_cases) {
     const id = testCase.description.split('.')[0];
@@ -320,16 +320,16 @@ test('the submitted cases hold whatever order they run in, including after a dec
   assert.doesNotMatch(listing.expected_output, /limit 5\b|exactly 5 trajectories/, 'a newer managed trajectory must not push T1 out of TC-3');
   assert.match(listing.expected_output, /limit 50/, 'TC-3 lists up to 50 rows, so T1 to T5 stay in the list');
   assert.match(listing.expected_output, /whether or not a write tool ran/i, 'TC-3 says in the submitted text that a prior write does not change it');
-  const sessions = testCaseById('TC-6');
-  assert.match(sessions.expected_output, /whether or not a write tool ran/i, 'TC-6 says in the submitted text that a prior write does not change it');
+  const sessions = testCaseById('TC-5');
+  assert.match(sessions.expected_output, /whether or not a write tool ran/i, 'TC-5 says in the submitted text that a prior write does not change it');
   const tc3Guide = guide.slice(guide.indexOf('### TC-3 '), guide.indexOf('### TC-4 '));
   assert.doesNotMatch(tc3Guide, /limit` 5\b|exactly 5 trajectories/, 'REVIEWER_GUIDE.md TC-3 matches the submitted case');
-  const tc6Guide = guide.slice(guide.indexOf('### TC-6 '), guide.indexOf('### Negative cases'));
-  assert.doesNotMatch(tc6Guide, /list is empty/, 'REVIEWER_GUIDE.md TC-6 matches the submitted case');
+  const tc5Guide = guide.slice(guide.indexOf('### TC-5 '), guide.indexOf('### Negative cases'));
+  assert.doesNotMatch(tc5Guide, /list is empty/, 'REVIEWER_GUIDE.md TC-5 matches the submitted case');
   const reset = seedPlan.slice(seedPlan.indexOf('## Reset'));
   assert.doesNotMatch(reset, /Rebuild before the next run of TC-3/, 'a control-agent message no longer breaks TC-3 within a round');
   const acceptance = seedPlan.slice(seedPlan.indexOf('## Acceptance before submission'), seedPlan.indexOf('## Reset'));
-  assert.match(acceptance, /guided-check organization[^.]*TC-3 and TC-6/, 'acceptance observes TC-3 and TC-6 after writes, in the guided-check organization');
+  assert.match(acceptance, /guided-check organization[^.]*TC-3 and TC-5/, 'acceptance observes TC-3 and TC-5 after writes, in the guided-check organization');
 });
 
 test('the pre-round check sees every conversation, including one the reviewer created', () => {

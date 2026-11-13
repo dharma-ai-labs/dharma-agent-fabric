@@ -40,7 +40,7 @@ The three write tools the app declares (`fabric_dispatch_task`,
 account, and nothing on the server stops a `developer` member from calling
 them. OpenAI receives the submitted cases, not the reviewer guide, so each
 submitted case states in its own expected output what a write adds and
-allows it: TC-3 lists up to 50 rows and checks T5 to T1 in order, and TC-6
+allows it: TC-3 lists up to 50 rows and checks T5 to T1 in order, and TC-5
 allows any conversation the reviewer account created. The reviewer guide
 still asks for writes only after the web and mobile runs, to keep the seed
 clean, and the Reset section below says what each write changes and when the
@@ -54,12 +54,13 @@ seed is rebuilt.
 | Seed operator account | `org_admin` | Dharma operator only, for the steps below |
 
 Owner decision (Nick, 2026-10-31): the reviewer account is `developer`. With
-`developer`, admin-only tools are refused with `insufficient_scope`, and TC-5
-relies on that.
+`developer`, admin-only tools are refused with `insufficient_scope`, and a
+developer member sees only its own control-agent conversations, which TC-5
+relies on.
 
 Owner decision (Nick, 2026-10-31): a dedicated reviewer organization for this
 seed, because any earlier trajectory, agent, conversation or repository in an
-existing one changes TC-2, TC-3 and TC-6. Claude-e04489 seeds it, and asks Nick
+existing one changes TC-2, TC-3 and TC-5. Claude-e04489 seeds it, and asks Nick
 before creating the organization.
 
 Reviewer credentials and the organization ID go to OpenAI through the private
@@ -97,9 +98,9 @@ rebuild changes the substituted copy and never the committed package.
 | Item | Exact state | Used by |
 | --- | --- | --- |
 | Organization | Agent Fabric active, enrollment capability on | all |
-| Runtime activation | The organization's managed runtime activation entitlement is `ready`, which the control agent needs | TC-2, TC-6 |
-| Control agent | The organization control agent (`dharma:organization-control-agent`) is provisioned and `ready`, with exactly one `managed_runtime` endpoint, `active` | TC-2, TC-6 |
-| Members | One `developer` reviewer, bound to the reviewer's sign-in; one operator admin | TC-1, TC-5, TC-6 |
+| Runtime activation | The organization's managed runtime activation entitlement is `ready`, which the control agent needs | TC-2, TC-5 |
+| Control agent | The organization control agent (`dharma:organization-control-agent`) is provisioned and `ready`, with exactly one `managed_runtime` endpoint, `active` | TC-2, TC-5 |
+| Members | One `developer` reviewer, bound to the reviewer's sign-in; one operator admin | TC-1, TC-5 |
 | Repository-agent model | On for the reviewer organization; the onboarding step `repository_agent` is complete | step 3 |
 | GitHub App and control repository | The Dharma GitHub App is installed on a Dharma-controlled demo GitHub organization, and the organization's control repository is provisioned in that same GitHub organization; the onboarding steps `github_app` and `repository` are complete | step 3 |
 | Repository | One synthetic public demo repository whose `README.md` starts with `# Dharma reviewer demo`, cloned on the seed device at a path that has no Codex session history | step 3 |
@@ -108,7 +109,7 @@ rebuild changes the substituted copy and never the committed package.
 | Repository agent | Exactly one, with exactly one endpoint: `local_provider`, `codex`, `local_device`, `active` | TC-2 |
 | Content disclosure policy | Off, never turned on, so every seed capsule is a default capsule with the 90-day retention and no admin-chosen shorter one applies | TC-4 |
 | Trajectories | Exactly T1 to T5, ingested in that order, each revision 1, provider `codex`, evidence mode `structured`, capsule status `completed` (stored as `observed`) | TC-3, TC-4 |
-| Conversations | None created by the reviewer account. The operator's seeding conversation exists but a developer member does not see it | TC-6 |
+| Conversations | None created by the reviewer account. The operator's seeding conversation exists but a developer member does not see it | TC-5 |
 | Not present | No learning policy, no scheduled analysis, no control-agent message, no other device, workspace, agent or trajectory | TC-2, TC-3 |
 
 Trajectory capsules carry only synthetic text written for this seed. They never
@@ -256,7 +257,7 @@ the receipt. If the seed is 60 days old or older, rebuild it (see Reset).
 
 1. Connect ChatGPT (developer mode) to `https://mcp.dharma-ai.io/mcp` as the
    reviewer account.
-2. Run TC-1 to TC-6 and the three negative cases on ChatGPT web, then on
+2. Run TC-1 to TC-5 and the three negative cases on ChatGPT web, then on
    ChatGPT mobile, with the substituted prompts. Then run them again in the
    opposite order. Call no write tool in the reviewer organization during
    acceptance.
@@ -323,7 +324,7 @@ the receipt. If the seed is 60 days old or older, rebuild it (see Reset).
    that the Codex endpoint stays `active` and TC-2 is unchanged.
 6. In the guided-check organization, after its guided checks have run (a
    conversation created and a message sent as a `developer` member), run
-   TC-3 and TC-6 with that build's values on ChatGPT web. Both must still
+   TC-3 and TC-5 with that build's values on ChatGPT web. Both must still
    match their expected outputs, to show a prior write does not change them.
 
 If any result differs, fix the seed or the expected output in this repository
@@ -338,7 +339,7 @@ operation:
 | Cause | Effect on submitted cases | Reset |
 | --- | --- | --- |
 | `fabric_dispatch_task` called in the reviewer organization | Adds one task with status `offered` (the relay is stopped, so it never runs). No submitted case lists tasks. | None needed |
-| `fabric_control_agent_create_session` called by the reviewer account | Adds a conversation to the reviewer's own list. TC-6 lists it, which its expected output allows (only the reviewer's own conversations, never the operator's). The step 7 conversation readback then shows a second conversation. | Rebuild before the next review round |
+| `fabric_control_agent_create_session` called by the reviewer account | Adds a conversation to the reviewer's own list. TC-5 lists it, which its expected output allows (only the reviewer's own conversations, never the operator's). The step 7 conversation readback then shows a second conversation. | Rebuild before the next review round |
 | `fabric_control_agent_send_message` called in the reviewer organization | Records a managed trajectory, which becomes the newest row above T5. TC-3 allows it, since it lists up to 50 rows and checks T5 to T1 in order. The step 6 and step 7 trajectory readbacks then show a sixth row. The turn is also metered. | Rebuild before the next review round |
 | Seed age reaches 60 days (capsule retention, see Seed age) | Approaches the 90-day tombstone that changes TC-4 | Rebuild before the next review round |
 | Relay restarted, another agent or device added, or any other change to the steps 6 and 7 readbacks | Changes TC-2 or TC-3 | Rebuild before the next review round |
