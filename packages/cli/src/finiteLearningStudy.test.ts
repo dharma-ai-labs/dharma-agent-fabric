@@ -148,7 +148,8 @@ test('three executor processes share one cohort, one phase claim and one in-flig
         executor:process.argv[1],idempotencyKey:process.argv[1]+'-analysis-key'});
       ledger.close();process.stdout.write(JSON.stringify(result));`;
     const results = await executorResults(['local', 'roomote', 'gemini'].map(async executor =>
-      JSON.parse((await execute(process.execPath, ['--input-type=module', '-e', source, executor], { timeout: 15_000 })).stdout)));
+      // Longer than the ledger's 30 s busy timeout, so a starved executor reports finite_study_ledger_busy.
+      JSON.parse((await execute(process.execPath, ['--input-type=module', '-e', source, executor], { timeout: 60_000 })).stdout)));
     assert.equal(results.filter(result => result.ok && result.execute).length, 1);
     assert.equal(ledger.status().windowCount, 1);
     assert.equal(ledger.status().trajectoryCount, 100);
