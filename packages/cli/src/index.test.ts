@@ -1282,7 +1282,7 @@ test('repository onboarding skill records scoped API metadata without local path
   assert.match(skill, /bounded, task-related question/);
   assert.match(skill, /dharma skills verify --provider <provider> --workspace <bound-workspace-path>/);
   assert.doesNotMatch(skill, /--grant\s+['"]?dhab_|dhab_[A-Za-z0-9_-]+|bootstrapGrant|organizationApiToken/);
-  assert.match(skill, /verified server-canonical public instructions \(CLI192 portal mode\)/);
+  assert.match(skill, /verified server-canonical public instructions \(portal mode\)/);
   assert.match(skill, /provided original public prompt \(legacy stdin mode\)/);
   assert.match(skill, /Neither mode attests the enclosing human chat/);
   assert.match(skill, /`nativeOriginalUserPromptAttested:false`/);
