@@ -119,7 +119,8 @@ export async function syncNamedSessionTaskExports(input: {
   let rows: Array<{ workKey: string; descriptorHash: string }>;
   try { rows = await input.vault.listProviderSessionTaskExports(input.bindingId, input.identity); }
   catch { return result('blocked', 'task_export_binding_unavailable'); }
-  pending = rows.length;
+  try { pending = await input.vault.countProviderSessionTaskExports(input.bindingId, input.identity); }
+  catch { return result('blocked', 'task_export_binding_unavailable'); }
   pendingKnown = true;
   try {
     const prior = await input.vault.latestProviderSessionTaskExportReceipt(input.bindingId, input.identity);
