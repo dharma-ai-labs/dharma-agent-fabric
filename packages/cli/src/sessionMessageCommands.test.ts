@@ -646,3 +646,24 @@ test('two replies parking for one message at the same moment: one is parked, the
     assert.deepEqual(replies.map(item => item.envelope.messageId), [parked[0]!.messageId], 'the reply reported parked is posted');
   } finally { await a.cleanup(); await b.cleanup(); }
 });
+
+test('a reply posted just before a crash, still in the outbox, is reported sent on the next flush, not failed or posted twice (O4)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { readFile, writeFile } = await import('node:fs/promises');
+    const { flushSessionOutbox, reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { questionId, replyId, transport } = await replyLeftParked(a, b);
+    const file = join(b.home, 'session-messages', 'outbox', `${questionId.toLowerCase()}.json`);
+    const saved = await readFile(file, 'utf8');
+    assert.equal(await reportReceivedDelivery(transport, questionId, { channel: 'codex_queue', outcome: 'processed' }, b.home),
+      'reported');
+    assert.equal(platform.messages.get(replyId)?.envelope.replyTo, questionId);
+    await writeFile(file, saved); // the crash: the post succeeded, the removal never ran
+    const [result] = await flushSessionOutbox(b.home, transport);
+    assert.deepEqual([result?.messageId, result?.action], [questionId, 'sent']);
+    assert.equal([...platform.messages.values()].filter(item => item.envelope.replyTo === questionId).length, 1, 'posted once');
+    assert.deepEqual(await flushSessionOutbox(b.home, transport), [], 'nothing stays parked');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
