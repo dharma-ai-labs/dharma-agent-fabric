@@ -55,6 +55,45 @@ test('relay permits only signed POSTs to the exact provider-session operations',
   }
 });
 
+test('relay permits only the exact session-messaging routes, each with its own method', () => {
+  const base = '/api/v1/orgs/org_customer/agent-fabric';
+  const id = 'd327bcce-2314-4c92-a6b7-13ec5570c1ee';
+  const posts = [`${base}/session-names/attach`, `${base}/session-messages`, `${base}/session-messages/poll`,
+    ...['delivered', 'ack', 'reply'].map(leaf => `${base}/session-messages/${id}/${leaf}`)];
+  const gets = [`${base}/session-names`, `${base}/session-messages/${id}/delivery`];
+  for (const pathname of posts) {
+    const parsed = parseRelayRequest({ ...request, pathname });
+    assert.equal(parsed.pathname, pathname);
+    assert.equal(parsed.headers.authorization, undefined);
+    assert.equal(parsed.headers.cookie, undefined);
+    assert.throws(() => parseRelayRequest({ ...request, pathname, method: 'GET', body: '' }), /route_not_allowed/);
+    assert.throws(() => parseRelayRequest({ ...request, pathname, method: 'DELETE' }), /route_not_allowed/);
+    assert.throws(() => parseRelayRequest({ ...request, pathname, headers: {} }), /signed_headers_required/);
+    assert.throws(() => parseRelayRequest({ ...request, pathname, body: 'x'.repeat(MAX_RELAY_BODY_BYTES + 1) }), /body_too_large/);
+  }
+  for (const pathname of gets) {
+    const parsed = parseRelayRequest({ ...request, method: 'GET', pathname, body: '' });
+    assert.equal(parsed.pathname, pathname);
+    assert.equal(parsed.headers.authorization, undefined);
+    assert.throws(() => parseRelayRequest({ ...request, pathname }), /route_not_allowed/);
+    assert.throws(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '{}' }), /get_body_forbidden/);
+    assert.throws(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '', headers: {} }), /signed_headers_required/);
+  }
+  for (const pathname of [
+    `${base}/session-names/`, `${base}/session-names?name=ef`, `${base}/session-names/ef`,
+    `${base}/session-names/attach/ef`, `${base}/session-names/attach?force=true`, `${base}/session-names/detach`,
+    `${base}/session-messages/`, `${base}/session-messages?limit=1`, `${base}/session-messages/poll?limit=1`,
+    `${base}/session-messages/${id}`, `${base}/session-messages/${id}/`, `${base}/session-messages/${id}/envelope`,
+    `${base}/session-messages/${id}/delivery/x`, `${base}/session-messages/${id}/ack?x=1`,
+    `${base}/session-messages/zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz/ack`, `${base}/session-messages/${id}/${id}/ack`,
+    `${base}/session-messages/../session-names`, `/api/v1/orgs/org_customer/control-agent/session-names`,
+    `/api/v1/orgs/org_customer/session-names`, `/api/v1/orgs/customer/agent-fabric/session-names`,
+  ]) {
+    assert.throws(() => parseRelayRequest({ ...request, pathname }), /route_not_allowed/);
+    assert.throws(() => parseRelayRequest({ ...request, method: 'GET', pathname, body: '' }), /route_not_allowed/);
+  }
+});
+
 test('relay permits only bounded repository collaboration and package routes', () => {
   const id = 'd327bcce-2314-4c92-a6b7-13ec5570c1ee';
   const other = '77f61652-a5eb-46e4-930c-9478cd4a9c31';
