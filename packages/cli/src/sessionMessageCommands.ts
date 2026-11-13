@@ -295,10 +295,12 @@ async function send(flags: Map<string, string | boolean>, host: SessionMessaging
 }
 
 async function inbox(flags: Map<string, string | boolean>, host: SessionMessagingHost) {
-  assertSessionFlags(flags, ['name', 'json'], ['json'], OPTIONS_INVALID);
+  assertSessionFlags(flags, ['name', 'dry-run', 'json'], ['dry-run', 'json'], OPTIONS_INVALID);
   if (flags.has('name') && !SESSION_NAME_PATTERN.test(String(flags.get('name')))) throw new Error(OPTIONS_INVALID);
   const name = flags.get('name') as string | undefined;
-  await localAttachment(host.home, name, null);
+  const planned = await localAttachment(host.home, name, null);
+  // The plan does not poll: that is a network call. It names the session a real inbox would pull for.
+  if (dryRun(flags)) return { ok: true, stage: 'plan', effects: false, action: 'inbox', channel: 'manual_pull', name: planned.name };
   const device = await host.device();
   const attachment = await localAttachment(host.home, name, device);
   const transport = await host.transport();
