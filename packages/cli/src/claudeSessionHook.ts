@@ -139,12 +139,24 @@ async function inbox(host: SessionMessagingHost, stdin: () => Promise<string>, c
     additionalContext: contextFor(attachment.name, printed) } });
 }
 
-/** `dharma hook claude session-start|inbox`, run by the 1.0.7-preview plugin hooks. Any failure
+/** What `--dry-run` reports instead of running: no stdin, device, transport or file is touched (AGENTS.md rule 8). */
+function hookPlan(action: 'session-start' | 'inbox', host: SessionMessagingHost) {
+  const writes = action === 'session-start'
+    ? ['local Claude session record', ...(host.env.CLAUDE_ENV_FILE ? ['CLAUDE_ENV_FILE export'] : [])]
+    : ['hook spool', 'claude_hook delivered report', 'parked reply/ack flush'];
+  return { ok: true, stage: 'plan', effects: false, action, writes } as const;
+}
+
+/** `dharma hook claude session-start|inbox [--dry-run]`, run by the 1.0.7-preview plugin hooks. Any failure
  * (no device, flag off, network, parse) prints nothing: the prompt is never blocked or changed. */
-export async function claudeHookCommand(action: string, input: { host: SessionMessagingHost; stdin: () => Promise<string>;
-  clock?: () => number }):
-  Promise<string> {
+type ClaudeHookInput = { host: SessionMessagingHost; stdin: () => Promise<string>; clock?: () => number };
+export function claudeHookCommand(action: string, input: ClaudeHookInput & { dryRun?: false }): Promise<string>;
+export function claudeHookCommand(action: string, input: ClaudeHookInput & { dryRun?: boolean }):
+  Promise<string | ReturnType<typeof hookPlan>>;
+export async function claudeHookCommand(action: string, input: ClaudeHookInput & { dryRun?: boolean }):
+  Promise<string | ReturnType<typeof hookPlan>> {
   if (action !== 'session-start' && action !== 'inbox') throw new Error('claude_hook_command_invalid');
+  if (input.dryRun) return hookPlan(action, input.host);
   let timer: NodeJS.Timeout | undefined;
   try {
     if (action === 'session-start') return await sessionStart(input.host, input.stdin);

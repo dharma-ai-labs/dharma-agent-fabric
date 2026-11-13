@@ -9967,8 +9967,9 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
   if (command === 'hook') {
     // Run by the Claude plugin 1.0.7-preview hooks; an empty result prints nothing.
     if (subcommand !== 'claude' || !['session-start', 'inbox'].includes(String(positional[2])) || positional.length !== 3
-      || flags.size) throw new Error('claude_hook_command_invalid');
-    return claudeHookCommand(String(positional[2]), { host: sessionMessagingHost(), stdin: () => readHookStdin(process.stdin) });
+      || [...flags].some(([key, value]) => key !== 'dry-run' || value !== true)) throw new Error('claude_hook_command_invalid');
+    return claudeHookCommand(String(positional[2]), { host: sessionMessagingHost(), stdin: () => readHookStdin(process.stdin),
+      dryRun: flags.get('dry-run') === true });
   }
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
