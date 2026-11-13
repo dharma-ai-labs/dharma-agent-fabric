@@ -332,6 +332,24 @@ test('issue #464: turning the upload switch on sends exactly the request sent be
   } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
 });
 
+test('issue #464: with the upload off, a held export whose raw capture has expired is reported unavailable, not pending', async () => {
+  const q = await queuedExportFixture();
+  let refreshes = 0;
+  try {
+    const expired = await q.vault.enforceRawEvidenceRetention({ retentionDays: 30, now: new Date(Date.now() + 31 * 86400000) });
+    assert.equal(expired.deleted, 1);
+    // No `send`, as while no server route accepts task exports.
+    const result = await syncNamedSessionTaskExports({ vault: q.vault, bindingId: q.f.input.binding.bindingId,
+      identity: q.scope, loadPolicy: async () => { refreshes++; return q.f.input.policy; } });
+    assert.deepEqual(result, { state: 'blocked', pending: 1, delivered: 0, code: 'task_export_retained_content_unavailable',
+      acceptedLearningObservation: false });
+    assert.equal(refreshes, 0);
+    const held = q.vault.listProviderSessionTaskExports(q.f.input.binding.bindingId, q.scope);
+    assert.deepEqual(held.map(row => row.workKey), [q.staged.outbox!.workKey]);
+    assert.equal((await q.vault.getBlob(q.request.exportHash)).toString('utf8'), q.request.exportBytes);
+  } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
+});
+
 test('expired raw evidence blocks export without recreating content or executing a provider', async () => {
   const q = await queuedExportFixture();
   try {
