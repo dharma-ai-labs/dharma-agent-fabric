@@ -10192,6 +10192,8 @@ if (isDirectExecution(process.argv[1], import.meta.url)) {
   run(argv).then((value) => {
     print(value);
     process.exitCode = commandExitCode(argv, value);
+    // A hook ends once its output is written: a pending relay socket (up to 90 s) must not keep it alive.
+    if (argv[0] === 'hook') process.stdout.write('', () => process.exit());
   }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${message}\n`);

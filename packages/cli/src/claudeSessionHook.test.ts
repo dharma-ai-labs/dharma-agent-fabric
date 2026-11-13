@@ -290,7 +290,7 @@ test('a stalled delivery report never keeps the inbox hook past its hard deadlin
       void claudeHookCommand('inbox', { host: { ...f.host, transport: async () => stalled }, stdin: async () => f.prompt() })
         .then(output => { settled = output; });
       const turns = async (count: number) => { for (let index = 0; index < count; index += 1) await new Promise(done => setImmediate(done)); };
-      for (let index = 0; index < 500 && !reportStarted; index += 1) await turns(1);
+      for (const started = Date.now(); !reportStarted && Date.now() - started < 10_000;) await turns(1);
       assert.ok(reportStarted, 'the report started and stalled');
       t.mock.timers.tick(hardDeadline ?? 12_000);
       await turns(20);

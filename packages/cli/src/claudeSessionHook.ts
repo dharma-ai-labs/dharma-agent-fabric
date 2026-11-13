@@ -13,6 +13,9 @@ import {
 
 /** The plugin's hook timeout is 15 s; no new platform call starts after this much hook time. */
 export const CLAUDE_HOOK_DEADLINE_MS = 8_000;
+/** One platform call can stall for up to 90 s, so the inbox hook returns '' at this point, under the 15 s plugin timeout.
+ * A frame whose report was cut off stays spooled as 'reporting' and is read back on the next prompt. */
+export const CLAUDE_HOOK_HARD_DEADLINE_MS = 12_000;
 /** At most this many messages, and this many characters of context, in one prompt. */
 export const CLAUDE_HOOK_MAX_MESSAGES = 5;
 export const CLAUDE_HOOK_MAX_CONTEXT_CHARS = 40_000;
@@ -142,10 +145,12 @@ export async function claudeHookCommand(action: string, input: { host: SessionMe
   clock?: () => number }):
   Promise<string> {
   if (action !== 'session-start' && action !== 'inbox') throw new Error('claude_hook_command_invalid');
+  let timer: NodeJS.Timeout | undefined;
   try {
-    return action === 'session-start' ? await sessionStart(input.host, input.stdin)
-      : await inbox(input.host, input.stdin, input.clock ?? Date.now);
-  } catch { return ''; }
+    if (action === 'session-start') return await sessionStart(input.host, input.stdin);
+    const cutOff = new Promise<string>(done => { timer = setTimeout(() => done(''), CLAUDE_HOOK_HARD_DEADLINE_MS); });
+    return await Promise.race([inbox(input.host, input.stdin, input.clock ?? Date.now), cutOff]);
+  } catch { return ''; } finally { clearTimeout(timer); }
 }
 
 /** Reads the hook's JSON from stdin, bounded in size and time. */
