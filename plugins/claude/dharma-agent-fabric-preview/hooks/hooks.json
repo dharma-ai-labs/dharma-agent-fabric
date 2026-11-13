@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v dharma >/dev/null 2>&1 && dharma hook claude session-start >/dev/null 2>&1; exit 0",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/dharma-hook.mjs\" session-start",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v dharma >/dev/null 2>&1 && dharma hook claude inbox 2>/dev/null; exit 0",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/dharma-hook.mjs\" inbox",
             "timeout": 15
           }
         ]

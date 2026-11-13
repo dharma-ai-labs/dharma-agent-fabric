@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -52,24 +52,8 @@ test('the preview has exactly SessionStart and UserPromptSubmit hooks, guarded t
   };
   const start = command('SessionStart');
   const inbox = command('UserPromptSubmit');
-  assert.equal(start, 'command -v dharma >/dev/null 2>&1 && dharma hook claude session-start >/dev/null 2>&1; exit 0');
-  assert.equal(inbox, 'command -v dharma >/dev/null 2>&1 && dharma hook claude inbox 2>/dev/null; exit 0');
-});
-
-test('without the CLI on PATH both hook commands exit 0 and print nothing', (t) => {
-  const hooks = json(`${PREVIEW}/hooks/hooks.json`).hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
-  // Claude Code runs hook commands in a POSIX shell (Git Bash on Windows). PATH holds only the shell's own directory.
-  const shell = process.platform === 'win32'
-    ? (process.env.PATH ?? '').split(delimiter).map(entry => join(entry, 'sh.exe')).find(path => existsSync(path))
-    : '/bin/sh';
-  if (!shell || !existsSync(shell)) { t.skip('no POSIX shell on this runner'); return; }
-  const sh: string = shell;
-  for (const event of ['SessionStart', 'UserPromptSubmit']) {
-    const result: SpawnSyncReturns<string> = spawnSync(sh, ['-c', hooks[event]![0]!.hooks[0]!.command], { encoding: 'utf8', input: '{}',
-      env: { PATH: process.platform === 'win32' ? dirname(sh) : join(root, 'no-such-directory') } });
-    assert.equal(result.status, 0, event);
-    assert.equal(result.stdout, '', event);
-  }
+  assert.equal(start, 'node "${CLAUDE_PLUGIN_ROOT}/hooks/dharma-hook.mjs" session-start');
+  assert.equal(inbox, 'node "${CLAUDE_PLUGIN_ROOT}/hooks/dharma-hook.mjs" inbox');
 });
 
 // R1: Claude Code on Windows without Git Bash runs hook commands in PowerShell, which rejects `&&` (5.1) and has no
@@ -88,11 +72,13 @@ test('hook commands need no POSIX shell: no &&, command -v or /dev/null, and the
     PATH: [cliDirectory, dirname(process.execPath), ...(windows ? [join(systemRoot, 'System32'),
       join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0')] : ['/usr/bin', '/bin'])].filter(Boolean).join(delimiter),
     CLAUDE_PLUGIN_ROOT: pluginRoot,
-    ...(windows ? { SystemRoot: systemRoot, ComSpec: join(systemRoot, 'System32', 'cmd.exe') } : {}) });
-  const fakeCli = (exitCode: number) => {
+    ...(windows ? { SystemRoot: systemRoot, ComSpec: join(systemRoot, 'System32', 'cmd.exe'), PATHEXT: '.COM;.EXE;.BAT;.CMD' } : {}) });
+  const fakeCli = (exitCode: number, stdout = '') => {
     const directory = mkdtempSync(join(tmpdir(), 'dharma-fake-cli-'));
-    if (windows) writeFileSync(join(directory, 'dharma.cmd'), `@echo off\r\necho usage: dharma 1>&2\r\nexit /b ${exitCode}\r\n`);
-    else writeFileSync(join(directory, 'dharma'), `#!/bin/sh\necho 'usage: dharma' >&2\nexit ${exitCode}\n`, { mode: 0o755 });
+    if (windows) writeFileSync(join(directory, 'dharma.cmd'),
+      `@echo off\r\n${stdout ? `echo ${stdout}\r\n` : ''}echo usage: dharma 1>&2\r\nexit /b ${exitCode}\r\n`);
+    else writeFileSync(join(directory, 'dharma'),
+      `#!/bin/sh\n${stdout ? `echo '${stdout}'\n` : ''}echo 'usage: dharma' >&2\nexit ${exitCode}\n`, { mode: 0o755 });
     return directory;
   };
   // Each shell runs the command as Claude Code does: ${CLAUDE_PLUGIN_ROOT} substituted, hook JSON on stdin.
@@ -119,6 +105,14 @@ test('hook commands need no POSIX shell: no &&, command -v or /dev/null, and the
         }
       }
     }
+    // The attached case: the inbox output reaches Claude, the CLI's stderr does not; SessionStart output never does.
+    const attached = fakeCli(0, '{"hookSpecificOutput":{}}');
+    try {
+      for (const [action, expected] of [['inbox', '{"hookSpecificOutput":{}}'], ['session-start', '']]) {
+        const result = spawnSync(process.execPath, [launcher, action!], { encoding: 'utf8', input: '{}', env: env(attached) });
+        assert.deepEqual([result.status, result.stdout.trim(), result.stderr], [0, expected, ''], `${action} attached`);
+      }
+    } finally { rmSync(attached, { recursive: true, force: true }); }
   } finally {
     for (const directory of [missing, older, notAttached]) rmSync(directory, { recursive: true, force: true });
   }
