@@ -129,6 +129,10 @@ import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState
 import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { readNamedSessionPackageContent, readNamedSessionRepositoryContext, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
+import { sessionNamesCommand, type SessionMessagingHost } from './sessionNames.js';
+import { readSessionMessageStdin, sessionMessageCommand } from './sessionMessageCommands.js';
+import { sessionWatchCommand } from './sessionWatch.js';
+import { claudeHookCommand, readHookStdin } from './claudeSessionHook.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
@@ -268,6 +272,7 @@ function print(value: Output): void {
 }
 
 export function formatCommandOutput(value:unknown):string{
+  if(value==='')return '';
   if(typeof value==='string')return value+'\n';
   const streaming=value&&typeof value==='object'&&!Array.isArray(value)
     &&(value as Record<string,unknown>).schema==='dharma.device-signing-maintenance-controller-progress/v1';
@@ -5548,6 +5553,20 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   const hostScope = currentBootstrapHostScope();
   const setupSessionScope = currentAcceptedSetupSessionScope();
   const supervisorOwner = currentNamedSessionChildOwner();
+  if (action === 'attach' || action === 'list') {
+    // Delivery-only bindings carry messages only, so the Linux sandbox and workspace gates below do not
+    // apply; the platform refuses to route any execution to a codex_queue or claude_hook binding.
+    if (hostScope || setupSessionScope || supervisorOwner) throw new Error('session_names_scope_invalid');
+    return sessionNamesCommand(action, flags, sessionMessagingHost());
+  }
+  if (action === 'watch') {
+    if (hostScope || setupSessionScope || supervisorOwner) throw new Error('session_names_scope_invalid');
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once('SIGINT', stop); process.once('SIGTERM', stop);
+    try { return await sessionWatchCommand(flags, sessionMessagingHost(), undefined, controller.signal); }
+    finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
+  }
   if(action==='reconcile-stopped-lock'&&(hostScope||setupSessionScope||supervisorOwner
     ||[...flags.keys()].some(k=>!['name','workspace-id','registration-sha256','lock-sha256','apply','dry-run','json'].includes(k))
     ||['apply','dry-run','json'].some(k=>flags.has(k)&&flags.get(k)!==true)
@@ -6255,6 +6274,20 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
       disclosureReady: false, note: 'No local source or trajectory history was read.' },
     nativeSkills: nativeSkills.installed, nativeSkillFailures: nativeSkills.failures,
     workspaceSync: synchronized, relay };
+}
+
+/** Process-backed host for `sessions attach|list` and `msg`: the device and signed client are read
+ * only after a command has checked its options and consent. */
+function sessionMessagingHost(): SessionMessagingHost {
+  return { home: dharmaHome(), cwd: process.cwd(), env: process.env, now: () => new Date(),
+    device: async () => {
+      const config = await readDeviceConfig();
+      if (!config) throw new Error('session_messaging_device_not_enrolled');
+      const identity = await enrolledDeviceIdentity(config);
+      return { organizationId: config.organizationId, deviceId: config.deviceId,
+        privateKey: createPrivateKey({ key: identity.privateJwk, format: 'jwk' }) };
+    },
+    transport: () => client(), stdin: () => readSessionMessageStdin(process.stdin) };
 }
 
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
@@ -9939,6 +9972,13 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
   }
   if (command === 'bootstrap') return bootstrap(flags);
   if (command === 'sessions') return namedSessionCommand(String(subcommand), flags);
+  if (command === 'msg') return sessionMessageCommand(String(subcommand), flags, sessionMessagingHost());
+  if (command === 'hook') {
+    // Run by the Claude plugin 1.0.7-preview hooks; an empty result prints nothing.
+    if (subcommand !== 'claude' || !['session-start', 'inbox'].includes(String(positional[2])) || positional.length !== 3
+      || flags.size) throw new Error('claude_hook_command_invalid');
+    return claudeHookCommand(String(positional[2]), { host: sessionMessagingHost(), stdin: () => readHookStdin(process.stdin) });
+  }
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
   if (command === 'providers' && subcommand === 'list') return {
