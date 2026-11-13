@@ -212,8 +212,8 @@ async function flushParked(transport: SessionMessageTransport, parked: ParkedSes
 }
 
 /** Posts every parked request (or the one for `messageId`) whose message the platform no longer shows as
- * `queued`. Sent requests are removed; parked ones stay. A failed one is removed when the caller shows the
- * results (`shown`: `msg inbox`, `msg reply`, `msg ack`); otherwise it is kept marked failed until one does. */
+ * `queued`. Sent requests are removed; parked ones stay. A failed one is kept marked failed until a caller has
+ * returned it (`clearShownFailures`), unless `shown` says the caller shows it right away (by throwing its code). */
 export async function flushSessionOutbox(home: string, transport: SessionMessageTransport, messageId?: string,
   options: { shown?: boolean } = {}): Promise<SessionOutboxResult[]> {
   let ids: string[];
@@ -240,6 +240,14 @@ export async function flushSessionOutbox(home: string, transport: SessionMessage
   return results;
 }
 
+/** Removes the failed markers of results the caller is about to return: only once nothing after the flush can
+ * throw, so a refusal is never removed before it is shown. A file that no longer holds a failed marker stays. */
+async function clearShownFailures(home: string, results: Iterable<{ messageId: string; action: string }>) {
+  for (const { messageId, action } of results) {
+    if (action === 'failed' && (await readParked(home, messageId))?.failed) await rm(outboxPath(home, messageId), { force: true });
+  }
+}
+
 const parkedExists = (kind: string) => new Error(`session_parked_request_exists: a ${kind} for this message is already parked`
   + ' on this device; it is sent once the message is recorded delivered, and dharma msg inbox retries it');
 
@@ -257,10 +265,16 @@ async function postOrPark(home: string, transport: SessionMessageTransport, park
   const earlier = await readParked(home, parked.messageId);
   if (earlier) {
     if (delivery?.state === 'queued') throw parkedExists(earlier.kind);
-    outbox = await flushSessionOutbox(home, transport, parked.messageId, { shown: true });
+    // A refusal stays marked failed on disk until this request's post resolves: if that post throws, the next
+    // inbox still shows it.
+    outbox = await flushSessionOutbox(home, transport, parked.messageId);
     if (outbox[0]?.action === 'parked') throw parkedExists(earlier.kind);
   }
-  if (delivery?.state !== 'queued') return { state: (await postParked(transport, parked)).state, outbox };
+  if (delivery?.state !== 'queued') {
+    const { state } = await postParked(transport, parked);
+    await clearShownFailures(home, outbox);
+    return { state, outbox };
+  }
   // Created exclusively: a request another process parked since the read above is refused, never replaced.
   try { await writeSessionStateFile(outboxPath(home, parked.messageId), parked, { exclusive: true }); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
@@ -349,9 +363,9 @@ async function inbox(flags: Map<string, string | boolean>, host: SessionMessagin
   const transport = await host.transport();
   // Every parked request is retried first, so one left by a failed flush never waits for a report that already
   // happened, and each result is shown. Requests on messages this pull records delivered are flushed once more.
-  const outbox = new Map<string, Record<string, unknown>>();
+  const outbox = new Map<string, SessionOutboxResult & { note?: string }>();
   const flushOutbox = async () => {
-    for (const result of await flushSessionOutbox(host.home, transport, undefined, { shown: true })) {
+    for (const result of await flushSessionOutbox(host.home, transport)) {
       outbox.set(result.messageId, result.action === 'parked' ? { ...result, note: OUTBOX_PARKED_NOTE } : { ...result });
     }
   };
@@ -377,6 +391,8 @@ async function inbox(flags: Map<string, string | boolean>, host: SessionMessagin
       sentAt: message.createdAt, replyTo: message.replyTo, delivery, frame });
   }
   if (reported) await flushOutbox();
+  // Failed requests are removed only now, when nothing above can throw: a failed poll or write shows them next time.
+  await clearShownFailures(host.home, outbox.values());
   return { ok: true, channel: 'manual_pull', name: attachment.name, messages, reportFailed, refused, outbox: [...outbox.values()] };
 }
 
