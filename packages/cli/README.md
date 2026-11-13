@@ -622,9 +622,15 @@ artifact content or a bootstrap grant. Policy scope, expiry, immutability and
 size are checked again during preparation. The artifact is task-level evidence,
 not native-wire replay, a publication, an independent grade or an admitted
 learning observation. The client does not upload it yet: no server route accepts
-task exports (issue #464), so staged exports are held encrypted in the local
-vault and session health reports `taskExports` as `pending` with the code
-`task_export_upload_not_available` and the number held. Holding an export does
+task exports (issue #464). While the upload is off, named work does not prepare
+or stage the artifact at all (issue #467): no outbox row or portable export blob
+is added and the work receipt has no `portableExport`. The public context kept
+for the receipt's `providerContext` is retained as before; staging only stored
+the same bytes again.
+Exports staged by earlier versions are kept, not deleted: they stay held
+encrypted in the local vault and session health reports `taskExports` as
+`pending` with the code `task_export_upload_not_available` and the full number
+held, not a number capped at 100. Holding an export does
 not keep its raw capture: the capture still expires after the local raw retention
 period (30 days by default), and health then reports `taskExports` as `blocked`
 with the code `task_export_retained_content_unavailable`. The switch

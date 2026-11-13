@@ -398,9 +398,11 @@ async function repositoryStateFixture(t: TestContext) {
 
 test('repository-state retention keeps raw and portable evidence in separate encrypted blobs', async t => {
   const { root, vault, f, binding, before, after } = await repositoryStateFixture(t);
+  // Staging runs only with the upload switched on (#467).
   const receipt = await retainNamedSessionRepositoryState({ vault, binding, workId: f.input.capture.workId,
     capture: f.input.capture, before, after, activeBundleId: randomUUID(), activeBundleHash: `sha256:${'a'.repeat(64)}`,
-    taskExport: { policy: f.input.policy, contextBytes: f.input.contextBytes, contextHash: f.input.contextHash } });
+    taskExport: { policy: f.input.policy, contextBytes: f.input.contextBytes, contextHash: f.input.contextHash },
+    taskExportUploadEnabled: true });
   assert.equal(receipt.portableExport?.state, 'ready');
   if (receipt.portableExport?.state !== 'ready') throw new Error('Portable retention not ready');
   const raw = await vault.getBlob(receipt.captureHash), portable = await vault.getBlob(receipt.portableExport.exportHash);
