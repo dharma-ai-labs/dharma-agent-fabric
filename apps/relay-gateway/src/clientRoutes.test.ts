@@ -425,8 +425,17 @@ const fixture = (files: Record<string, string[]>, handWritten: HandWritten[] = [
   files: Object.keys(files), read: file => files[file]?.join('\n'), handWritten,
 });
 
+// The two assertions over the real client source. They are functions so that the last test can
+// read what a failure tells the person who gets it.
+function assertReadable(problems: string[]): void {
+  assert.deepEqual(problems, []);
+}
+function assertAccepted(rejected: string[]): void {
+  assert.deepEqual(rejected, []);
+}
+
 test('the guard reads every signed call in the client source', () => {
-  assert.deepEqual(client.problems, []);
+  assertReadable(client.problems);
   for (const [file, method, route] of [
     ['packages/relay-client/src/index.ts', 'POST', '/agent-fabric/sessions'],
     ['packages/relay-client/src/index.ts', 'GET', '/control-agent/sessions'],
@@ -438,7 +447,7 @@ test('the guard reads every signed call in the client source', () => {
 });
 
 test('the gateway allowlist accepts every signed route the client source builds', () => {
-  assert.deepEqual(rejectedByGateway(client.sites, KNOWN_REJECTED), []);
+  assertAccepted(rejectedByGateway(client.sites, KNOWN_REJECTED));
 });
 
 test('a known rejection is still sent by the client and still rejected by the gateway', () => {
@@ -545,4 +554,34 @@ test('a signed call the guard cannot read fails with its file and line, unless i
 
   const stale = fixture({ 'packages/cli/src/widgets.ts': ["export const poll = (fabric: Client) => fabric.signedPost('/agent-fabric/tasks/poll', {});"] }, byHand.slice(0, 1));
   assert.match(stale.problems.join('\n'), /^packages\/cli\/src\/widgets\.ts `fabric\.signedPost\(route, \{\}\)`: this hand-written entry matches no call/);
+});
+
+test('a guard failure says what to change', () => {
+  const failure = (run: () => void): string => {
+    try { run(); } catch (error) { return (error as Error).message; }
+    return 'no failure';
+  };
+
+  // A route that reaches the signed call through a class method: the guard cannot find its callers.
+  const unread = fixture({ 'packages/cli/src/widgets.ts': [
+    'class Widgets {',
+    '  constructor(private fabric: Client) {}',
+    '  send(route: string) { return this.fabric.signedPost(route, {}); }',
+    '}',
+    "export const sendWidget = (widgets: Widgets) => widgets.send('/agent-fabric/widgets');",
+  ] });
+  const cannotRead = failure(() => assertReadable(unread.problems));
+  assert.match(cannotRead, /packages\/cli\/src\/widgets\.ts:3 `this\.fabric\.signedPost\(route, \{\}\)`: `route` has no example value/);
+  assert.match(cannotRead, /add one line to EXAMPLES \(run-time values only, never a whole route\)/);
+  assert.match(cannotRead, /add a HAND_WRITTEN entry with the file, the exact call text and its routes/);
+
+  // A new client route that the allowlist does not have.
+  const added = fixture({ 'packages/cli/src/widgets.ts': [
+    "export const sendWidget = (fabric: Client, body: unknown) => fabric.signedPost('/agent-fabric/widgets', body);",
+  ] });
+  const notAllowed = failure(() => assertAccepted(rejectedByGateway(added.sites)));
+  assert.match(notAllowed, /POST \/agent-fabric\/widgets -> route_not_allowed \(packages\/cli\/src\/widgets\.ts:1\)/);
+  assert.match(notAllowed, /apps\/relay-gateway\/src\/protocol\.ts/);
+  assert.match(notAllowed, /protocol\.test\.ts/);
+  assert.match(notAllowed, /KNOWN_REJECTED is only for a route with an open issue/);
 });
