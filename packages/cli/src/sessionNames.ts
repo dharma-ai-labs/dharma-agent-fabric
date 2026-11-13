@@ -1,5 +1,5 @@
 import { randomUUID, type KeyObject } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import {
   SESSION_NAME_PATTERN,
@@ -45,13 +45,14 @@ export function sessionStatePath(home: string, ...parts: string[]): string {
   return resolve(home, 'session-messages', ...parts);
 }
 
-/** Atomic private JSON write: temp file in the same directory, then rename. */
-export async function writeSessionStateFile(path: string, value: unknown): Promise<void> {
+/** Atomic private JSON write: temp file in the same directory, then rename. With `exclusive`, the complete
+ * temp file is hard-linked into place instead, which fails with EEXIST when the target already exists. */
+export async function writeSessionStateFile(path: string, value: unknown, options: { exclusive?: boolean } = {}): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-    await rename(temporary, path);
+    await (options.exclusive ? link : rename)(temporary, path);
   } finally { await rm(temporary, { force: true }); }
 }
 

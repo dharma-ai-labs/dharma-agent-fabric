@@ -136,7 +136,8 @@ function conflict(error: unknown) {
 }
 
 /** Report one delivery; a message already delivered on another channel is reported as such, not retried.
- * With `home`, a reply or ack the recipient parked during the delivering turn is posted right after. */
+ * With `home`, a reply or ack the recipient parked during the delivering turn is posted right after. One whose
+ * post is uncertain stays parked and one the platform refuses is kept marked failed: `msg inbox` retries or shows it. */
 export async function reportReceivedDelivery(transport: SessionMessageTransport, messageId: string, report: SessionDeliveredReport,
   home?: string) {
   let result: 'reported' | 'already_delivered';
@@ -160,6 +161,8 @@ interface ParkedSessionRequest {
   kind: 'reply' | 'ack';
   reply: { envelope: SessionMessage; replyToken: string; nextReplyToken: string } | null;
   parkedAt: string;
+  /** Set when the platform definitively refused the post where nobody saw it; kept until it is shown. */
+  failed?: { code: string };
 }
 
 function outboxPath(home: string, messageId: string) {
@@ -181,11 +184,38 @@ async function postParked(transport: SessionMessageTransport, parked: ParkedSess
 }
 
 export type SessionOutboxAction = 'parked' | 'sent' | 'failed';
+export interface SessionOutboxResult { messageId: string; kind: 'reply' | 'ack'; action: SessionOutboxAction; code?: string }
+
+const errorCode = (error: unknown) => error instanceof Error ? error.message.slice(0, 120) : 'unknown';
+
+/** One parked request: still `parked` while its message is `queued` or the post is uncertain (with the code);
+ * `sent` once posted, or when the platform refuses a reply it already holds (posted before a crash or by a
+ * concurrent flush); otherwise a definitive refusal is `failed` with its code. */
+async function flushParked(transport: SessionMessageTransport, parked: ParkedSessionRequest): Promise<SessionOutboxResult> {
+  const { messageId, kind } = parked;
+  if (parked.failed) return { messageId, kind, action: 'failed', code: parked.failed.code };
+  try {
+    const delivery = await readSessionMessageDelivery(transport, messageId);
+    if (!delivery || delivery.state === 'queued') return { messageId, kind, action: 'parked' };
+    await postParked(transport, parked);
+    return { messageId, kind, action: 'sent' };
+  } catch (error) {
+    const code = errorCode(error);
+    if (isUncertainSessionTransportFailure(error)) return { messageId, kind, action: 'parked', code };
+    try {
+      if (kind === 'reply' && await readSessionMessageDelivery(transport, parked.reply!.envelope.messageId)) {
+        return { messageId, kind, action: 'sent' };
+      }
+    } catch (check) { return { messageId, kind, action: 'parked', code: errorCode(check) }; }
+    return { messageId, kind, action: 'failed', code };
+  }
+}
 
 /** Posts every parked request (or the one for `messageId`) whose message the platform no longer shows as
- * `queued`. A request whose post is uncertain stays parked; a definitive refusal is dropped and reported. */
-export async function flushSessionOutbox(home: string, transport: SessionMessageTransport, messageId?: string):
-  Promise<Array<{ messageId: string; action: SessionOutboxAction; code?: string }>> {
+ * `queued`. Sent requests are removed; parked ones stay. A failed one is removed when the caller shows the
+ * results (`shown`: `msg inbox`, `msg reply`, `msg ack`); otherwise it is kept marked failed until one does. */
+export async function flushSessionOutbox(home: string, transport: SessionMessageTransport, messageId?: string,
+  options: { shown?: boolean } = {}): Promise<SessionOutboxResult[]> {
   let ids: string[];
   if (messageId !== undefined) ids = [messageId];
   else {
@@ -197,43 +227,50 @@ export async function flushSessionOutbox(home: string, transport: SessionMessage
       throw error;
     }
   }
-  const results: Array<{ messageId: string; action: SessionOutboxAction; code?: string }> = [];
+  const results: SessionOutboxResult[] = [];
   for (const id of ids) {
     const parked = await readParked(home, id);
     if (!parked) continue;
-    const delivery = await readSessionMessageDelivery(transport, id);
-    if (!delivery || delivery.state === 'queued') { results.push({ messageId: id, action: 'parked' }); continue; }
-    try {
-      await postParked(transport, parked);
-      results.push({ messageId: id, action: 'sent' });
-    } catch (error) {
-      if (isUncertainSessionTransportFailure(error)) { results.push({ messageId: id, action: 'parked' }); continue; }
-      results.push({ messageId: id, action: 'failed', code: error instanceof Error ? error.message.slice(0, 120) : 'unknown' });
-    }
-    await rm(outboxPath(home, id), { force: true });
+    const result = await flushParked(transport, parked);
+    results.push(result);
+    if (result.action === 'parked') continue;
+    if (result.action === 'sent' || options.shown) await rm(outboxPath(home, id), { force: true });
+    else if (!parked.failed) await writeSessionStateFile(outboxPath(home, id), { ...parked, failed: { code: result.code ?? 'unknown' } });
   }
   return results;
 }
 
+const parkedExists = (kind: string) => new Error(`session_parked_request_exists: a ${kind} for this message is already parked`
+  + ' on this device; it is sent once the message is recorded delivered, and dharma msg inbox retries it');
+
 /** Park the recipient's request while the platform still shows its message `queued`; post it otherwise.
- * Returns `parked`, or the state the post left (the reply's own state, or the acknowledged original). */
-async function postOrPark(home: string, transport: SessionMessageTransport, parked: ParkedSessionRequest): Promise<string> {
+ * Returns `parked`, or the state the post left (the reply's own state, or the acknowledged original), and
+ * `outbox`: what became of an earlier request parked for this message, posted first. */
+async function postOrPark(home: string, transport: SessionMessageTransport, parked: ParkedSessionRequest):
+  Promise<{ state: string; outbox: SessionOutboxResult[] }> {
   const delivery = await readSessionMessageDelivery(transport, parked.messageId);
   // One parked request per message: a second reply or ack would replace or overtake the first, which was
   // already reported accepted. Once the message is no longer queued (a flush after delivered may have failed),
-  // the earlier request is posted first; this one goes ahead only when that one is no longer parked.
-  if (await readParked(home, parked.messageId)) {
-    if (delivery?.state === 'queued') throw new Error('session_parked_request_exists');
-    const [flushed] = await flushSessionOutbox(home, transport, parked.messageId);
-    if (flushed?.action === 'parked') throw new Error('session_parked_request_exists');
+  // the earlier request is posted first and its result is returned; this one goes ahead only when that one is
+  // no longer parked.
+  let outbox: SessionOutboxResult[] = [];
+  const earlier = await readParked(home, parked.messageId);
+  if (earlier) {
+    if (delivery?.state === 'queued') throw parkedExists(earlier.kind);
+    outbox = await flushSessionOutbox(home, transport, parked.messageId, { shown: true });
+    if (outbox[0]?.action === 'parked') throw parkedExists(earlier.kind);
   }
-  if (delivery?.state !== 'queued') return (await postParked(transport, parked)).state;
-  await writeSessionStateFile(outboxPath(home, parked.messageId), parked);
+  if (delivery?.state !== 'queued') return { state: (await postParked(transport, parked)).state, outbox };
+  // Created exclusively: a request another process parked since the read above is refused, never replaced.
+  try { await writeSessionStateFile(outboxPath(home, parked.messageId), parked, { exclusive: true }); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    throw parkedExists((await readParked(home, parked.messageId))?.kind ?? parked.kind);
+  }
   // A deliverer may have reported between the read and the write: flush once more, so nothing waits for
   // a report that already happened.
-  const [flushed] = await flushSessionOutbox(home, transport, parked.messageId);
+  const [flushed] = await flushSessionOutbox(home, transport, parked.messageId, { shown: true });
   if (flushed?.action === 'failed') throw new Error(flushed.code ?? 'session_parked_request_failed');
-  return flushed?.action === 'sent' ? (parked.kind === 'ack' ? 'acknowledged' : 'queued') : 'parked';
+  return { state: flushed?.action === 'sent' ? (parked.kind === 'ack' ? 'acknowledged' : 'queued') : 'parked', outbox };
 }
 
 function text(flags: Map<string, string | boolean>, key: string) {
@@ -310,23 +347,37 @@ async function inbox(flags: Map<string, string | boolean>, host: SessionMessagin
   const device = await host.device();
   const attachment = await localAttachment(host.home, name, device);
   const transport = await host.transport();
+  // Every parked request is retried first, so one left by a failed flush never waits for a report that already
+  // happened, and each result is shown. Requests on messages this pull records delivered are flushed once more.
+  const outbox = new Map<string, Record<string, unknown>>();
+  const flushOutbox = async () => {
+    for (const result of await flushSessionOutbox(host.home, transport, undefined, { shown: true })) {
+      outbox.set(result.messageId, result.action === 'parked' ? { ...result, note: OUTBOX_PARKED_NOTE } : { ...result });
+    }
+  };
+  await flushOutbox();
   const { accepted, refused } = await receiveSessionMessages(host, attachment, transport, device, { includeDelivered: true });
   const messages = [];
   const reportFailed: Array<{ messageId: string; code: string }> = [];
+  let reported = false;
   for (const { message, frame, queued } of accepted) {
     // Recorded before it is shown: a manual pull stops any later automatic delivery of this message.
     // A failed report is not shown (the message stays queued and comes back on the next inbox), and every
     // message already recorded delivered is still shown. A message the platform already lists as delivered
     // (not yet replied to) is listed again as `already_delivered`, with no second report.
     let delivery: 'reported' | 'already_delivered' = 'already_delivered';
-    if (queued) try { delivery = await reportReceivedDelivery(transport, message.messageId, { channel: 'manual_pull' }, host.home); } catch (error) {
-      reportFailed.push({ messageId: message.messageId, code: error instanceof Error ? error.message.slice(0, 120) : 'unknown' });
+    if (queued) try {
+      delivery = await reportReceivedDelivery(transport, message.messageId, { channel: 'manual_pull' });
+      reported = true;
+    } catch (error) {
+      reportFailed.push({ messageId: message.messageId, code: errorCode(error) });
       continue;
     }
     messages.push({ messageId: message.messageId, from: message.sender.name, to: message.recipient.name,
       sentAt: message.createdAt, replyTo: message.replyTo, delivery, frame });
   }
-  return { ok: true, channel: 'manual_pull', name: attachment.name, messages, reportFailed, refused };
+  if (reported) await flushOutbox();
+  return { ok: true, channel: 'manual_pull', name: attachment.name, messages, reportFailed, refused, outbox: [...outbox.values()] };
 }
 
 async function received(flags: Map<string, string | boolean>, host: SessionMessagingHost) {
@@ -337,7 +388,10 @@ async function received(flags: Map<string, string | boolean>, host: SessionMessa
   return record;
 }
 
-const PARKED_NOTE = 'The message is still being delivered to this session; this is sent as soon as its delivery is recorded.';
+const PARKED_NOTE = 'The message is still being delivered to this session; this is sent as soon as its delivery is recorded,'
+  + ' and dharma msg inbox retries it if that send fails.';
+const OUTBOX_PARKED_NOTE = 'Still parked on this device: sent once its message is recorded delivered; the next dharma msg inbox retries it.';
+const withOutbox = (outbox: SessionOutboxResult[]) => outbox.length ? { outbox } : {};
 const postedState = (state: string) => state === 'parked' ? { state, note: PARKED_NOTE } : { state };
 
 async function reply(flags: Map<string, string | boolean>, host: SessionMessagingHost) {
@@ -355,11 +409,11 @@ async function reply(flags: Map<string, string | boolean>, host: SessionMessagin
   const from = await localAttachment(host.home, original.recipientName, device);
   const { envelope, replyToken } = buildSessionMessage(device, from, { to: original.envelope.sender.name, body,
     replyTo: original.envelope.messageId, now: host.now() });
-  const state = await postOrPark(host.home, await host.transport(), { schema: 'dharma.parked-session-request/v1',
+  const { state, outbox } = await postOrPark(host.home, await host.transport(), { schema: 'dharma.parked-session-request/v1',
     messageId: original.envelope.messageId, kind: 'reply',
     reply: { envelope, replyToken: original.replyToken, nextReplyToken: replyToken }, parkedAt: host.now().toISOString() });
   return { ok: true, messageId: envelope.messageId, replyTo: original.envelope.messageId, from: from.name,
-    to: envelope.recipient.name, ...postedState(state) };
+    to: envelope.recipient.name, ...postedState(state), ...withOutbox(outbox) };
 }
 
 async function ack(flags: Map<string, string | boolean>, host: SessionMessagingHost) {
@@ -369,9 +423,9 @@ async function ack(flags: Map<string, string | boolean>, host: SessionMessagingH
     return { ok: true, stage: 'plan', effects: false, action: 'ack', messageId: original.envelope.messageId,
       from: original.recipientName };
   }
-  const state = await postOrPark(host.home, await host.transport(), { schema: 'dharma.parked-session-request/v1',
+  const { state, outbox } = await postOrPark(host.home, await host.transport(), { schema: 'dharma.parked-session-request/v1',
     messageId: original.envelope.messageId, kind: 'ack', reply: null, parkedAt: host.now().toISOString() });
-  return { ok: true, messageId: original.envelope.messageId, ...postedState(state) };
+  return { ok: true, messageId: original.envelope.messageId, ...postedState(state), ...withOutbox(outbox) };
 }
 
 /** `dharma msg send|inbox|reply|ack`. Inbox is the recipient's manual pull (channel `manual_pull`). */

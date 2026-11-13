@@ -365,7 +365,8 @@ test('reply and ack sent while the delivering turn is open are parked locally an
     assert.equal(platform.messages.has(String(reply.messageId)), false, 'nothing is posted while the message is queued');
     assert.equal(platform.calls.filter(call => /\/(reply|ack)$/.test(call.route)).length, 0);
     assert.deepEqual(await flushSessionOutbox(b.home, transport), [
-      { messageId: String(fyi.messageId), action: 'parked' }, { messageId: String(question.messageId), action: 'parked' },
+      { messageId: String(fyi.messageId), kind: 'ack', action: 'parked' },
+      { messageId: String(question.messageId), kind: 'reply', action: 'parked' },
     ].sort((x, y) => x.messageId.localeCompare(y.messageId)));
     // The watcher's delivered report after the turn ends posts the parked request right away.
     assert.equal(await reportReceivedDelivery(transport, String(question.messageId), { channel: 'codex_queue', outcome: 'processed' },
