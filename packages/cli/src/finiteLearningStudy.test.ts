@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -154,6 +154,59 @@ test('three executor processes share one cohort, one phase claim and one in-flig
     assert.equal(ledger.status().trajectoryCount, 100);
     assert.equal(ledger.status().liabilityCents, 20);
     assert.equal(ledger.status().inFlight, 1);
+  });
+});
+
+// Another process takes the study write lock with "begin immediate", signals with a synchronous write,
+// then blocks for a fixed time and commits. `released` resolves with its exit code after the commit.
+async function holdWriteLock(path: string, milliseconds: number): Promise<{ released: Promise<number | null> }> {
+  const holder = spawn(process.execPath, ['--no-warnings', '-e', `const {DatabaseSync}=require('node:sqlite');
+    const db=new DatabaseSync(${JSON.stringify(path)});db.exec('begin immediate');require('node:fs').writeSync(1,'held');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${milliseconds});db.exec('commit');db.close();`],
+  { stdio: ['ignore', 'pipe', 'inherit'] });
+  const exited = new Promise<number | null>(resolve => holder.once('exit', resolve));
+  await new Promise<void>((resolve, reject) => {
+    holder.stdout.once('data', () => resolve());
+    holder.once('exit', code => reject(new Error(`lock holder exited ${code} before taking the lock`)));
+  });
+  return { released: exited }; // wrapped: an async function returning a bare promise would wait for it
+}
+
+test('an executor waits for another process that holds the study write lock longer than five seconds', async () => {
+  await fixture(async (_ledger, path) => {
+    const { released } = await holdWriteLock(path, 6_000);
+    try {
+      const started = Date.now();
+      const waiting = new FiniteLearningStudyLedger(path, config(), () => instant);
+      try {
+        const waited = Date.now() - started;
+        assert.ok(waited >= 5_000, `the ledger must wait for the held lock, waited ${waited} ms`);
+        assert.equal(waiting.recordCompleted(completed(1)).code, 'recorded');
+      } finally { waiting.close(); }
+    } finally { assert.equal(await released, 0); }
+  });
+});
+
+test('past its bound the study ledger fails with finite_study_ledger_busy, not a raw SQLite error', async () => {
+  await fixture(async (ledger, path) => {
+    const busy = (error: unknown) => error instanceof Error && error.message === 'finite_study_ledger_busy'
+      && ((error.cause as { errcode?: number } | undefined)?.errcode ?? 0) % 256 === 5;
+    const open = new FiniteLearningStudyLedger(path, config(), () => instant, { busyTimeoutMs: 250 });
+    try {
+      const { released } = await holdWriteLock(path, 2_000);
+      try {
+        let started = Date.now();
+        assert.throws(() => open.recordCompleted(completed(1)), busy);
+        let waited = Date.now() - started;
+        assert.ok(waited >= 200 && waited < 1_900, `an open ledger must give up at its bound, waited ${waited} ms`);
+        started = Date.now();
+        assert.throws(() => new FiniteLearningStudyLedger(path, config(), () => instant, { busyTimeoutMs: 250 }), busy);
+        waited = Date.now() - started;
+        assert.ok(waited >= 200 && waited < 1_900, `opening a ledger must give up at its bound, waited ${waited} ms`);
+      } finally { assert.equal(await released, 0); }
+      assert.equal(ledger.status().trajectoryCount, 0);
+      assert.equal(open.recordCompleted(completed(1)).code, 'recorded');
+    } finally { open.close(); }
   });
 });
 
