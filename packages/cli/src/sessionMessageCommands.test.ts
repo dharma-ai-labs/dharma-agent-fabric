@@ -453,6 +453,20 @@ test('--body-file reads the body literally from stdin or a file; the frame tells
   } finally { await a.cleanup(); await b.cleanup(); }
 });
 
+test('inbox --dry-run returns the plan with no device read, no network call and no delivery (R3)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ef', 'codex');
+  const b = await member(platform, 'ops-claude', 'claude');
+  try {
+    const sent = await sessionMessageCommand('send', cmd([['to', 'ops-claude'], ['body', 'q']]), a.host);
+    const before = platform.calls.length;
+    const plan = await sessionMessageCommand('inbox', cmd([['dry-run', true]]), deviceless(b.host));
+    assert.deepEqual([plan.stage, plan.effects, plan.action, plan.name], ['plan', false, 'inbox', 'ops-claude']);
+    assert.equal(platform.calls.length, before, 'no platform call');
+    assert.equal(platform.messages.get(String(sent.messageId))!.delivery.state, 'queued');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
 test('send, reply and ack --dry-run return the plan with no device read and no network call (F8)', async () => {
   const platform = new FakePlatform();
   const a = await member(platform, 'ef', 'codex');
