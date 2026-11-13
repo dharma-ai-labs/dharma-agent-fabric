@@ -13,6 +13,7 @@ import {
   type SessionMessage,
   type SessionMessageDeliveryStatus,
 } from '@dharma-ai-labs/agent-fabric-contracts';
+import * as claudeSessionHook from './claudeSessionHook.js';
 import { claudeHookCommand } from './claudeSessionHook.js';
 import { readClaudeSessionStart, sessionStatePath, writeSessionStateFile, type LocalSessionAttachment,
   type SessionMessageTransport, type SessionMessagingHost } from './sessionNames.js';
@@ -271,3 +272,34 @@ test('one prompt injects at most 5 messages and 40,000 characters; the rest wait
     assert.equal(idsIn(await g.hook('inbox', g.prompt()), big).length, 1);
   } finally { await g.cleanup(); }
 });
+
+test('a stalled delivery report never keeps the inbox hook past its hard deadline; the frame stays spooled as reporting (R2)',
+  async (t) => {
+    const f = await fixture();
+    try {
+      const message = f.platform.add('stalled report');
+      const transport = f.platform.transport();
+      let reportStarted = false;
+      const stalled: SessionMessageTransport = { signedGet: transport.signedGet,
+        signedPost: async (route, body) => { if (!route.endsWith('/delivered')) return transport.signedPost(route, body);
+          reportStarted = true; return new Promise<never>(() => {}); } };
+      // Under the 15 s plugin timeout; read through the module so this test compiles before the constant exists.
+      const hardDeadline = (claudeSessionHook as Record<string, unknown>).CLAUDE_HOOK_HARD_DEADLINE_MS as number | undefined;
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      let settled: string | null = null;
+      void claudeHookCommand('inbox', { host: { ...f.host, transport: async () => stalled }, stdin: async () => f.prompt() })
+        .then(output => { settled = output; });
+      const turns = async (count: number) => { for (let index = 0; index < count; index += 1) await new Promise(done => setImmediate(done)); };
+      for (let index = 0; index < 500 && !reportStarted; index += 1) await turns(1);
+      assert.ok(reportStarted, 'the report started and stalled');
+      t.mock.timers.tick(hardDeadline ?? 12_000);
+      await turns(20);
+      assert.equal(settled, '', 'the hook returns nothing at its hard deadline instead of hanging');
+      assert.equal(typeof hardDeadline, 'number');
+      assert.ok(hardDeadline! < 15_000, 'the hard deadline is under the 15 s plugin timeout');
+      const spool = JSON.parse(await readFile(sessionStatePath(f.home, 'hook-spool', `${f.sessionId}.json`), 'utf8')) as
+        { entries: Array<{ messageId: string; state: string }> };
+      assert.deepEqual(spool.entries.map(entry => [entry.messageId, entry.state]), [[message.messageId, 'reporting']],
+        'the next prompt reads the stalled report back');
+    } finally { t.mock.timers.reset(); await f.cleanup(); }
+  });
