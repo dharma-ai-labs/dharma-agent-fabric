@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -68,6 +69,58 @@ test('without the CLI on PATH both hook commands exit 0 and print nothing', (t) 
       env: { PATH: process.platform === 'win32' ? dirname(sh) : join(root, 'no-such-directory') } });
     assert.equal(result.status, 0, event);
     assert.equal(result.stdout, '', event);
+  }
+});
+
+// R1: Claude Code on Windows without Git Bash runs hook commands in PowerShell, which rejects `&&` (5.1) and has no
+// `command -v`. The hook command must be shell-neutral, and stay silent with exit 0 when the CLI is missing, is an older
+// CLI without `hook claude`, or the session is not attached, under every shell a runner has.
+test('hook commands need no POSIX shell: no &&, command -v or /dev/null, and the launcher exits 0 silently without the CLI (R1)', () => {
+  const hooks = json(`${PREVIEW}/hooks/hooks.json`).hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+  const commands = { 'session-start': hooks.SessionStart![0]!.hooks[0]!.command, inbox: hooks.UserPromptSubmit![0]!.hooks[0]!.command };
+  for (const command of Object.values(commands)) assert.doesNotMatch(command, /&&|command -v|\/dev\/null|2>&1/, command);
+  const pluginRoot = join(root, PREVIEW);
+  const launcher = join(pluginRoot, 'hooks', 'dharma-hook.mjs');
+  const windows = process.platform === 'win32';
+  const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+  // Only node, the fake CLI directory and (on Windows) System32: no Git Bash, no installed dharma.
+  const env = (cliDirectory: string | null) => ({
+    PATH: [cliDirectory, dirname(process.execPath), ...(windows ? [join(systemRoot, 'System32'),
+      join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0')] : ['/usr/bin', '/bin'])].filter(Boolean).join(delimiter),
+    CLAUDE_PLUGIN_ROOT: pluginRoot,
+    ...(windows ? { SystemRoot: systemRoot, ComSpec: join(systemRoot, 'System32', 'cmd.exe') } : {}) });
+  const fakeCli = (exitCode: number) => {
+    const directory = mkdtempSync(join(tmpdir(), 'dharma-fake-cli-'));
+    if (windows) writeFileSync(join(directory, 'dharma.cmd'), `@echo off\r\necho usage: dharma 1>&2\r\nexit /b ${exitCode}\r\n`);
+    else writeFileSync(join(directory, 'dharma'), `#!/bin/sh\necho 'usage: dharma' >&2\nexit ${exitCode}\n`, { mode: 0o755 });
+    return directory;
+  };
+  // Each shell runs the command as Claude Code does: ${CLAUDE_PLUGIN_ROOT} substituted, hook JSON on stdin.
+  const gitBash = windows
+    ? (process.env.PATH ?? '').split(delimiter).map(entry => join(entry, 'sh.exe')).find(path => existsSync(path)) : undefined;
+  const shells: Array<[string, (command: string) => [string, string[]]]> = windows
+    ? [['powershell', command => [join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-Command', command]]],
+      ...(gitBash ? [['git-bash', (command: string) => [gitBash, ['-c', command]]] as [string, (command: string) => [string, string[]]]] : [])]
+    : [['sh', command => ['/bin/sh', ['-c', command]]]];
+  const missing = mkdtempSync(join(tmpdir(), 'dharma-no-cli-'));
+  const older = fakeCli(2);
+  const notAttached = fakeCli(0);
+  try {
+    for (const [action, command] of Object.entries(commands)) {
+      // The launcher itself, with no shell at all.
+      const direct = spawnSync(process.execPath, [launcher, action], { encoding: 'utf8', input: '{}', env: env(missing) });
+      assert.deepEqual([direct.status, direct.stdout, direct.stderr], [0, '', ''], `${action} launcher without the CLI`);
+      for (const [shellName, shell] of shells) {
+        for (const [cliName, cliDirectory] of [['missing', missing], ['older', older], ['not attached', notAttached]] as const) {
+          const [file, args] = shell(command.replaceAll('${CLAUDE_PLUGIN_ROOT}', pluginRoot));
+          const result = spawnSync(file, args, { encoding: 'utf8', input: '{}', env: env(cliDirectory) });
+          assert.deepEqual([result.status, result.stdout, result.stderr], [0, '', ''], `${action} via ${shellName}, CLI ${cliName}`);
+        }
+      }
+    }
+  } finally {
+    for (const directory of [missing, older, notAttached]) rmSync(directory, { recursive: true, force: true });
   }
 });
 
