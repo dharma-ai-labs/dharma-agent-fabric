@@ -303,3 +303,16 @@ test('a stalled delivery report never keeps the inbox hook past its hard deadlin
         'the next prompt reads the stalled report back');
     } finally { t.mock.timers.reset(); await f.cleanup(); }
   });
+
+test('dry-run inbox makes no transport call and writes no file (R3)', async () => {
+  const f = await fixture();
+  try {
+    f.platform.add('must stay queued');
+    const plan = await claudeHookCommand('inbox', { host: f.host, stdin: async () => f.prompt(),
+      ...{ dryRun: true } as Record<string, unknown> }) as unknown;
+    assert.equal((plan as Record<string, unknown>).stage, 'plan');
+    assert.deepEqual(f.platform.calls, []);
+    assert.equal(f.transports() + f.deviceReads(), 0);
+    await assert.rejects(readdir(sessionStatePath(f.home, 'hook-spool')), { code: 'ENOENT' });
+  } finally { await f.cleanup(); }
+});
