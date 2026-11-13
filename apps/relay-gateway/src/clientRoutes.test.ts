@@ -63,6 +63,12 @@ const HAND_WRITTEN: HandWritten[] = [
     why: 'Wraps fabric.signedPost in place. Each route comes from a caller of fabric.signedPost, which the guard reads.' },
 ];
 
+// Client routes the gateway is known to reject, each with the issue that decides what happens to it.
+// An entry has to go as soon as the gateway accepts its route or the client stops sending it.
+const KNOWN_REJECTED: { method: Method; route: string; issue: string }[] = [
+  { method: 'POST', route: '/agent-fabric/codex-task-exports', issue: 'https://github.com/dharma-ai-labs/dharma-agent-fabric/issues/464' },
+];
+
 class Unresolved extends Error {}
 const brief = (node: ts.Node) => node.getText().replace(/\s+/g, ' ').slice(0, 100);
 const lineOf = (node: ts.Node) => node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1;
@@ -389,11 +395,12 @@ function gatewayVerdict(method: Method, route: string): string {
   }
 }
 
-function rejectedByGateway(sites: Site[]): string[] {
+function rejectedByGateway(sites: Site[], known: { method: Method; route: string }[] = []): string[] {
   const verdicts = new Map<string, string>();
   for (const site of sites) {
     for (const route of site.routes) {
       const key = `${site.method} ${route}`;
+      if (known.some(entry => entry.method === site.method && entry.route === route)) continue;
       if (!verdicts.has(key)) verdicts.set(key, `${key} -> ${gatewayVerdict(site.method, route)} (${site.file}:${site.line})`);
     }
   }
@@ -431,7 +438,16 @@ test('the guard reads every signed call in the client source', () => {
 });
 
 test('the gateway allowlist accepts every signed route the client source builds', () => {
-  assert.deepEqual(rejectedByGateway(client.sites), []);
+  assert.deepEqual(rejectedByGateway(client.sites, KNOWN_REJECTED), []);
+});
+
+test('a known rejection is still sent by the client and still rejected by the gateway', () => {
+  for (const { method, route, issue } of KNOWN_REJECTED) {
+    assert.ok(client.sites.some(site => site.method === method && site.routes.includes(route)),
+      `The client no longer sends ${method} ${route}. Remove it from KNOWN_REJECTED (${issue}).`);
+    assert.equal(gatewayVerdict(method, route), 'route_not_allowed',
+      `The gateway no longer rejects ${method} ${route} as before. Remove it from KNOWN_REJECTED (${issue}).`);
+  }
 });
 
 test('the guard reads named route constants, and catches the session-messaging defect of 2026-11-13', () => {
