@@ -406,6 +406,39 @@ test('a second reply or ack while one is parked for the same message is refused;
   } finally { await a.cleanup(); await b.cleanup(); }
 });
 
+test('a reply left parked by a failed flush after delivered is posted before a later ack, not bypassed (R2b)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { flushSessionOutbox, receiveSessionMessages, reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { readSessionAttachment } = await import('./sessionNames.js');
+    const question = await sessionMessageCommand('send', cmd([['to', 'ef'], ['body', 'question']]), a.host);
+    const attachment = (await readSessionAttachment(b.home, 'ef'))!;
+    const transport = await b.host.transport();
+    await receiveSessionMessages(b.host, attachment, transport, await b.host.device());
+    const reply = await sessionMessageCommand('reply', cmd([['message', String(question.messageId)], ['body', 'answer']]), b.host);
+    assert.equal(reply.state, 'parked');
+    // The delivered report succeeds, but the flush inside it loses the reply post's response: the reply stays parked.
+    const lossy: typeof transport = { ...transport, signedPost: async (route, body) => {
+      if (/\/reply$/.test(route)) throw new Error('fetch failed');
+      return transport.signedPost(route, body);
+    } };
+    assert.equal(await reportReceivedDelivery(lossy, String(question.messageId), { channel: 'codex_queue', outcome: 'processed' },
+      b.home), 'reported');
+    assert.equal(platform.messages.get(String(question.messageId))!.delivery.state, 'delivered');
+    assert.equal(platform.messages.has(String(reply.messageId)), false);
+    const ack = await sessionMessageCommand('ack', cmd([['message', String(question.messageId)]]), b.host);
+    assert.equal(ack.state, 'acknowledged');
+    assert.equal(platform.messages.get(String(reply.messageId))?.envelope.replyTo, question.messageId,
+      'the reply reported accepted is posted');
+    const posts = platform.calls.filter(call => call.route.startsWith(`/agent-fabric/session-messages/${String(question.messageId)}/`)
+      && /\/(reply|ack)$/.test(call.route)).map(call => call.route.split('/').pop());
+    assert.deepEqual(posts, ['reply', 'ack'], 'the parked reply is posted before the ack');
+    assert.deepEqual(await flushSessionOutbox(b.home, transport), [], 'nothing stays parked');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
 test('reply and ack are posted at once when the message is already delivered; nothing is parked', async () => {
   const platform = new FakePlatform();
   const a = await member(platform, 'ef', 'codex');
