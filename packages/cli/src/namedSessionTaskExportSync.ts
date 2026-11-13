@@ -81,6 +81,30 @@ export function codexTaskExportUpload(fabric: { signedPost(route: string, body: 
   return enabled ? body => fabric.signedPost('/agent-fabric/codex-task-exports', body) : undefined;
 }
 
+type HeldExport = { descriptor: Descriptor; capture: CodexLocalWorkCapture; contextBytes: Buffer; retained: string };
+
+/** Local checks only (no policy refresh, no network): the descriptor and the retained capture, context and export. */
+async function readHeldExport(vault: LocalVault | ScopedLocalVault, bindingId: string, identity: LocalProviderSessionIdentity,
+  row: { workKey: string; descriptorHash: string }): Promise<HeldExport | { code: string }> {
+  try {
+    const bytes = await vault.getBlob(row.descriptorHash);
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    const descriptor: Descriptor = JSON.parse(text);
+    const valid = await validateContract(schemas, 'https://schemas.dharma-ai.io/named-session-task-export-outbox/v1', descriptor);
+    if (!valid.ok || canonicalize(descriptor) !== text || descriptor.bindingId !== bindingId
+      || descriptor.workKey !== row.workKey || identityKeys.some(key => descriptor[key] !== identity[key])) {
+      return { code: 'task_export_descriptor_invalid' };
+    }
+    const capture: CodexLocalWorkCapture = JSON.parse((await vault.getBlob(descriptor.captureHash)).toString('utf8'));
+    const contextBytes = await vault.getBlob(descriptor.contextHash);
+    const retained = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await vault.getBlob(descriptor.exportHash));
+    if (capture.workId !== descriptor.workId || sha256(JSON.stringify(capture)) !== descriptor.captureHash) {
+      return { code: 'task_export_capture_invalid' };
+    }
+    return { descriptor, capture, contextBytes, retained };
+  } catch { return { code: 'task_export_retained_content_unavailable' }; }
+}
+
 export async function syncNamedSessionTaskExports(input: {
   vault: LocalVault | ScopedLocalVault; bindingId: string; identity: LocalProviderSessionIdentity;
   loadPolicy(): Promise<OrganizationPolicy>;
@@ -113,25 +137,18 @@ export async function syncNamedSessionTaskExports(input: {
   } catch { return result('blocked', 'task_export_saved_receipt_unavailable'); }
   if (!pending) return result('idle');
   const send = input.send;
-  if (!send) return result('pending', 'task_export_upload_not_available');
+  if (!send) {
+    // Held, not sent (#464). Still report held content that local raw retention has removed.
+    for (const row of rows) {
+      const held = await readHeldExport(input.vault, input.bindingId, input.identity, row);
+      if ('code' in held) return result('blocked', held.code);
+    }
+    return result('pending', 'task_export_upload_not_available');
+  }
   for (const row of rows.slice(0, 5)) {
-    let descriptor: Descriptor, capture: CodexLocalWorkCapture, contextBytes: Buffer, retained: string;
-    try {
-      const bytes = await input.vault.getBlob(row.descriptorHash);
-      const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-      descriptor = JSON.parse(text);
-      const valid = await validateContract(schemas, 'https://schemas.dharma-ai.io/named-session-task-export-outbox/v1', descriptor);
-      if (!valid.ok || canonicalize(descriptor) !== text || descriptor.bindingId !== input.bindingId
-        || descriptor.workKey !== row.workKey || identityKeys.some(key => descriptor[key] !== input.identity[key])) {
-        return result('blocked', 'task_export_descriptor_invalid');
-      }
-      capture = JSON.parse((await input.vault.getBlob(descriptor.captureHash)).toString('utf8'));
-      contextBytes = await input.vault.getBlob(descriptor.contextHash);
-      retained = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await input.vault.getBlob(descriptor.exportHash));
-      if (capture.workId !== descriptor.workId || sha256(JSON.stringify(capture)) !== descriptor.captureHash) {
-        return result('blocked', 'task_export_capture_invalid');
-      }
-    } catch { return result('blocked', 'task_export_retained_content_unavailable'); }
+    const held = await readHeldExport(input.vault, input.bindingId, input.identity, row);
+    if ('code' in held) return result('blocked', held.code);
+    const { descriptor, capture, contextBytes, retained } = held;
     let policy: OrganizationPolicy;
     try { policy = await input.loadPolicy(); }
     catch { return result('pending', 'task_export_policy_refresh_pending'); }
