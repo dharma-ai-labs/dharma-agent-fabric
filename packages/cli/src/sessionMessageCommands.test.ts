@@ -365,7 +365,8 @@ test('reply and ack sent while the delivering turn is open are parked locally an
     assert.equal(platform.messages.has(String(reply.messageId)), false, 'nothing is posted while the message is queued');
     assert.equal(platform.calls.filter(call => /\/(reply|ack)$/.test(call.route)).length, 0);
     assert.deepEqual(await flushSessionOutbox(b.home, transport), [
-      { messageId: String(fyi.messageId), action: 'parked' }, { messageId: String(question.messageId), action: 'parked' },
+      { messageId: String(fyi.messageId), kind: 'ack', action: 'parked' },
+      { messageId: String(question.messageId), kind: 'reply', action: 'parked' },
     ].sort((x, y) => x.messageId.localeCompare(y.messageId)));
     // The watcher's delivered report after the turn ends posts the parked request right away.
     assert.equal(await reportReceivedDelivery(transport, String(question.messageId), { channel: 'codex_queue', outcome: 'processed' },
@@ -403,6 +404,39 @@ test('a second reply or ack while one is parked for the same message is refused;
     assert.equal(platform.messages.get(String(reply.messageId))?.envelope.replyTo, question.messageId,
       'the first parked reply is the one posted');
     assert.equal(platform.messages.get(String(question.messageId))!.delivery.state, 'acknowledged');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('a reply left parked by a failed flush after delivered is posted before a later ack, not bypassed (R2b)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { flushSessionOutbox, receiveSessionMessages, reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { readSessionAttachment } = await import('./sessionNames.js');
+    const question = await sessionMessageCommand('send', cmd([['to', 'ef'], ['body', 'question']]), a.host);
+    const attachment = (await readSessionAttachment(b.home, 'ef'))!;
+    const transport = await b.host.transport();
+    await receiveSessionMessages(b.host, attachment, transport, await b.host.device());
+    const reply = await sessionMessageCommand('reply', cmd([['message', String(question.messageId)], ['body', 'answer']]), b.host);
+    assert.equal(reply.state, 'parked');
+    // The delivered report succeeds, but the flush inside it loses the reply post's response: the reply stays parked.
+    const lossy: typeof transport = { ...transport, signedPost: async (route, body) => {
+      if (/\/reply$/.test(route)) throw new Error('fetch failed');
+      return transport.signedPost(route, body);
+    } };
+    assert.equal(await reportReceivedDelivery(lossy, String(question.messageId), { channel: 'codex_queue', outcome: 'processed' },
+      b.home), 'reported');
+    assert.equal(platform.messages.get(String(question.messageId))!.delivery.state, 'delivered');
+    assert.equal(platform.messages.has(String(reply.messageId)), false);
+    const ack = await sessionMessageCommand('ack', cmd([['message', String(question.messageId)]]), b.host);
+    assert.equal(ack.state, 'acknowledged');
+    assert.equal(platform.messages.get(String(reply.messageId))?.envelope.replyTo, question.messageId,
+      'the reply reported accepted is posted');
+    const posts = platform.calls.filter(call => call.route.startsWith(`/agent-fabric/session-messages/${String(question.messageId)}/`)
+      && /\/(reply|ack)$/.test(call.route)).map(call => call.route.split('/').pop());
+    assert.deepEqual(posts, ['reply', 'ack'], 'the parked reply is posted before the ack');
+    assert.deepEqual(await flushSessionOutbox(b.home, transport), [], 'nothing stays parked');
   } finally { await a.cleanup(); await b.cleanup(); }
 });
 
@@ -490,5 +524,198 @@ test('send, reply and ack --dry-run return the plan with no device read and no n
     assert.equal(platform.messages.get(String(sent.messageId))!.delivery.state, 'delivered');
     await assert.rejects(sessionMessageCommand('send', cmd([['to', 'Bad'], ['body', 'q'], ['dry-run', true]]), deviceless(a.host)),
       /session_message_options_invalid/);
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+type Member = Awaited<ReturnType<typeof member>>;
+
+/** The reply post loses its response (uncertain): the reconcile finds no reply, the retry loses it again. */
+const lossyReplies = (transport: SessionMessageTransport): SessionMessageTransport => ({ ...transport,
+  signedPost: async (route, body) => {
+    if (/\/reply$/.test(route)) throw new Error('fetch failed');
+    return transport.signedPost(route, body);
+  } });
+
+/** The platform definitively refuses the reply post. */
+const refusingReplies = (transport: SessionMessageTransport): SessionMessageTransport => ({ ...transport,
+  signedPost: async (route, body) => {
+    if (/\/reply$/.test(route)) throw httpError('session_reply_refused:reply_token_used', 400);
+    return transport.signedPost(route, body);
+  } });
+
+/** a asks ef; ef's watcher keeps the question while the platform still says queued; ef replies, which parks. */
+async function replyLeftParked(a: Member, b: Member) {
+  const { receiveSessionMessages } = await import('./sessionMessageCommands.js');
+  const { readSessionAttachment } = await import('./sessionNames.js');
+  const question = await sessionMessageCommand('send', cmd([['to', 'ef'], ['body', 'question']]), a.host);
+  const transport = await b.host.transport();
+  await receiveSessionMessages(b.host, (await readSessionAttachment(b.home, 'ef'))!, transport, await b.host.device());
+  const reply = await sessionMessageCommand('reply', cmd([['message', String(question.messageId)], ['body', 'answer']]), b.host);
+  assert.equal(reply.state, 'parked');
+  return { questionId: String(question.messageId), replyId: String(reply.messageId), transport };
+}
+
+test('every msg inbox first sends a reply left parked by a failed flush and lists each parked request with its result (O1)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { questionId, replyId, transport } = await replyLeftParked(a, b);
+    await assert.rejects(sessionMessageCommand('ack', cmd([['message', questionId]]), b.host),
+      (error: Error) => /session_parked_request_exists/.test(error.message) && /\breply\b/.test(error.message)
+        && /dharma msg inbox/.test(error.message), 'the refusal names the parked reply and how it is retried');
+    // The delivered report succeeds, but the flush inside it loses the reply post's response: the reply stays parked.
+    assert.equal(await reportReceivedDelivery(lossyReplies(transport), questionId, { channel: 'codex_queue', outcome: 'processed' },
+      b.home), 'reported');
+    assert.equal(platform.messages.has(replyId), false);
+    // An inbox whose reply post also loses its response: still parked, listed with its code and how it is retried.
+    const lossy = await sessionMessageCommand('inbox', cmd([]), { ...b.host, transport: async () => lossyReplies(transport) });
+    const [still] = (lossy.outbox ?? []) as Array<Record<string, unknown>>;
+    assert.deepEqual([still?.messageId, still?.kind, still?.action, still?.code],
+      [questionId, 'reply', 'parked', 'session_message_reply_uncertain']);
+    assert.match(String(still?.note), /dharma msg inbox/);
+    assert.equal(platform.messages.has(replyId), false);
+    const inbox = await sessionMessageCommand('inbox', cmd([]), b.host);
+    assert.deepEqual(inbox.outbox, [{ messageId: questionId, kind: 'reply', action: 'sent' }]);
+    assert.equal(platform.messages.get(replyId)?.envelope.replyTo, questionId, 'the inbox posts the parked reply');
+    assert.equal(platform.messages.get(questionId)!.delivery.state, 'acknowledged');
+    assert.deepEqual((await sessionMessageCommand('inbox', cmd([]), b.host)).outbox, [], 'nothing stays parked');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('a parked request the platform refuses is shown with its kind and code, never dropped silently (O2)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const report = { channel: 'codex_queue', outcome: 'processed' } as const;
+    // Refused while a later ack posts it first: the ack goes ahead and its output shows the refused reply.
+    const first = await replyLeftParked(a, b);
+    assert.equal(await reportReceivedDelivery(lossyReplies(first.transport), first.questionId, report, b.home), 'reported');
+    const ack = await sessionMessageCommand('ack', cmd([['message', first.questionId]]),
+      { ...b.host, transport: async () => refusingReplies(first.transport) });
+    assert.equal(ack.state, 'acknowledged');
+    assert.deepEqual(ack.outbox, [{ messageId: first.questionId, kind: 'reply', action: 'failed',
+      code: 'session_reply_refused:reply_token_used' }]);
+    assert.equal(platform.messages.has(first.replyId), false);
+    // Refused inside a deliverer's delivered report, where nobody sees it: kept, then shown once by the next inbox.
+    const second = await replyLeftParked(a, b);
+    assert.equal(await reportReceivedDelivery(refusingReplies(second.transport), second.questionId, report, b.home), 'reported');
+    const inbox = await sessionMessageCommand('inbox', cmd([]), b.host);
+    assert.deepEqual(inbox.outbox, [{ messageId: second.questionId, kind: 'reply', action: 'failed',
+      code: 'session_reply_refused:reply_token_used' }]);
+    assert.equal(platform.messages.has(second.replyId), false);
+    assert.deepEqual((await sessionMessageCommand('inbox', cmd([]), b.host)).outbox, [], 'shown once, then cleared');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('two replies parking for one message at the same moment: one is parked, the other is refused, none is overwritten (O3)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { receiveSessionMessages, reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { readSessionAttachment } = await import('./sessionNames.js');
+    const question = await sessionMessageCommand('send', cmd([['to', 'ef'], ['body', 'question']]), a.host);
+    const questionId = String(question.messageId);
+    const transport = await b.host.transport();
+    await receiveSessionMessages(b.host, (await readSessionAttachment(b.home, 'ef'))!, transport, await b.host.device());
+    // Both processes read the delivery state (queued) before either writes its parked request.
+    const route = `/agent-fabric/session-messages/${questionId}/delivery`;
+    const waiting: Array<() => void> = [];
+    let gate = 2;
+    const racing: SessionMessageTransport = { ...transport, signedGet: async path => {
+      if (gate > 0 && path === route) {
+        gate -= 1;
+        await new Promise<void>(release => { waiting.push(release); if (waiting.length === 2) for (const go of waiting) go(); });
+      }
+      return transport.signedGet(path);
+    } };
+    const host = { ...b.host, transport: async () => racing };
+    const results = await Promise.allSettled(['first', 'second'].map(body =>
+      sessionMessageCommand('reply', cmd([['message', questionId], ['body', body]]), host)));
+    const parked = results.filter((r): r is PromiseFulfilledResult<Record<string, unknown>> => r.status === 'fulfilled').map(r => r.value);
+    const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => r.reason as Error);
+    assert.equal(parked.length, 1, 'exactly one reply is parked');
+    assert.equal(parked[0]!.state, 'parked');
+    assert.match(String(refused[0]?.message), /session_parked_request_exists/);
+    assert.equal(await reportReceivedDelivery(transport, questionId, { channel: 'codex_queue', outcome: 'processed' }, b.home),
+      'reported');
+    const replies = [...platform.messages.values()].filter(item => item.envelope.replyTo === questionId);
+    assert.deepEqual(replies.map(item => item.envelope.messageId), [parked[0]!.messageId], 'the reply reported parked is posted');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('a reply posted just before a crash, still in the outbox, is reported sent on the next flush, not failed or posted twice (O4)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { readFile, writeFile } = await import('node:fs/promises');
+    const { flushSessionOutbox, reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { questionId, replyId, transport } = await replyLeftParked(a, b);
+    const file = join(b.home, 'session-messages', 'outbox', `${questionId.toLowerCase()}.json`);
+    const saved = await readFile(file, 'utf8');
+    assert.equal(await reportReceivedDelivery(transport, questionId, { channel: 'codex_queue', outcome: 'processed' }, b.home),
+      'reported');
+    assert.equal(platform.messages.get(replyId)?.envelope.replyTo, questionId);
+    await writeFile(file, saved); // the crash: the post succeeded, the removal never ran
+    const [result] = await flushSessionOutbox(b.home, transport);
+    assert.deepEqual([result?.messageId, result?.action], [questionId, 'sent']);
+    assert.equal([...platform.messages.values()].filter(item => item.envelope.replyTo === questionId).length, 1, 'posted once');
+    assert.deepEqual(await flushSessionOutbox(b.home, transport), [], 'nothing stays parked');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('a refused parked request stays shown as failed when the inbox poll then throws; it is cleared only once shown (O5)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { questionId, replyId, transport } = await replyLeftParked(a, b);
+    // Refused inside a deliverer's delivered report, where nobody sees it: kept marked failed.
+    assert.equal(await reportReceivedDelivery(refusingReplies(transport), questionId,
+      { channel: 'codex_queue', outcome: 'processed' }, b.home), 'reported');
+    // The next inbox cannot poll (relay unreachable): it fails, and shows nothing.
+    const unreachable: SessionMessageTransport = { ...transport, signedPost: async (route, body) => {
+      if (/\/poll$/.test(route)) throw new Error('fetch failed');
+      return transport.signedPost(route, body);
+    } };
+    await assert.rejects(sessionMessageCommand('inbox', cmd([]), { ...b.host, transport: async () => unreachable }), /fetch failed/);
+    // The refusal was never shown, so the next inbox still shows it with its code, then clears it.
+    const inbox = await sessionMessageCommand('inbox', cmd([]), b.host);
+    assert.deepEqual(inbox.outbox, [{ messageId: questionId, kind: 'reply', action: 'failed',
+      code: 'session_reply_refused:reply_token_used' }]);
+    assert.equal(platform.messages.has(replyId), false);
+    assert.deepEqual((await sessionMessageCommand('inbox', cmd([]), b.host)).outbox, [], 'shown once, then cleared');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+test('an ack that throws after an earlier parked reply was refused keeps that refusal for the next inbox (O6)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { questionId, replyId, transport } = await replyLeftParked(a, b);
+    assert.equal(await reportReceivedDelivery(lossyReplies(transport), questionId,
+      { channel: 'codex_queue', outcome: 'processed' }, b.home), 'reported');
+    // The ack first posts the parked reply, which is refused; then the ack itself is refused for the same cause.
+    const refusingBoth: SessionMessageTransport = { ...transport, signedPost: async (route, body) => {
+      if (/\/reply$/.test(route)) throw httpError('session_reply_refused:reply_token_used', 400);
+      if (/\/ack$/.test(route)) throw httpError('session_ack_refused:message_expired', 400);
+      return transport.signedPost(route, body);
+    } };
+    await assert.rejects(sessionMessageCommand('ack', cmd([['message', questionId]]),
+      { ...b.host, transport: async () => refusingBoth }), /session_ack_refused:message_expired/);
+    assert.equal(platform.messages.has(replyId), false);
+    // The reply was reported parked (accepted) and never posted: the next inbox shows it failed with its code.
+    const inbox = await sessionMessageCommand('inbox', cmd([]), b.host);
+    assert.deepEqual(inbox.outbox, [{ messageId: questionId, kind: 'reply', action: 'failed',
+      code: 'session_reply_refused:reply_token_used' }]);
+    assert.deepEqual((await sessionMessageCommand('inbox', cmd([]), b.host)).outbox, [], 'shown once, then cleared');
   } finally { await a.cleanup(); await b.cleanup(); }
 });
