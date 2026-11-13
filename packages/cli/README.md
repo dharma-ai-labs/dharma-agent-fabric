@@ -624,7 +624,10 @@ not native-wire replay, a publication, an independent grade or an admitted
 learning observation. The client does not upload it yet: no server route accepts
 task exports (issue #464), so staged exports are held encrypted in the local
 vault and session health reports `taskExports` as `pending` with the code
-`task_export_upload_not_available` and the number held. The switch
+`task_export_upload_not_available` and the number held. Holding an export does
+not keep its raw capture: the capture still expires after the local raw retention
+period (30 days by default), and health then reports `taskExports` as `blocked`
+with the code `task_export_retained_content_unavailable`. The switch
 `CODEX_TASK_EXPORT_UPLOAD_ENABLED` in `namedSessionTaskExportSync.ts` turns the
 upload on once a server route exists. Server retention, device authentication,
 current authority and dedicated admission remain required.
