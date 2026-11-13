@@ -582,3 +582,30 @@ test('every msg inbox first sends a reply left parked by a failed flush and list
     assert.deepEqual((await sessionMessageCommand('inbox', cmd([]), b.host)).outbox, [], 'nothing stays parked');
   } finally { await a.cleanup(); await b.cleanup(); }
 });
+
+test('a parked request the platform refuses is shown with its kind and code, never dropped silently (O2)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const report = { channel: 'codex_queue', outcome: 'processed' } as const;
+    // Refused while a later ack posts it first: the ack goes ahead and its output shows the refused reply.
+    const first = await replyLeftParked(a, b);
+    assert.equal(await reportReceivedDelivery(lossyReplies(first.transport), first.questionId, report, b.home), 'reported');
+    const ack = await sessionMessageCommand('ack', cmd([['message', first.questionId]]),
+      { ...b.host, transport: async () => refusingReplies(first.transport) });
+    assert.equal(ack.state, 'acknowledged');
+    assert.deepEqual(ack.outbox, [{ messageId: first.questionId, kind: 'reply', action: 'failed',
+      code: 'session_reply_refused:reply_token_used' }]);
+    assert.equal(platform.messages.has(first.replyId), false);
+    // Refused inside a deliverer's delivered report, where nobody sees it: kept, then shown once by the next inbox.
+    const second = await replyLeftParked(a, b);
+    assert.equal(await reportReceivedDelivery(refusingReplies(second.transport), second.questionId, report, b.home), 'reported');
+    const inbox = await sessionMessageCommand('inbox', cmd([]), b.host);
+    assert.deepEqual(inbox.outbox, [{ messageId: second.questionId, kind: 'reply', action: 'failed',
+      code: 'session_reply_refused:reply_token_used' }]);
+    assert.equal(platform.messages.has(second.replyId), false);
+    assert.deepEqual((await sessionMessageCommand('inbox', cmd([]), b.host)).outbox, [], 'shown once, then cleared');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
