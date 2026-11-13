@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { canonicalize, sha256, signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { LocalVault, type LocalProviderSessionBinding } from '@dharma-ai-labs/agent-fabric-local-vault';
@@ -363,11 +364,11 @@ test('expired raw evidence blocks export without recreating content or executing
   } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
 });
 
-test('repository-state retention keeps raw and portable evidence in separate encrypted blobs', async t => {
+async function repositoryStateFixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'task-portable-retention-'));
-  let vault: LocalVault | undefined;
-  t.after(async () => { vault?.close(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
-  vault = await LocalVault.open({ root: join(root, 'vault'), masterKey: randomBytes(32) });
+  let opened: LocalVault | undefined;
+  t.after(async () => { opened?.close(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
+  const vault = opened = await LocalVault.open({ root: join(root, 'vault'), masterKey: randomBytes(32) });
   const f = fixture(); f.input.binding.workspaceRoot = root;
   if (f.input.capture.schema !== 'dharma.codex-local-work-capture/v2') throw new Error('Missing request');
   f.input.capture.request.params.cwd = root; f.input.capture.requestHash = sha256(JSON.stringify(f.input.capture.request));
@@ -392,6 +393,11 @@ test('repository-state retention keeps raw and portable evidence in separate enc
   await initializeRepositoryKnowledge(snapshotInput);
   await writeFile(join(root, 'README.md'), 'SYNTHETIC_BEFORE'); const before = await inventoryRepositoryPackage(snapshotInput);
   await writeFile(join(root, 'README.md'), 'SYNTHETIC_AFTER'); const after = await inventoryRepositoryPackage(snapshotInput);
+  return { root, vault, f, binding, before, after };
+}
+
+test('repository-state retention keeps raw and portable evidence in separate encrypted blobs', async t => {
+  const { root, vault, f, binding, before, after } = await repositoryStateFixture(t);
   const receipt = await retainNamedSessionRepositoryState({ vault, binding, workId: f.input.capture.workId,
     capture: f.input.capture, before, after, activeBundleId: randomUUID(), activeBundleHash: `sha256:${'a'.repeat(64)}`,
     taskExport: { policy: f.input.policy, contextBytes: f.input.contextBytes, contextHash: f.input.contextHash } });
@@ -409,4 +415,40 @@ test('repository-state retention keeps raw and portable evidence in separate enc
     assert.equal(encrypted.includes(Buffer.from('PROTECTED_CIPHER_CANARY')), false);
     assert.equal(encrypted.includes(Buffer.from('One tenant-scoped job')), false);
   }
+});
+
+test('issue #467: with the upload off, finishing a Codex named-session task stages no new task export', async t => {
+  const { root, vault, f, binding, before, after } = await repositoryStateFixture(t);
+  const staged = () => {
+    const db = new DatabaseSync(join(root, 'vault', 'vault.sqlite'));
+    try {
+      const blobs = (kind: string) => Number((db.prepare('select count(*) as count from blobs where kind = ?').get(kind) as { count: number }).count);
+      return { rows: Number((db.prepare('select count(*) as count from provider_session_task_exports').get() as { count: number }).count),
+        context: blobs('named-session-public-context'), export: blobs('named-session-portable-task-export') };
+    } finally { db.close(); }
+  };
+  assert.equal(CODEX_TASK_EXPORT_UPLOAD_ENABLED, false);
+  const start = staged();
+  const receipt = await retainNamedSessionRepositoryState({ vault, binding, workId: f.input.capture.workId,
+    capture: f.input.capture, before, after, activeBundleId: randomUUID(), activeBundleHash: `sha256:${'a'.repeat(64)}`,
+    taskExport: { policy: f.input.policy, contextBytes: f.input.contextBytes, contextHash: f.input.contextHash } });
+  assert.deepEqual(staged(), start);
+  assert.equal(receipt.exportOutbox, undefined);
+  // The raw capture is still retained as before.
+  assert.equal(receipt.captureHash, sha256(await vault.getBlob(receipt.captureHash)));
+});
+
+test('issue #467: session health reports every held task export, not only the first 100', async () => {
+  const q = await queuedExportFixture();
+  try {
+    for (let index = 0; index < 100; index++) {
+      await q.vault.stageProviderSessionTaskExport(q.f.input.binding.bindingId, q.scope,
+        sha256(`seeded-held-export-${index}`), Buffer.from(JSON.stringify({ seeded: index })));
+    }
+    // No `send`, as while the upload is switched off.
+    const health = await syncNamedSessionTaskExports({ vault: q.vault, bindingId: q.f.input.binding.bindingId,
+      identity: q.scope, loadPolicy: async () => { throw new Error('must not refresh'); } });
+    assert.equal(health.pending, 101);
+    assert.equal(q.vault.listProviderSessionTaskExports(q.f.input.binding.bindingId, q.scope).length, 100);
+  } finally { q.vault.close(); await rm(q.root, { recursive: true, force: true }); }
 });
