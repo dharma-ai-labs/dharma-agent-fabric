@@ -609,3 +609,40 @@ test('a parked request the platform refuses is shown with its kind and code, nev
     assert.deepEqual((await sessionMessageCommand('inbox', cmd([]), b.host)).outbox, [], 'shown once, then cleared');
   } finally { await a.cleanup(); await b.cleanup(); }
 });
+
+test('two replies parking for one message at the same moment: one is parked, the other is refused, none is overwritten (O3)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { receiveSessionMessages, reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { readSessionAttachment } = await import('./sessionNames.js');
+    const question = await sessionMessageCommand('send', cmd([['to', 'ef'], ['body', 'question']]), a.host);
+    const questionId = String(question.messageId);
+    const transport = await b.host.transport();
+    await receiveSessionMessages(b.host, (await readSessionAttachment(b.home, 'ef'))!, transport, await b.host.device());
+    // Both processes read the delivery state (queued) before either writes its parked request.
+    const route = `/agent-fabric/session-messages/${questionId}/delivery`;
+    const waiting: Array<() => void> = [];
+    let gate = 2;
+    const racing: SessionMessageTransport = { ...transport, signedGet: async path => {
+      if (gate > 0 && path === route) {
+        gate -= 1;
+        await new Promise<void>(release => { waiting.push(release); if (waiting.length === 2) for (const go of waiting) go(); });
+      }
+      return transport.signedGet(path);
+    } };
+    const host = { ...b.host, transport: async () => racing };
+    const results = await Promise.allSettled(['first', 'second'].map(body =>
+      sessionMessageCommand('reply', cmd([['message', questionId], ['body', body]]), host)));
+    const parked = results.filter((r): r is PromiseFulfilledResult<Record<string, unknown>> => r.status === 'fulfilled').map(r => r.value);
+    const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => r.reason as Error);
+    assert.equal(parked.length, 1, 'exactly one reply is parked');
+    assert.equal(parked[0]!.state, 'parked');
+    assert.match(String(refused[0]?.message), /session_parked_request_exists/);
+    assert.equal(await reportReceivedDelivery(transport, questionId, { channel: 'codex_queue', outcome: 'processed' }, b.home),
+      'reported');
+    const replies = [...platform.messages.values()].filter(item => item.envelope.replyTo === questionId);
+    assert.deepEqual(replies.map(item => item.envelope.messageId), [parked[0]!.messageId], 'the reply reported parked is posted');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
