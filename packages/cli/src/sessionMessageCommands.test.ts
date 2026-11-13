@@ -381,6 +381,31 @@ test('reply and ack sent while the delivering turn is open are parked locally an
   } finally { await a.cleanup(); await b.cleanup(); }
 });
 
+test('a second reply or ack while one is parked for the same message is refused; the parked reply is posted after delivered (R2)', async () => {
+  const platform = new FakePlatform();
+  const a = await member(platform, 'ops-claude', 'claude');
+  const b = await member(platform, 'ef', 'codex');
+  try {
+    const { receiveSessionMessages, reportReceivedDelivery } = await import('./sessionMessageCommands.js');
+    const { readSessionAttachment } = await import('./sessionNames.js');
+    const question = await sessionMessageCommand('send', cmd([['to', 'ef'], ['body', 'question']]), a.host);
+    const attachment = (await readSessionAttachment(b.home, 'ef'))!;
+    const transport = await b.host.transport();
+    await receiveSessionMessages(b.host, attachment, transport, await b.host.device());
+    const reply = await sessionMessageCommand('reply', cmd([['message', String(question.messageId)], ['body', 'answer']]), b.host);
+    assert.equal(reply.state, 'parked');
+    await assert.rejects(sessionMessageCommand('ack', cmd([['message', String(question.messageId)]]), b.host),
+      /session_parked_request_exists/);
+    await assert.rejects(sessionMessageCommand('reply', cmd([['message', String(question.messageId)], ['body', 'again']]), b.host),
+      /session_parked_request_exists/);
+    assert.equal(await reportReceivedDelivery(transport, String(question.messageId), { channel: 'codex_queue', outcome: 'processed' },
+      b.home), 'reported');
+    assert.equal(platform.messages.get(String(reply.messageId))?.envelope.replyTo, question.messageId,
+      'the first parked reply is the one posted');
+    assert.equal(platform.messages.get(String(question.messageId))!.delivery.state, 'acknowledged');
+  } finally { await a.cleanup(); await b.cleanup(); }
+});
+
 test('reply and ack are posted at once when the message is already delivered; nothing is parked', async () => {
   const platform = new FakePlatform();
   const a = await member(platform, 'ef', 'codex');
