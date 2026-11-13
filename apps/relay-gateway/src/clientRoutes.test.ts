@@ -428,10 +428,20 @@ const fixture = (files: Record<string, string[]>, handWritten: HandWritten[] = [
 // The two assertions over the real client source. They are functions so that the last test can
 // read what a failure tells the person who gets it.
 function assertReadable(problems: string[]): void {
-  assert.deepEqual(problems, []);
+  assert.equal(problems.length, 0, [
+    'The guard cannot read these signed calls:',
+    ...problems.map(problem => `  ${problem}`),
+    'A missing example value: add one line to EXAMPLES (run-time values only, never a whole route).',
+    'A call the guard cannot read: add a HAND_WRITTEN entry with the file, the exact call text and its routes.',
+  ].join('\n'));
 }
 function assertAccepted(rejected: string[]): void {
-  assert.deepEqual(rejected, []);
+  assert.equal(rejected.length, 0, [
+    'The gateway allowlist rejects these client routes:',
+    ...rejected.map(line => `  ${line}`),
+    'Add each route to the patterns in apps/relay-gateway/src/protocol.ts, with a case in protocol.test.ts, in the same change.',
+    'KNOWN_REJECTED is only for a route with an open issue that decides it.',
+  ].join('\n'));
 }
 
 test('the guard reads every signed call in the client source', () => {
