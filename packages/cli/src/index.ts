@@ -131,6 +131,7 @@ import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { readNamedSessionPackageContent, readNamedSessionRepositoryContext, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
 import { sessionNamesCommand, type SessionMessagingHost } from './sessionNames.js';
 import { readSessionMessageStdin, sessionMessageCommand } from './sessionMessageCommands.js';
+import { sessionWatchCommand } from './sessionWatch.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
@@ -5555,6 +5556,14 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     // apply; the platform refuses to route any execution to a codex_queue or claude_hook binding.
     if (hostScope || setupSessionScope || supervisorOwner) throw new Error('session_names_scope_invalid');
     return sessionNamesCommand(action, flags, sessionMessagingHost());
+  }
+  if (action === 'watch') {
+    if (hostScope || setupSessionScope || supervisorOwner) throw new Error('session_names_scope_invalid');
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once('SIGINT', stop); process.once('SIGTERM', stop);
+    try { return await sessionWatchCommand(flags, sessionMessagingHost(), undefined, controller.signal); }
+    finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
   }
   if(action==='reconcile-stopped-lock'&&(hostScope||setupSessionScope||supervisorOwner
     ||[...flags.keys()].some(k=>!['name','workspace-id','registration-sha256','lock-sha256','apply','dry-run','json'].includes(k))
