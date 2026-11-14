@@ -70,7 +70,14 @@ The optional local `onFailureDiagnostic` observer receives only a frozen
 `dharma.setup-claim-failure/v1` record with the fixed `setup_claim_failed` code
 and an allowlisted phase. It may add a typed `reason`, the server's error code
 as `serverCode` when it is a known code, and a server `correlationId`; `approval_expired` means browser
-approval was not given before the wait ended. The CLI emits this record to
+approval was not given before the wait ended. `stale_home` (phase `identity`) means the Dharma home's
+`device.json` names a device key this OS user's protected store does not hold, or holds a different key
+for; setup stops before it writes a key or sends a request, deletes nothing, and the message tells the user
+to point `DHARMA_HOME` at a new empty folder (the CLI adds the current home path and the exact commands: on
+Linux and macOS it first releases the old home's per-user startup entry with `dharma relay autostart disable`,
+and on every platform the app or terminal that runs setup is restarted so it sees the new value). A protected
+store that cannot be read, including a Windows key that can no longer be decrypted, keeps the identity failure
+without a reason. The CLI emits this record to
 stderr, followed by the fixed `setupClaimFailureMessage` line when a reason is
 known; stdout and the existing sanitized exception remain unchanged. Observer
 failures are ignored. No caught exception, server message, credential, approval

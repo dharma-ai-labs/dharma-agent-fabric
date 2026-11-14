@@ -45,6 +45,8 @@ export type { AssignedCaptureCommandContext } from './assignedCapture.js';
 import {runDeviceSigningMaintenanceController} from './deviceSigningMaintenanceController.js';
 import {withLegacySigningMaintenanceBoundary,type LegacySigningMaintenanceBoundary} from './legacySigningMaintenanceBoundary.js';
 import { superviseRelay } from './relaySupervisor.js';
+import { deferDailyUploadLimit, RELAY_SESSION_CAPTURE_INTERVAL_MS, RELAY_SESSION_CAPTURE_MAXIMUM_SESSIONS,
+  runRelaySessionCapture, type RelaySessionQueueResult } from './relaySessionCapture.js';
 import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureReceipt } from './relayChildFailure.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
@@ -3662,7 +3664,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       hostScope,
       onFailureDiagnostic: diagnostic => {
         process.stderr.write(`${JSON.stringify(diagnostic)}\n`);
-        const message = setupClaimFailureMessage(diagnostic);
+        const message = setupClaimFailureMessage(diagnostic, {home: dharmaHome(), platform: claimPlatform});
         if (message) process.stderr.write(`${message}\n`);
       },
       onRecipientApprovalRequired: async approval => {
@@ -4779,6 +4781,51 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
     if (typeof output === 'string') await writeFile(resolve(output), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
     return manifest;
   } finally { await vault.close(); }
+}
+
+/** Relay capture of one discovered session: commit and queue a capsule revision only when its
+ * evidence differs from the vault's latest revision. The relay's pending-capsule sync uploads it.
+ * A new revision is built only on a latest revision that is neither waiting for its sync nor retired by it. */
+export async function queueRelaySessionCapture(vault: Awaited<ReturnType<typeof openBootstrapVault>>, input: {
+  organizationId: string; deviceId: string; workspaceId: string; policy: OrganizationPolicy; session: ProviderSession;
+}): Promise<RelaySessionQueueResult> {
+  const { session } = input;
+  const rawTurn = Buffer.from(`${session.records.map((record) => JSON.stringify(record.native)).join('\n')}\n`);
+  const rawContentId = sha256(rawTurn);
+  const build = (previous?: { revision: number; capsuleHash: string }) => buildTrajectoryCapsule({
+    organizationId: input.organizationId, deviceId: input.deviceId, workspaceId: input.workspaceId,
+    session, policy: input.policy, rawContentId, rawBytes: rawTurn.byteLength, rawKind: 'raw-provider-turn',
+    ...(previous ? { revision: previous.revision + 1, previousRevisionHash: previous.capsuleHash } : {}),
+    captureProvenance: { sourceClass: 'provider_discovery', collectedAt: session.endedAt, taskReceiptHash: null },
+  });
+  const evidenceHash = (value: ReturnType<typeof buildTrajectoryCapsule>) => {
+    const { revision: _revision, previousRevisionHash: _previous, capsuleHash: _hash, ...evidence } = value;
+    return sha256(canonicalize(evidence));
+  };
+  const firstRevision = build();
+  const latestMetadata = await vault.getLatestCapsuleMetadata(firstRevision.trajectoryId);
+  if (latestMetadata) {
+    const latest = await vault.getLatestCapsule<ReturnType<typeof buildTrajectoryCapsule>>(firstRevision.trajectoryId);
+    if (evidenceHash(latest) === evidenceHash(firstRevision)) return 'unchanged';
+    const state = vault.capsuleSyncState(firstRevision.trajectoryId, latestMetadata.revision);
+    // Still queued (sync deferred): upload that one first, then capture the latest state as one revision.
+    if (state === 'pending') return 'pending';
+    // The server never accepts a revision chained onto a retired one, and the sync would throw on it every cycle.
+    // `dharma evidence capture-batch --sync` rebuilds this session on the server head.
+    if (state === 'retired') throw new Error('relay_session_capture_revision_retired');
+  }
+  const capsule = latestMetadata ? build(latestMetadata) : firstRevision;
+  const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), trajectoryCapsuleSchemaId(capsule), capsule);
+  if (!validation.ok) throw new Error('Trajectory capsule failed schema validation.');
+  await vault.commitCapture({
+    raw: { plaintext: rawTurn, kind: 'raw-provider-turn', expectedContentId: rawContentId },
+    capsule: { plaintext: Buffer.from(JSON.stringify(capsule)), trajectoryId: capsule.trajectoryId,
+      revision: capsule.revision, capsuleHash: capsule.capsuleHash },
+    session: { sessionId: session.sessionId, provider: session.provider, workspaceId: input.workspaceId,
+      sourceLocator: session.sourcePath, status: session.coverage, observedAt: session.endedAt },
+  });
+  await vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
+  return 'queued';
 }
 
 async function evidencePreview(flags: Map<string, string | boolean>): Promise<Output> {
@@ -9292,6 +9339,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   let taskTrajectoriesRecovered = 0;
   let evidenceResponsesCompleted = 0;
   let trajectorySyncsCompleted = 0;
+  let sessionCapturesQueued = 0;
+  let sessionCaptureFailures = 0;
+  let nextSessionCaptureAt = 0;
+  const sessionCaptureSince = new Map<ProviderId, Date>();
   let nextPolicyRefreshAt = 0;
   let lastPollReceiptAt = 0;
   let evidencePolicyFresh = false;
@@ -9535,11 +9586,33 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
         } catch { repositorySourceFailures += 1; }
       }
       let evidenceRequestId: string | undefined;
+      // Sessions the member runs after setup: queue new or changed capsules for the sync below.
+      if (canonicalWorkspace.accessMode !== 'knowledge_only' && evidencePolicyFresh && !stopping
+        && performance.now() >= nextSessionCaptureAt) {
+        const captured = await runRelaySessionCapture({
+          providers: providerAdapters.map(adapter => adapter.providerId),
+          since: sessionCaptureSince, now: Date.now(),
+          // Some providers export sessions through their executable: the relay's PATH check comes first.
+          discover: async (provider, since) => await relayProviderUnsafePath(provider) ? null
+            : providerAdapter(provider)!.discover({ workspace: canonicalWorkspace.path,
+              maximumSessions: RELAY_SESSION_CAPTURE_MAXIMUM_SESSIONS, maximumBytesPerSession: 8_388_608,
+              ...(since ? { since } : {}) }),
+          queue: session => queueRelaySessionCapture(vault, {
+            organizationId: canonicalWorkspace.organizationId, deviceId: fabric.config.deviceId,
+            workspaceId: canonicalWorkspace.workspaceId, policy, session }),
+          stopping: () => stopping,
+        });
+        sessionCapturesQueued += captured.queued;
+        sessionCaptureFailures += captured.failures;
+        nextSessionCaptureAt = performance.now() + RELAY_SESSION_CAPTURE_INTERVAL_MS;
+      }
       if (canonicalWorkspace.accessMode !== 'knowledge_only' && evidencePolicyFresh && !stopping) {
         const evidenceCycle = await withRepositoryRelayStage('evidence_sync', async () => {
-          const synced = await withRepositoryRelayStage('pending_capsule_sync', () =>
-            deferUnavailableRelayRetention(() => syncPendingRetentionCapsules(
-              vault, fabric, policy, canonicalWorkspace.workspaceId)));
+          const pending = await withRepositoryRelayStage('pending_capsule_sync', () =>
+            deferUnavailableRelayRetention(() => deferDailyUploadLimit(() => syncPendingRetentionCapsules(
+              vault, fabric, policy, canonicalWorkspace.workspaceId))));
+          if (pending.state === 'deferred') return pending;
+          const synced = pending.value;
           if (synced.state === 'deferred') return synced;
           const evidence = await withRepositoryRelayStage('evidence_request', () =>
             deferUnavailableRelayRetention(() => processEvidenceRequest(fabric, policy, canonicalWorkspace.workspaceId)));
@@ -9687,7 +9760,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   return {
     ok: true, stopped: true, tasksCompleted, taskTrajectoriesRecovered,
     lastProviderFailureCategory,
-    evidenceResponsesCompleted, trajectorySyncsCompleted,
+    evidenceResponsesCompleted, trajectorySyncsCompleted, sessionCapturesQueued, sessionCaptureFailures,
     repositorySourceCandidates, repositorySourceFailures, repositorySourceState,
     skillPreparationsCompleted, skillPreparationFailures, skillActivationsCompleted, skillActivationFailures,
     skillActivationFailuresByProvider,

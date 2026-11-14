@@ -11,7 +11,7 @@
     "phase": {
       "enum": ["input_validation", "store_preflight", "identity", "challenge", "signing", "finalize", "recipient_approval", "credential_validation", "credential_commit"]
     },
-    "reason": { "enum": ["approval_expired", "server_rejected", "network_unavailable", "response_invalid", "canceled"] },
+    "reason": { "enum": ["approval_expired", "server_rejected", "network_unavailable", "response_invalid", "canceled", "stale_home"] },
     "serverCode": { "enum": ["setup_claim_approval_unavailable", "setup_claim_client_unavailable", "setup_claim_consume_unavailable", "setup_claim_credentials_unavailable", "setup_claim_device_mismatch", "setup_claim_expired", "setup_claim_proof_invalid", "setup_claim_recipient_required", "setup_claim_scope_unavailable", "setup_claim_unavailable", "agent_fabric_capability_disabled", "agent_fabric_decisions_not_ready", "agent_fabric_not_enabled", "agent_fabric_retention_not_ready", "agent_fabric_signing_expired", "agent_fabric_signing_not_ready", "agent_fabric_signing_rotation_required", "internal_error", "invalid_request", "rate_limit_exceeded", "rate_limit_unavailable", "rate_limited"] },
     "correlationId": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }
   }
