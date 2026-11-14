@@ -1,7 +1,7 @@
 {
   "name": "dharma-agent-fabric",
-  "version": "1.0.6",
-  "description": "Your agents, learning together. Connect your AI agent client (Claude Code, Grok (preview, not GA) and other MCP-capable clients) to Dharma Agent Fabric to inspect and operate your organization's authorized agents, tasks, evidence and shared skills, and set up role-bounded team-agent onboarding.",
+  "version": "1.0.7",
+  "description": "Connect Claude Code to your Dharma Agent Fabric organization. Read your agents, devices, tasks, evidence, evaluations and signed skills, and, with your confirmation, dispatch tasks, run analyses and, as an admin, manage signed skill rollouts.",
   "author": {
     "name": "Dharma AI Labs, Inc",
     "email": "nikita@dharma-ai.io",

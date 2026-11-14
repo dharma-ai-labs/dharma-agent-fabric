@@ -171,7 +171,7 @@ server uses standard MCP OAuth with dynamic client registration and PKCE, so no
 API key is needed. Validate changes with
 `claude plugin validate --profile directory --strict plugins/claude/dharma-agent-fabric`.
 
-Grok support is a preview, not GA. The same plugin (version 1.0.6) installs in the Grok CLI:
+Grok support is a preview, not GA. The same plugin (version 1.0.7) installs in the Grok CLI:
 
 ```bash
 grok plugin marketplace add dharma-ai-labs/dharma-agent-fabric

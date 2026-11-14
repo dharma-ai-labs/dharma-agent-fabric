@@ -49,7 +49,7 @@ test('Grok install prose and plugin manifests carry the preview label', () => {
   const readme = read('README.md');
   assert.match(readme, /Grok support is a preview, not GA\. The same plugin/);
   assert.match(readme, /grok\.com \(preview, not GA\) can connect through a custom connector/);
-  assert.match(read('plugins/claude/dharma-agent-fabric/README.md'), /\(Claude Code, Grok \(preview\) or another MCP-capable client\)/);
+  assert.match(read('plugins/claude/dharma-agent-fabric/README.md'), /Grok \(preview\) can install the same plugin/);
   const marketplace = JSON.parse(read('.claude-plugin/marketplace.json'));
   const manifest = JSON.parse(read('plugins/claude/dharma-agent-fabric/.claude-plugin/plugin.json'));
   for (const description of [marketplace.metadata.description, ...marketplace.plugins.map(item => item.description), manifest.description]) {
