@@ -14,10 +14,9 @@ export interface EnrollmentAnchorLockRelease {
 // is preserved for explicit recovery. Automatically reclaiming that mutex would
 // introduce another check-then-replace race.
 // Owner contents are flushed before publication, so a live owner's file always
-// holds its PID. Contents that cannot be a PID (empty or NUL after a host crash,
-// for example) give no owner evidence, so they are never reclaimed: the acquire
-// stops with connection_anchor_lock_invalid and leaves the file for owner-scoped
-// reconciliation (#484). Only a parsed PID with ESRCH counts as dead.
+// holds its PID. Contents that cannot be a PID have no owner and count as dead,
+// so they are quarantined under the mutex like any dead owner (#417), including
+// the empty or NUL lock a host crash can leave (#484).
 // That candidate flush happens once, before the mutex: a flush under the mutex could commit
 // the mutex link without its later unlink, and a hard reset would then leave an
 // abandoned mutex. Nothing is flushed while the mutex exists: only link, unlink,
@@ -107,15 +106,14 @@ export async function acquireEnrollmentAnchorLock(
       throw error;
     }
     // process.kill refuses anything above this range, so no such owner can be checked.
-    // No PID is no owner evidence: such a lock is reported, never taken as dead.
-    if (!/^[1-9][0-9]*$/.test(text) || Number(text) > 0x7fffffff) return {identity, alive: false, ownerless: true};
+    if (!/^[1-9][0-9]*$/.test(text) || Number(text) > 0x7fffffff) return {identity, alive: false};
     let alive = true;
     try {await step(async () => {process.kill(Number(text), 0);});}
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
       alive = false;
     }
-    return {identity, alive, ownerless: false};
+    return {identity, alive};
   };
   // undefined means the path is absent. null still means ownership is unknown.
   const inspect = async (path: string) => {
@@ -144,7 +142,6 @@ export async function acquireEnrollmentAnchorLock(
       // stale answer costs one more retry, and the owner is inspected again under
       // the mutex before anything is published or quarantined.
       const holder = await inspect(lockPath);
-      if (holder?.ownerless) throw Error('connection_anchor_lock_invalid');
       if (holder === null || holder?.alive) {await pause(); continue;}
       // Every primary publication participates in this mutex. An exiting owner
       // may release its primary during inspection, but no replacement can publish
@@ -168,8 +165,6 @@ export async function acquireEnrollmentAnchorLock(
             if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
           }
           const current = published ? undefined : await inspect(lockPath);
-          // A lock that appeared while the mutex is held is judged the same way: no PID, no reclaim.
-          if (current?.ownerless) throw Error('connection_anchor_lock_invalid');
           if (current && !current.alive) {
             const quarantine = `${lockPath}.dead.${randomUUID()}`;
             try {
