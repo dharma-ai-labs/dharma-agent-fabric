@@ -49,6 +49,9 @@ export function relayOpenFailureCode(error: unknown): RelayOpenFailureCode | und
 const WINDOWS_CREDENTIALS_REMEDY = 'Device credentials cannot be read. If the Windows password was reset by an administrator, '
   + 'restore the previous password or re-enroll this device.';
 
+const LOCK_INVALID_REMEDY = 'A device lock needs owner-scoped reconciliation. Stop the Dharma relay and have the device owner '
+  + 'inspect the dharma-signing-controls-* or dharma-enrollment-locks-* lock, or contact support.';
+
 /** One line for `dharma status`; undefined for any code without a known next step. */
 export function relayOpenFailureRemedy(code: unknown, platform: NodeJS.Platform = process.platform): string | undefined {
   switch (code) {
@@ -62,6 +65,8 @@ export function relayOpenFailureRemedy(code: unknown, platform: NodeJS.Platform 
       return 'Device enrollment trust cannot be verified. Run dharma login to re-authenticate this device.';
     case 'connection_anchor_lock_unavailable':
       return 'The device enrollment lock cannot be checked. Close other Dharma relays for this user; the relay retries on its own.';
+    // The relay never reclaims a lock without owner evidence (#484), so this asks for the owner and grants no destructive step.
+    case 'connection_anchor_lock_invalid': return LOCK_INVALID_REMEDY;
     default: return undefined;
   }
 }
@@ -73,6 +78,8 @@ const BACKEND_PLATFORM: Record<SecureSecretStore['backend'], NodeJS.Platform> = 
 export async function relayOpenFailureRemedyForHost(code: unknown,
   openStore: () => Promise<Pick<SecureSecretStore, 'backend'>> = createSystemSecureStore): Promise<string | undefined> {
   if (relayOpenFailureRemedy(code) === undefined) return undefined;
+  // The lock remedy is the same on every platform, so it never needs the credential store.
+  if (code === 'connection_anchor_lock_invalid') return LOCK_INVALID_REMEDY;
   const platform = await openStore().then(store => BACKEND_PLATFORM[store.backend] ?? process.platform, () => process.platform);
   return relayOpenFailureRemedy(code, platform);
 }
