@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash,randomUUID} from 'node:crypto';
-import {mkdir,readdir,rm,writeFile} from 'node:fs/promises';
+import {mkdir,readFile,readdir,rm,writeFile} from 'node:fs/promises';
 import {userInfo} from 'node:os';
 import {dirname,resolve} from 'node:path';
 import test from 'node:test';
@@ -51,7 +51,8 @@ test('expired async context cannot silently reenter a released control lease',as
   later();await assert.rejects(detached,/device_signing_control_unavailable/);
 });
 
-test('a NUL lock left by a hard reset at the real signing path no longer blocks the device',async t=>{
+// #484 scope: a lock that names no owner keeps the stop. It is never reclaimed, so it stays for owner review.
+test('a NUL lock left by a hard reset at the real signing path stops signing and stays in place',async t=>{
   const run=api(),scope=input(),user=userInfo();
   const hash=(v:unknown)=>'sha256:'+createHash('sha256').update(canonicalize(v)).digest('hex');
   const userHash=hash({home:user.homedir,user:user.username}).slice(7);
@@ -61,6 +62,7 @@ test('a NUL lock left by a hard reset at the real signing path no longer blocks 
   await mkdir(dirname(path),{recursive:true,mode:0o700});
   await writeFile(path,Buffer.alloc(5));
   t.after(()=>rm(path,{force:true}));
-  assert.equal(await run(scope,async lease=>{await lease.assertHeld();return 'signed';}),'signed');
-  assert.equal((await readdir(dirname(path))).some(name=>name.startsWith(namespace.slice(7))),false);
+  await assert.rejects(run(scope,async()=>assert.fail('a lock without an owner admitted a signer')),/^Error: connection_anchor_lock_invalid$/);
+  assert.deepEqual(await readFile(path),Buffer.alloc(5));
+  assert.deepEqual((await readdir(dirname(path))).filter(name=>name.startsWith(namespace.slice(7))),[namespace.slice(7)+'.lock']);
 });
