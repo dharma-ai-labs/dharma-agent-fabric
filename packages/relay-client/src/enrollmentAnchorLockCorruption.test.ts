@@ -16,8 +16,6 @@ const moduleUrl = new URL('./enrollmentAnchorLock.js', import.meta.url).href;
 const NUL_OWNER = Buffer.alloc(5);
 // #484: a Windows host crash left the full six-byte length, all NUL.
 const TORN_OWNER = Buffer.alloc(6);
-// A PID that process.kill accepts and no process holds.
-const DEAD_OWNER = '2147483647\n';
 // Linux and macOS flush the lock folder once the lock is published and the mutex is gone; Windows cannot.
 const FOLDER_FLUSH = process.platform === 'win32' ? [] : ['folder flush'];
 
@@ -95,40 +93,48 @@ function recordedChanges(path: string) {
   }};
 }
 
-// #484 scope: a lock whose contents cannot name an owner is not reclaimed. The acquire stops with
-// connection_anchor_lock_invalid at once, and the lock keeps its file, contents and timestamp.
-async function assertStopped(t: {after(fn: () => Promise<void>): void}, label: string, value: string | Buffer, mtime?: Date) {
-  const f = await fixture(t), recorded = recordedChanges(f.path);
-  await fs.writeFile(f.path, value);
-  if (mtime) await fs.utimes(f.path, mtime, mtime);
-  const before = await fs.stat(f.path, {bigint: true});
-  const acquire = await compiledAcquire(recorded.context);
-  await assert.rejects(acquire(f.path, undefined, 2000), /^Error: connection_anchor_lock_invalid$/, label);
-  const after = await fs.stat(f.path, {bigint: true});
-  assert.equal(after.ino, before.ino, label); assert.equal(after.dev, before.dev, label);
-  assert.equal(after.mtimeNs, before.mtimeNs, label);
-  assert.deepEqual(await fs.readFile(f.path), Buffer.from(value), label);
-  assert.deepEqual(recorded.changes, [], `${label}: no link, rename or unlink`);
-  assert.equal(recorded.waits(), 0, `${label}: no retry`);
-  assert.deepEqual(await fs.readdir(f.root), ['anchor.lock'], label);
-}
-
-test('empty or unparseable lock contents stop the acquire and are never moved, removed or retried', async t => {
-  const contents: Array<[string, string | Buffer]> = [['empty', ''], ['NUL', NUL_OWNER], ['text', 'corrupt-owner'],
+test('a lock whose contents cannot be an owner is quarantined and then acquired', async t => {
+  const contents: Array<[string, string | Buffer]> = [['NUL', NUL_OWNER], ['empty', ''], ['text', 'corrupt-owner'],
     ['zero', '0\n'], ['negative', '-1\n'], ['pid then NUL', Buffer.from('1234\n\0\0\0')],
     ['above the kill range', '4294967296\n'], ['above safe integers', '99999999999999999999\n']];
-  for (const [label, value] of contents) await assertStopped(t, label, value);
+  for (const [label, value] of contents) {
+    const f = await fixture(t);
+    await fs.writeFile(f.path, value);
+    const release = await acquireEnrollmentAnchorLock(f.path, undefined, 2000);
+    try {
+      await release.assertHeld();
+      assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}\n`, label);
+      assert.deepEqual(await fs.readdir(f.root), ['anchor.lock'], label);
+    } finally {await release();}
+    assert.deepEqual(await fs.readdir(f.root), [], label);
+  }
 });
 
-test('#484: a six-byte NUL lock with a timestamp before this boot keeps the stop', async t => {
-  await assertStopped(t, 'prior boot', TORN_OWNER, new Date(Date.now() - uptime() * 1000 - 3_600_000));
+// #484: the six-byte NUL lock a Windows host crash left is quarantined like any other ownerless lock (#417),
+// whatever its timestamp, and the next owner takes the lock.
+async function assertQuarantined(t: {after(fn: () => Promise<void>): void}, label: string, mtime: Date) {
+  const f = await fixture(t), recorded = recordedChanges(f.path);
+  await fs.writeFile(f.path, TORN_OWNER);
+  await fs.utimes(f.path, mtime, mtime);
+  const release = await (await compiledAcquire(recorded.context))(f.path, undefined, 2000);
+  try {
+    await release.assertHeld();
+    assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}\n`, label);
+    assert.ok(recorded.changes.includes(`rename ${f.path}`), `${label}: the torn lock is moved aside`);
+    assert.deepEqual(await fs.readdir(f.root), ['anchor.lock'], label);
+  } finally {await release();}
+  assert.deepEqual(await fs.readdir(f.root), [], label);
+}
+
+test('#484: a six-byte NUL lock with a timestamp before this boot is quarantined and then acquired', async t => {
+  await assertQuarantined(t, 'prior boot', new Date(Date.now() - uptime() * 1000 - 3_600_000));
 });
 
-test('#484: a six-byte NUL lock with a timestamp in this boot keeps the stop', async t => {
-  await assertStopped(t, 'current boot', TORN_OWNER, new Date());
+test('#484: a six-byte NUL lock with a timestamp in this boot is quarantined and then acquired', async t => {
+  await assertQuarantined(t, 'current boot', new Date());
 });
 
-test('unavailable ownership evidence keeps the stop and leaves the lock alone', async t => {
+test('unavailable ownership evidence leaves the lock alone', async t => {
   // Windows: an unreadable owner may be live, so the acquire waits and then reports busy.
   const windows = await fixture(t), denied = recordedChanges(windows.path);
   await fs.writeFile(windows.path, TORN_OWNER);
@@ -159,9 +165,10 @@ test('unavailable ownership evidence keeps the stop and leaves the lock alone', 
   assert.deepEqual(await fs.readdir(metadata.root), ['anchor.lock']);
 });
 
-test('a live owner in this boot is left untouched by a contender', async t => {
+test('a live owner on a recovered lock is never evicted by a contender', async t => {
   const f = await fixture(t), started = resolve(f.root, 'started'), ready = resolve(f.root, 'ready');
   const finish = resolve(f.root, 'finish');
+  await fs.writeFile(f.path, NUL_OWNER);
   const holder = child(holderScript, f.path, started, ready, finish);
   holder.catch(() => undefined);
   try {
@@ -176,23 +183,27 @@ test('a live owner in this boot is left untouched by a contender', async t => {
   assert.deepEqual((await fs.readdir(f.root)).sort(), ['finish', 'ready', 'started']);
 });
 
-test('contending processes on one NUL lock all keep the stop, and none becomes a holder', async t => {
+test('contending processes on one NUL lock each own it alone', async t => {
   const f = await fixture(t), trace = resolve(f.root, 'trace');
   await fs.writeFile(f.path, NUL_OWNER);
-  const before = await fs.stat(f.path, {bigint: true});
   const script = `import {acquireEnrollmentAnchorLock} from ${JSON.stringify(moduleUrl)};
     import {appendFile} from 'node:fs/promises';
-    const [path, trace] = process.argv.slice(1);
-    let release;
-    try {release = await acquireEnrollmentAnchorLock(path, undefined, 2000);}
-    catch (error) {await appendFile(trace, 'stop:'+error.message+'\\n'); process.exit(0);}
-    await appendFile(trace, 'enter\\n');
-    await release();`;
-  await Promise.all(['A', 'B', 'C', 'D'].map(() => child(script, f.path, trace)));
-  assert.deepEqual((await fs.readFile(trace, 'utf8')).trim().split('\n'), Array(4).fill('stop:connection_anchor_lock_invalid'));
-  assert.equal((await fs.stat(f.path, {bigint: true})).ino, before.ino);
-  assert.deepEqual(await fs.readFile(f.path), NUL_OWNER);
-  assert.deepEqual((await fs.readdir(f.root)).sort(), ['anchor.lock', 'trace']);
+    const [path, trace, label] = process.argv.slice(1);
+    const release = await acquireEnrollmentAnchorLock(path);
+    try {
+      await appendFile(trace, 'enter:'+label+'\\n');
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await release.assertHeld();
+      await appendFile(trace, 'leave:'+label+'\\n');
+    } finally {await release();}`;
+  await Promise.all(['A', 'B', 'C', 'D'].map(label => child(script, f.path, trace, label)));
+  const lines = (await fs.readFile(trace, 'utf8')).trim().split('\n');
+  assert.equal(lines.length, 8);
+  for (let index = 0; index < lines.length; index += 2) {
+    assert.match(lines[index]!, /^enter:/);
+    assert.equal(lines[index + 1], lines[index]!.replace('enter:', 'leave:'));
+  }
+  assert.deepEqual(await fs.readdir(f.root), ['trace']);
 });
 
 test('a lock published by another process during an acquire is never displaced', async t => {
@@ -223,47 +234,56 @@ test('a lock published by another process during an acquire is never displaced',
   assert.deepEqual((await fs.readdir(f.root)).sort(), ['finish', 'ready', 'started']);
 });
 
-test('a torn lock that appears while the mutex is held is preserved, not reclaimed', async t => {
+test('a torn lock that appears while the mutex is held is quarantined under the mutex, then acquired', async t => {
   const f = await fixture(t), recorded = recordedChanges(f.path);
-  let replaced = false, tornIno = 0n;
+  let replaced = false;
   const acquire = await compiledAcquire({...recorded.context, link: async (candidate: string, destination: string) => {
     if (destination === f.path && !replaced) {
       replaced = true;
       await fs.writeFile(f.path, TORN_OWNER);
-      tornIno = (await fs.stat(f.path, {bigint: true})).ino;
     }
     return recorded.context.link(candidate, destination);
   }});
-  await assert.rejects(acquire(f.path, undefined, 2000), /^Error: connection_anchor_lock_invalid$/);
-  assert.equal(replaced, true);
-  assert.equal((await fs.stat(f.path, {bigint: true})).ino, tornIno);
-  assert.deepEqual(await fs.readFile(f.path), TORN_OWNER);
-  assert.deepEqual(recorded.changes, [`link ${f.path}.recovery`, `link ${f.path}`]);
-  assert.equal(recorded.waits(), 0);
-  assert.deepEqual(await fs.readdir(f.root), ['anchor.lock']);
+  const release = await acquire(f.path, undefined, 2000);
+  try {
+    assert.equal(replaced, true);
+    await release.assertHeld();
+    assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}\n`);
+    const quarantine = recorded.changes.find(change => change.startsWith(`unlink ${f.path}.dead.`));
+    assert.ok(quarantine, 'the torn lock was moved aside and removed');
+    assert.deepEqual(recorded.changes, [`link ${f.path}.recovery`, `link ${f.path}`, `rename ${f.path}`, quarantine,
+      `link ${f.path}.recovery`, `link ${f.path}`]);
+    assert.deepEqual(await fs.readdir(f.root), ['anchor.lock']);
+  } finally {await release();}
+  assert.deepEqual(await fs.readdir(f.root), []);
 });
 
-test('a contender cannot publish while the inspector holds the mutex', async t => {
+test('a contender cannot publish while the inspector holds the mutex over a NUL lock', async t => {
   const f = await fixture(t), started = resolve(f.root, 'started'), ready = resolve(f.root, 'ready');
   // Once the mutex is free either side may win, so the contender holds only briefly.
   const finish = resolve(f.root, 'finish');
   await fs.writeFile(finish, 'finish');
-  let contender: Promise<void> | undefined;
-  const acquire = await compiledAcquire({link: async (candidate: string, destination: string) => {
-    if (destination === f.path && !contender) {
-      await fs.access(f.path + '.recovery');
+  await fs.writeFile(f.path, NUL_OWNER);
+  let contender: Promise<void> | undefined, inspected = false;
+  const acquire = await compiledAcquire({readFile: async (path: string, encoding: BufferEncoding) => {
+    const text = await fs.readFile(path, encoding);
+    // Only the read under the mutex is paused. The read-only check before it holds nothing.
+    const held = await fs.access(f.path + '.recovery').then(() => true, () => false);
+    if (path === f.path && !inspected && held) {
+      inspected = true;
       contender = child(holderScript, f.path, started, ready, finish);
       contender.catch(() => undefined);
       await waitFor(started);
       await new Promise(accept => setTimeout(accept, 300));
       await assert.rejects(fs.readFile(ready), {code: 'ENOENT'});
-      await assert.rejects(fs.readFile(f.path), {code: 'ENOENT'});
+      assert.deepEqual(await fs.readFile(f.path), NUL_OWNER);
+      await fs.access(f.path + '.recovery');
     }
-    return fs.link(candidate, destination);
+    return text;
   }});
   const release = await acquire(f.path, undefined, 5000);
   try {
-    assert.ok(contender);
+    assert.equal(inspected, true);
     await release.assertHeld();
     assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}\n`);
   } finally {await release();}
@@ -274,13 +294,15 @@ test('a contender cannot publish while the inspector holds the mutex', async t =
 
 test('a NUL recovery mutex is an abandoned mutex: preserved and reported, not reclaimed', async t => {
   const f = await fixture(t), recovery = f.path + '.recovery';
+  await fs.writeFile(f.path, NUL_OWNER);
   await fs.writeFile(recovery, NUL_OWNER);
   const before = await fs.stat(recovery, {bigint: true});
   await assert.rejects(acquireEnrollmentAnchorLock(f.path, undefined, 100), /connection_anchor_recovery_required/);
   const after = await fs.stat(recovery, {bigint: true});
   assert.equal(after.ino, before.ino); assert.equal(after.dev, before.dev);
   assert.deepEqual(await fs.readFile(recovery), NUL_OWNER);
-  assert.deepEqual(await fs.readdir(f.root), ['anchor.lock.recovery']);
+  assert.deepEqual(await fs.readFile(f.path), NUL_OWNER);
+  assert.deepEqual((await fs.readdir(f.root)).sort(), ['anchor.lock', 'anchor.lock.recovery']);
 });
 
 function recordedOpen(failure?: string) {
@@ -381,22 +403,34 @@ test('nothing is flushed while the recovery mutex exists', async t => {
   await (await (await compiledAcquire(first.context))(clean.path))();
   assert.deepEqual(first.events, ['flush', 'mutex link', 'mutex unlink', ...FOLDER_FLUSH]);
   const dead = await fixture(t), retried = recordedLockFiles(dead.path);
-  await fs.writeFile(dead.path, DEAD_OWNER);
+  await fs.writeFile(dead.path, NUL_OWNER);
   await (await (await compiledAcquire(retried.context))(dead.path, undefined, 2000))();
   assert.deepEqual(retried.events, ['flush', 'mutex link', 'mutex unlink', 'mutex link', 'mutex unlink', ...FOLDER_FLUSH]);
-  const torn = await fixture(t), stopped = recordedLockFiles(torn.path);
-  await fs.writeFile(torn.path, NUL_OWNER);
-  await assert.rejects((await compiledAcquire(stopped.context))(torn.path, undefined, 2000), /connection_anchor_lock_invalid/);
-  assert.deepEqual(stopped.events, ['flush']);
 });
+
+const folderFlushFailed = (error: Error & {cause?: {code?: string}}) =>
+  error.message === 'connection_anchor_lock_flush_failed' && error.cause?.code === 'EIO';
 
 test('a failed lock folder flush is a typed error and gives the lock up', {skip: process.platform === 'win32'}, async t => {
   const f = await fixture(t), recorded = recordedLockFiles(f.path, 'EIO');
-  await assert.rejects((await compiledAcquire(recorded.context))(f.path, undefined, 1000),
-    (error: Error & {cause?: {code?: string}}) => error.message === 'connection_anchor_lock_flush_failed' && error.cause?.code === 'EIO');
+  await assert.rejects((await compiledAcquire(recorded.context))(f.path, undefined, 1000), folderFlushFailed);
   assert.deepEqual(recorded.events, ['flush', 'mutex link', 'mutex unlink', 'folder flush']);
   assert.deepEqual(await fs.readdir(f.root), []);
 });
+
+test('a failed folder flush after quarantine leaves no lock, mutex or dead copy, so the next acquire recovers',
+  {skip: process.platform === 'win32'}, async t => {
+    const f = await fixture(t), recorded = recordedLockFiles(f.path, 'EIO');
+    await fs.writeFile(f.path, NUL_OWNER);
+    await assert.rejects((await compiledAcquire(recorded.context))(f.path, undefined, 2000), folderFlushFailed);
+    assert.deepEqual(recorded.events, ['flush', 'mutex link', 'mutex unlink', 'mutex link', 'mutex unlink', 'folder flush']);
+    assert.deepEqual(await fs.readdir(f.root), []);
+    const release = await acquireEnrollmentAnchorLock(f.path, undefined, 1000);
+    try {await release.assertHeld(); assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}
+`);}
+    finally {await release();}
+    assert.deepEqual(await fs.readdir(f.root), []);
+  });
 
 test('a waiter held off by a live owner never creates the recovery mutex', async t => {
   const f = await fixture(t), recorded = recordedLockFiles(f.path);
@@ -426,14 +460,14 @@ test('a waiter takes the recovery mutex once, after the live owner releases', as
 
 test('a lock that looks dead is left alone while another process holds the mutex', async t => {
   const f = await fixture(t), recovery = f.path + '.recovery';
-  await fs.writeFile(f.path, DEAD_OWNER);
+  await fs.writeFile(f.path, NUL_OWNER);
   await fs.writeFile(recovery, `${process.pid}
 `);
   const before = await fs.stat(f.path, {bigint: true});
   await assert.rejects(acquireEnrollmentAnchorLock(f.path, undefined, 100), /connection_anchor_busy/);
   const after = await fs.stat(f.path, {bigint: true});
   assert.equal(after.ino, before.ino); assert.equal(after.dev, before.dev);
-  assert.equal(await fs.readFile(f.path, 'utf8'), DEAD_OWNER);
+  assert.deepEqual(await fs.readFile(f.path), NUL_OWNER);
   assert.deepEqual((await fs.readdir(f.root)).sort(), ['anchor.lock', 'anchor.lock.recovery']);
 });
 
