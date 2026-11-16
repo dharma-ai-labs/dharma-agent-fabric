@@ -4,8 +4,10 @@
 //   node smokeCommandLauncher.js --timeout-ms <n> [--inherit NAME]... -- <argv...>
 //
 // The command's exit status and error output pass through unchanged. The command is
-// stopped shortly before the caller's own timeout so that it does not outlive this launcher.
+// stopped shortly before the caller's own timeout, counted from this launcher's start, so
+// that a slow start-up cannot let the caller stop the launcher first and leave the command running.
 import { spawn } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { registeredCommandEnvironment } from '@dharma-ai-labs/agent-fabric-task-runner';
 
 const USAGE = 'usage: smokeCommandLauncher --timeout-ms <n> [--inherit NAME]... -- <command> [arguments...]';
@@ -48,7 +50,8 @@ else {
     const [executable, ...argv] = parsed.argv;
     const child = spawn(executable!, argv, { cwd: process.cwd(), shell: false, windowsHide: true,
       stdio: ['ignore', 'inherit', 'inherit'], env: environment });
-    const timer = setTimeout(() => child.kill('SIGKILL'), Math.max(1, parsed.timeoutMs - 500));
+    const remainingMs = parsed.timeoutMs - 500 - Math.ceil(performance.now());
+    const timer = setTimeout(() => child.kill('SIGKILL'), Math.max(1, remainingMs));
     let failed = false;
     child.once('error', (error) => {
       failed = true;
