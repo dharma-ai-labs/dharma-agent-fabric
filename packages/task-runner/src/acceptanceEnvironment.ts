@@ -1,5 +1,3 @@
-import { RESERVED_ENVIRONMENT_PREFIX, type CommandPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-
 // Operating-system essentials that registered build, test and lint commands commonly need.
 // HOME, USERPROFILE, APPDATA, LOCALAPPDATA and XDG_CONFIG_HOME are not harmless: they locate
 // per-user tool configuration and credential files. They are passed because npm and Git need
@@ -13,6 +11,44 @@ const POSIX_ESSENTIALS = [
   'PATH', 'HOME', 'TMPDIR', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES', 'LC_COLLATE',
   'LC_NUMERIC', 'LC_TIME', 'LC_MONETARY', 'TZ', 'USER', 'LOGNAME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
 ];
+const ENVIRONMENT_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
+const MAXIMUM_INHERITED_NAMES = 32;
+// The relay and the task runner own every name with this prefix, including the runner-set
+// DHARMA_TASK_WORKTREE, DHARMA_EXTERNAL_IDEMPOTENCY_KEY and DHARMA_ACTION_DIGEST.
+const RESERVED_PREFIX = 'DHARMA_';
+
+/** Optional `environment` entry of a registered command in `tasks.allowedCommands`. */
+export interface AcceptanceCommandEnvironmentPolicy {
+  /** Variable names the command may read from the relay environment, besides operating-system essentials. */
+  inherit: string[];
+}
+
+/**
+ * Returns the validated `environment` entry of a registered command, or `undefined` when it has none.
+ * Names are unique case-insensitively and cannot start with `DHARMA_` in any letter case.
+ */
+export function acceptanceCommandEnvironmentPolicy(
+  command: object,
+  commandId: string,
+): AcceptanceCommandEnvironmentPolicy | undefined {
+  const environment: unknown = Reflect.get(command, 'environment');
+  if (environment === undefined) return undefined;
+  const invalid = () => new Error(`Registered command has an invalid environment policy: ${commandId}`);
+  if (!environment || typeof environment !== 'object' || Array.isArray(environment)
+    || Object.keys(environment).some((key) => key !== 'inherit')) {
+    throw invalid();
+  }
+  const inherit = (environment as { inherit?: unknown }).inherit;
+  if (!Array.isArray(inherit) || inherit.length > MAXIMUM_INHERITED_NAMES) throw invalid();
+  const names = new Set<string>();
+  for (const name of inherit) {
+    // Windows compares environment names case-insensitively, so names must be unique on every platform.
+    const key = typeof name === 'string' ? name.toUpperCase() : '';
+    if (!ENVIRONMENT_NAME.test(key) || key.startsWith(RESERVED_PREFIX) || names.has(key)) throw invalid();
+    names.add(key);
+  }
+  return { inherit: [...inherit] as string[] };
+}
 
 export interface AcceptanceCommandEnvironmentInput {
   /** The relay process environment that values are read from. */
@@ -20,7 +56,9 @@ export interface AcceptanceCommandEnvironmentInput {
   platform: NodeJS.Platform;
   /** The command's working directory inside the task worktree. */
   cwd: string;
-  command: Pick<CommandPolicy, 'environment'>;
+  /** The registered command, as resolved from the approved command policy. */
+  command: object;
+  commandId?: string;
   /** Values from a verified action-decision receipt, when the task carries one. */
   actionDecision?: { externalIdempotencyKey: string; actionDigest: string };
 }
@@ -31,6 +69,7 @@ export interface AcceptanceCommandEnvironmentInput {
  * names. Nothing else from the relay environment is passed.
  */
 export function acceptanceCommandEnvironment(input: AcceptanceCommandEnvironmentInput): Record<string, string> {
+  const policy = acceptanceCommandEnvironmentPolicy(input.command, input.commandId ?? 'acceptance command');
   const windows = input.platform === 'win32';
   const normalize = (name: string) => windows ? name.toUpperCase() : name;
   const sourceNames = new Map<string, string>();
@@ -43,12 +82,7 @@ export function acceptanceCommandEnvironment(input: AcceptanceCommandEnvironment
     if (sourceName !== undefined) environment[sourceName] = input.source[sourceName]!;
   };
   for (const name of windows ? WINDOWS_ESSENTIALS : POSIX_ESSENTIALS) copy(name);
-  for (const name of input.command.environment?.inherit ?? []) {
-    if (name.toUpperCase().startsWith(RESERVED_ENVIRONMENT_PREFIX)) {
-      throw new Error('Acceptance command environment cannot inherit a runner-owned name.');
-    }
-    copy(name);
-  }
+  for (const name of policy?.inherit ?? []) copy(name);
   environment.DHARMA_TASK_WORKTREE = input.cwd;
   if (input.actionDecision) {
     environment.DHARMA_EXTERNAL_IDEMPOTENCY_KEY = input.actionDecision.externalIdempotencyKey;

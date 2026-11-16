@@ -1566,7 +1566,7 @@ type AcceptanceEnvironmentInput = {
   source: NodeJS.ProcessEnv;
   platform: NodeJS.Platform;
   cwd: string;
-  command: { argv: string[]; timeoutSeconds: number; environment?: { inherit: string[] } };
+  command: { argv: string[]; timeoutSeconds: number; environment?: unknown };
   actionDecision?: { externalIdempotencyKey: string; actionDigest: string };
 };
 
@@ -1777,6 +1777,42 @@ test('acceptance environment builder copies only POSIX essentials, permitted nam
       ...essentials, HTTPS_PROXY: source.HTTPS_PROXY, DHARMA_TASK_WORKTREE: '/work/tree',
       DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'decision-id', DHARMA_ACTION_DIGEST: SYNTHETIC_DIGEST,
     }, platform);
+  }
+});
+
+test('acceptance command environment policy is bounded and cannot name runner-owned variables', () => {
+  const source = { HTTPS_PROXY: 'http://proxy.example.test:3128', NODE_EXTRA_CA_CERTS: '/etc/ssl/synthetic.pem' };
+  const command = (environment: unknown) => ({ argv: [process.execPath], timeoutSeconds: 10, environment });
+  assert.deepEqual(acceptanceEnvironment({ source, platform: 'linux', cwd: '/work',
+    command: command({ inherit: ['HTTPS_PROXY', 'NODE_EXTRA_CA_CERTS'] }) }),
+  { ...source, DHARMA_TASK_WORKTREE: '/work' });
+  assert.deepEqual(acceptanceEnvironment({ source, platform: 'linux', cwd: '/work', command: command({ inherit: [] }) }),
+    { DHARMA_TASK_WORKTREE: '/work' });
+  const invalid: unknown[] = [
+    { inherit: ['DHARMA_TASK_WORKTREE'] },
+    { inherit: ['DHARMA_EXTERNAL_IDEMPOTENCY_KEY'] },
+    { inherit: ['DHARMA_ACTION_DIGEST'] },
+    { inherit: ['dharma_action_digest'] },
+    { inherit: ['Dharma_Task_Worktree'] },
+    { inherit: ['DHARMA_HOME'] },
+    { inherit: ['1INVALID'] },
+    { inherit: ['NAME=VALUE'] },
+    { inherit: [''] },
+    { inherit: ['A'.repeat(129)] },
+    { inherit: ['HTTPS_PROXY', 'https_proxy'] },
+    { inherit: Array.from({ length: 33 }, (_, index) => `NAME_${index}`) },
+    { inherit: 'HTTPS_PROXY' },
+    { inherit: [42] },
+    { inherit: ['HTTPS_PROXY'], values: { HTTPS_PROXY: 'http://proxy.example.test' } },
+    {},
+    null,
+    ['HTTPS_PROXY'],
+  ];
+  for (const environment of invalid) {
+    for (const platform of ['linux', 'win32'] as const) {
+      assert.throws(() => acceptanceEnvironment({ source, platform, cwd: '/work', command: command(environment) }),
+        /environment/, `${platform} ${JSON.stringify(environment)}`);
+    }
   }
 });
 

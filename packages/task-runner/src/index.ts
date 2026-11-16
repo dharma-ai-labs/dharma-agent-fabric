@@ -27,9 +27,14 @@ import {
   type ProviderExecutionResult,
   type ProviderFailureCategory,
 } from '@dharma-ai-labs/agent-fabric-provider-adapters';
-import { acceptanceCommandEnvironment } from './acceptanceEnvironment.js';
+import { acceptanceCommandEnvironment, acceptanceCommandEnvironmentPolicy } from './acceptanceEnvironment.js';
 
-export { acceptanceCommandEnvironment, type AcceptanceCommandEnvironmentInput } from './acceptanceEnvironment.js';
+export {
+  acceptanceCommandEnvironment,
+  acceptanceCommandEnvironmentPolicy,
+  type AcceptanceCommandEnvironmentInput,
+  type AcceptanceCommandEnvironmentPolicy,
+} from './acceptanceEnvironment.js';
 
 type TaskKnowledgeToolScope = { directory: string; manifestSha256: string; catalogSha256: string };
 
@@ -1193,6 +1198,9 @@ export async function executeTask(input: {
     const readOnlyFingerprints = await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, { paths: readOnlyPaths });
     const artifactIntegrity = { paths: readOnlyPaths, expected: readOnlyFingerprints };
     const allowedCommands = input.task.authority.commands.map(({ commandId }) => resolveRegisteredCommand(input.policy, commandId).argv);
+    for (const { commandId } of input.task.acceptance.commands) {
+      acceptanceCommandEnvironmentPolicy(resolveRegisteredCommand(input.policy, commandId), commandId);
+    }
     const formattedTask = formatProviderInstructionsForTask(input.task);
     const artifactContext = formattedTask.artifactMetadataLength
       ? formattedTask.instructions.slice(-formattedTask.artifactMetadataLength) : '';
@@ -1289,6 +1297,7 @@ export async function executeTask(input: {
           platform: process.platform,
           cwd,
           command,
+          commandId,
           ...(decisionReceipt ? {
             actionDecision: {
               externalIdempotencyKey: decisionReceipt.decisionId,

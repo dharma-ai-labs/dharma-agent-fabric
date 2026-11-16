@@ -144,13 +144,13 @@ tasks:
         inherit: [HTTPS_PROXY, NODE_EXTRA_CA_CERTS]
 ```
 
-The value is read from the relay environment when the command runs. A policy
-entry is rejected when the command resolves if `environment` has keys other than
+The value is read from the relay environment when the command runs. Before
+provider execution, the task runner checks the `environment` entry of every
+signed acceptance command. The task fails if an entry has keys other than
 `inherit`, lists more than 32 names, lists a name that is not
 `[A-Za-z_][A-Za-z0-9_]{0,127}` or lists the same name twice (compared
-case-insensitively). It is also rejected for any name starting with `DHARMA_`
-in any letter case, which covers the runner-owned names. A task that references
-a rejected command fails before provider execution.
+case-insensitively). It also fails for any name starting with `DHARMA_` in any
+letter case, which covers the runner-owned names.
 
 `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` and `XDG_CONFIG_HOME` are not
 harmless. They locate per-user tool configuration and credential files, and are

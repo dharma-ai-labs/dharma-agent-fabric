@@ -3,22 +3,11 @@ import { createPublicKey, verify } from 'node:crypto';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { parse } from 'yaml';
 
-export interface CommandEnvironmentPolicy {
-  /** Variable names this command may read from the relay environment, besides operating-system essentials. */
-  inherit: string[];
-}
-
 export interface CommandPolicy {
   argv: string[];
   timeoutSeconds: number;
   workingDirectory?: string;
-  environment?: CommandEnvironmentPolicy;
 }
-
-const ENVIRONMENT_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
-const MAXIMUM_INHERITED_ENVIRONMENT_NAMES = 32;
-/** The relay and task runner own every name with this prefix; a command policy cannot inherit one. */
-export const RESERVED_ENVIRONMENT_PREFIX = 'DHARMA_';
 
 export interface OrganizationPolicy {
   schema: 'dharma.organization-policy/v1' | 'dharma.organization-policy/v2';
@@ -208,25 +197,7 @@ export function resolveRegisteredCommand(
   if (command.argv.some((part) => part.includes('\0') || part.includes('\n') || part.includes('\r'))) {
     throw new Error(`Registered command contains an invalid argument: ${commandId}`);
   }
-  if (command.environment !== undefined) assertCommandEnvironmentPolicy(command.environment, commandId);
   return structuredClone(command);
-}
-
-function assertCommandEnvironmentPolicy(environment: unknown, commandId: string): void {
-  const invalid = () => new Error(`Registered command has an invalid environment policy: ${commandId}`);
-  if (!environment || typeof environment !== 'object' || Array.isArray(environment)
-    || Object.keys(environment).some((key) => key !== 'inherit')) {
-    throw invalid();
-  }
-  const inherit = (environment as { inherit?: unknown }).inherit;
-  if (!Array.isArray(inherit) || inherit.length > MAXIMUM_INHERITED_ENVIRONMENT_NAMES) throw invalid();
-  const names = new Set<string>();
-  for (const name of inherit) {
-    // Windows compares environment names case-insensitively, so names must be unique on every platform.
-    const key = typeof name === 'string' ? name.toUpperCase() : '';
-    if (!ENVIRONMENT_NAME.test(key) || key.startsWith(RESERVED_ENVIRONMENT_PREFIX) || names.has(key)) throw invalid();
-    names.add(key);
-  }
 }
 
 export function assertPathWithinWorkspace(workspace: string, candidate: string): string {
