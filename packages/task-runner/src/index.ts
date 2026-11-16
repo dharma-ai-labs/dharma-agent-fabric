@@ -27,7 +27,11 @@ import {
   type ProviderExecutionResult,
   type ProviderFailureCategory,
 } from '@dharma-ai-labs/agent-fabric-provider-adapters';
-import { acceptanceCommandEnvironment, acceptanceCommandEnvironmentPolicy } from './acceptanceEnvironment.js';
+import {
+  acceptanceCommandEnvironment,
+  acceptanceCommandEnvironmentPolicy,
+  relayGitEnvironment,
+} from './acceptanceEnvironment.js';
 
 export {
   acceptanceCommandEnvironment,
@@ -429,13 +433,24 @@ async function runProcess(command: string, argv: string[], options: {
   });
 }
 
+// Relay-internal Git runs with operating-system essentials only and with the file-system monitor
+// hook disabled, because a provider or acceptance command can change the repository configuration.
+function relayGit(repository: string, argv: string[], requireCompleteOutput?: boolean) {
+  return runProcess('git', ['-c', 'core.fsmonitor=false', ...argv], {
+    cwd: repository,
+    timeoutMs: 30_000,
+    childEnvironment: relayGitEnvironment(process.env, process.platform),
+    ...(requireCompleteOutput ? { requireCompleteOutput } : {}),
+  });
+}
+
 async function git(repository: string, argv: string[]): Promise<void> {
-  const result = await runProcess('git', argv, { cwd: repository, timeoutMs: 30_000 });
+  const result = await relayGit(repository, argv);
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
 }
 
 async function gitOutput(repository: string, argv: string[]) {
-  const result = await runProcess('git', argv, { cwd: repository, timeoutMs: 30_000, requireCompleteOutput: true });
+  const result = await relayGit(repository, argv, true);
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
   return result.stdout;
 }

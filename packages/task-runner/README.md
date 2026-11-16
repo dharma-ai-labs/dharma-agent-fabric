@@ -154,13 +154,24 @@ letter case, which covers the runner-owned names.
 
 `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` and `XDG_CONFIG_HOME` are not
 harmless. They locate per-user tool configuration and credential files, and are
-passed only because npm and Git need them. The command still runs as the relay
-user without an operating-system sandbox, so this allowlist keeps credential
-values held in environment variables away from the command. It is not a
-filesystem boundary.
+passed only because npm and Git need them.
 
-The provider launch environment is unchanged. Relay-internal Git calls still
-inherit the relay environment.
+The allowlist removes relay variables from the command's own environment, so
+they do not reach its output or the task receipt by accident. It is not an
+isolation boundary. The command still runs as the relay user without an
+operating-system sandbox, so it can read the relay user's files and can read
+the relay process environment through the operating system's process
+inspection interfaces.
+
+Relay-internal Git calls, including the write-scope checks after each command,
+run with the same operating-system essentials and with `core.fsmonitor`
+disabled. A Git configuration change made by the provider or a command
+therefore does not start a monitor hook, and helper programs that Git starts do
+not receive other relay variables.
+
+The provider launch environment is unchanged. Skill smoke checks that run a
+registered command still inherit the relay environment and do not apply
+`environment.inherit`.
 
 - [Task execution boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/06-task-execution-and-a2a.md)
 - [Bidirectional protocol](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/05-bidirectional-protocol.md)

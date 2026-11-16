@@ -50,6 +50,34 @@ export function acceptanceCommandEnvironmentPolicy(
   return { inherit: [...inherit] as string[] };
 }
 
+function sourceNameLookup(source: NodeJS.ProcessEnv, platform: NodeJS.Platform) {
+  const windows = platform === 'win32';
+  const normalize = (name: string) => windows ? name.toUpperCase() : name;
+  const sourceNames = new Map<string, string>();
+  for (const [name, value] of Object.entries(source)) {
+    if (typeof value === 'string' && !sourceNames.has(normalize(name))) sourceNames.set(normalize(name), name);
+  }
+  return (name: string) => sourceNames.get(normalize(name));
+}
+
+function operatingSystemEssentials(source: NodeJS.ProcessEnv, platform: NodeJS.Platform, extraNames: string[] = []) {
+  const lookup = sourceNameLookup(source, platform);
+  const environment: Record<string, string> = {};
+  for (const name of [...(platform === 'win32' ? WINDOWS_ESSENTIALS : POSIX_ESSENTIALS), ...extraNames]) {
+    const sourceName = lookup(name);
+    if (sourceName !== undefined) environment[sourceName] = source[sourceName]!;
+  }
+  return environment;
+}
+
+/**
+ * Builds the environment for the relay's own Git calls: operating-system essentials only.
+ * Git can start helper programs named in repository configuration, which a command may change.
+ */
+export function relayGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.Platform): Record<string, string> {
+  return operatingSystemEssentials(source, platform);
+}
+
 export interface AcceptanceCommandEnvironmentInput {
   /** The relay process environment that values are read from. */
   source: NodeJS.ProcessEnv;
@@ -70,19 +98,7 @@ export interface AcceptanceCommandEnvironmentInput {
  */
 export function acceptanceCommandEnvironment(input: AcceptanceCommandEnvironmentInput): Record<string, string> {
   const policy = acceptanceCommandEnvironmentPolicy(input.command, input.commandId ?? 'acceptance command');
-  const windows = input.platform === 'win32';
-  const normalize = (name: string) => windows ? name.toUpperCase() : name;
-  const sourceNames = new Map<string, string>();
-  for (const [name, value] of Object.entries(input.source)) {
-    if (typeof value === 'string' && !sourceNames.has(normalize(name))) sourceNames.set(normalize(name), name);
-  }
-  const environment: Record<string, string> = {};
-  const copy = (name: string) => {
-    const sourceName = sourceNames.get(normalize(name));
-    if (sourceName !== undefined) environment[sourceName] = input.source[sourceName]!;
-  };
-  for (const name of windows ? WINDOWS_ESSENTIALS : POSIX_ESSENTIALS) copy(name);
-  for (const name of policy?.inherit ?? []) copy(name);
+  const environment = operatingSystemEssentials(input.source, input.platform, policy?.inherit);
   environment.DHARMA_TASK_WORKTREE = input.cwd;
   if (input.actionDecision) {
     environment.DHARMA_EXTERNAL_IDEMPOTENCY_KEY = input.actionDecision.externalIdempotencyKey;

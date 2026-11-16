@@ -187,6 +187,13 @@ test('custom qualification reports cannot bypass receipt redaction or bind a dif
   }
 });
 
+// Relay-internal Git calls start with `-c name=value` configuration overrides.
+function gitSubcommand(argv: readonly string[]): string | undefined {
+  let index = 0;
+  while (argv[index] === '-c') index += 2;
+  return argv[index];
+}
+
 test('required artifact review v10: incomplete Git streams fail closed', async (t) => {
   for (const stream of ['tracked-overflow', 'untracked-overflow', 'unterminated'] as const) {
     await t.test(stream, async (child) => {
@@ -198,7 +205,7 @@ test('required artifact review v10: incomplete Git streams fail closed', async (
       await writeFile(outputPath, body);
       let intercepted = 0;
       const patch = child.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
-        if (command === 'git' && (stream === 'untracked-overflow' ? argv[0] === 'ls-files' : argv[0] === 'diff')) {
+        if (command === 'git' && gitSubcommand(argv) === (stream === 'untracked-overflow' ? 'ls-files' : 'diff')) {
           intercepted++;
           return originalSpawn(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]));', outputPath], options);
         }
@@ -462,7 +469,7 @@ test('task cancellation without artifacts is checked again after final Git inspe
   let inspections = 0;
   const patch = t.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
     const child = originalSpawn(command, argv, options);
-    if (command === 'git' && argv[0] === 'ls-files') {
+    if (command === 'git' && gitSubcommand(argv) === 'ls-files') {
       inspections++;
       child.once('close', () => controller.abort(new Error('private-cancellation-sentinel')));
     }
