@@ -28,6 +28,10 @@ const ESSENTIALS = new Set((process.platform === 'win32' ? [
   'PATH', 'HOME', 'TMPDIR', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES', 'LC_COLLATE',
   'LC_NUMERIC', 'LC_TIME', 'LC_MONETARY', 'TZ', 'USER', 'LOGNAME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
 ]).map(name => name.toUpperCase()));
+// On Windows, Node's process library adds these names to every child environment block.
+const WINDOWS_PROCESS_NAMES = new Set(process.platform === 'win32'
+  ? ['HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERDOMAIN', 'USERNAME', 'USERPROFILE', 'WINDIR']
+  : []);
 
 function policy() {
   return {
@@ -93,7 +97,8 @@ test('a smoke check gets operating-system essentials and its inherited names onl
   const names = (JSON.parse(result.stdout) as string[]).map(name => name.toUpperCase());
   assert.ok(names.includes('SYNTHETIC_INHERITED'));
   assert.ok(names.includes('PATH'));
-  const unexpected = names.filter(name => !ESSENTIALS.has(name) && name !== 'SYNTHETIC_INHERITED');
+  const unexpected = names.filter(name => !ESSENTIALS.has(name) && !WINDOWS_PROCESS_NAMES.has(name)
+    && name !== 'SYNTHETIC_INHERITED');
   assert.deepEqual(unexpected, []);
 });
 
@@ -105,7 +110,7 @@ test('a smoke check keeps its exit status and error output', async () => {
 });
 
 test('a smoke check that runs past its timeout is stopped', async () => {
-  const result = await launch(['--timeout-ms', '1000', '--', process.execPath, '-e',
+  const result = await launch(['--timeout-ms', '3000', '--', process.execPath, '-e',
     'process.stdout.write("started"); setTimeout(() => {}, 60000)'], process.env);
   assert.equal(result.stdout, 'started', result.stderr);
   assert.notEqual(result.code, 0);

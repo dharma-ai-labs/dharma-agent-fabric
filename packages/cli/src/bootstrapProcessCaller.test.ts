@@ -47,7 +47,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     currentBootstrapHostScope, captureBootstrapHostChild, assertBootstrapHostSource, currentNamedSessionChildOwner, currentAcceptedSetupSessionScope,
     requestBootstrapNamedSession: async (scope: typeof prepared.scope) => originalCodexSetupSessionSender(scope),
     resolve, dirname, Error, Promise, Number, String, Date, VERSION: '0.2.153',
-    process: {execPath: process.execPath, env: {}, platform: 'linux'},
+    process: {execPath: process.execPath, env: {}, platform: 'linux'}, relayChildEnvironment: () => ({}),
     setTimeout: (done: () => void) => {queueMicrotask(done);}, waitForNamedSessionStartup, observeNamedSessionStartupChild,
     fileURLToPath: () => entry, dharmaHome: () => resolve(workspace, 'synthetic-home'),
     readDeviceConfig: async () => ({organizationId: 'org_demo', deviceId: id(6)}), registry: async () => [item],

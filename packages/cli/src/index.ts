@@ -168,6 +168,8 @@ export { runOriginalSessionInboxOnce, type OriginalSessionContext, type Original
   type OriginalSessionHostInput, type OriginalSessionHostResult } from './originalSessionHost.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
+import {captureCredentialEnvironment, credentialVariable, relayChildEnvironment} from './credentialEnvironment.js';
+import {smokeCommandPolicy} from './smokeCommandEnvironment.js';
 
 const VERSION = '0.2.214';
 const USAGE = CLI_USAGE;
@@ -332,9 +334,12 @@ async function openBootstrapVault(options: {root: string; rawLocalDays?: number}
     | import('@dharma-ai-labs/agent-fabric-local-vault').ScopedLocalVault | undefined;
   try {
     await scope?.assert();
-    const {LocalVault, loadOrCreateVaultMasterKey} = scope
+    const {LocalVault, loadExplicitTestKey, loadOrCreateVaultMasterKey} = scope
       ? await scope.step(() => loadVaultModule()) : await loadVaultModule();
-    key = await loadOrCreateVaultMasterKey(undefined, scope);
+    // The explicit key pair is read from memory: start-up capture removed it from process.env.
+    key = !scope && credentialVariable('DHARMA_ALLOW_ENV_KEY') === '1'
+      ? loadExplicitTestKey({DHARMA_ALLOW_ENV_KEY: '1', DHARMA_VAULT_KEY: credentialVariable('DHARMA_VAULT_KEY')})
+      : await loadOrCreateVaultMasterKey(undefined, scope);
     await scope?.assert();
     vault = scope ? await LocalVault.open({...snapshot, masterKey: key}, scope)
       : await LocalVault.open({...snapshot, masterKey: key});
@@ -1905,7 +1910,7 @@ async function organizationApi(flags: Map<string, string | boolean>) {
   try { enrolled = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; } catch {}
   const organizationId = String(flags.get('organization-id') || enrolled?.organizationId || '').trim();
   if (!organizationId) throw new Error('Organization command requires --organization-id or an enrolled device.');
-  const token = (hostScope ? '' : String(process.env.DHARMA_ORG_API_TOKEN || '').trim())
+  const token = (hostScope ? '' : String(credentialVariable('DHARMA_ORG_API_TOKEN') || '').trim())
     || await loadOrganizationApiToken({
       hqUrl: enrolled?.hqUrl || portalUrl(flags),
       organizationId,
@@ -2421,7 +2426,7 @@ async function startRelayDaemon(policyPath: string) {
     } else {
       await step(async () => {
         const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
-          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: process.env,
+          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: relayChildEnvironment(),
         });
         if (hostScope) captureBootstrapHostChild(hostScope, child);
         else child.unref();
@@ -2534,7 +2539,7 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
       start: () => spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
         cwd: dirname(dirname(policyPath)),
         stdio: 'ignore',
-        env: process.env,
+        env: relayChildEnvironment(),
       }),
       onExit: async exit => {
         const path = relayChildFailurePath();
@@ -3758,7 +3763,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       hqUrl, organizationId, installationId: config.installationId,
       hostScope: currentBootstrapHostScope(),
     })));
-    if (!organizationApiTokenStored && (currentBootstrapHostScope() || !String(process.env.DHARMA_ORG_API_TOKEN || '').trim())) {
+    if (!organizationApiTokenStored && (currentBootstrapHostScope() || !String(credentialVariable('DHARMA_ORG_API_TOKEN') || '').trim())) {
       credentialFailure = 'organization_api_credentials_required';
     }
   } catch {
@@ -5733,7 +5738,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     await step(async () => {
       const start = () => {
         const child = spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner,
-          stdio: setupSessionScope ? ['ignore', 'ignore', 'pipe', 'ipc'] : ['ignore', 'ignore', 'pipe'], env: process.env });
+          stdio: setupSessionScope ? ['ignore', 'ignore', 'pipe', 'ipc'] : ['ignore', 'ignore', 'pipe'], env: relayChildEnvironment() });
         startupChild = observeNamedSessionStartupChild(child);
         return child;
       };
@@ -8931,6 +8936,7 @@ async function activatePreparedSkillUpdate(input: {
   const { workspace, policy, config, destination, fabric, rollout, bundle, sourceRoot, repositoryDelivery } = prepared;
   try {
     const organizationApprovalId = typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined;
+    const smokeCommandId = typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined;
     if ((bundle.riskClass === 'R3' || bundle.riskClass === 'R4') && !organizationApprovalId) {
       throw new SkillActivationError('approval_required',
         `${bundle.riskClass} skill bundles require organization approval; run dharma skills sync with --approval-id.`);
@@ -8956,14 +8962,15 @@ async function activatePreparedSkillUpdate(input: {
       bundle,
       sourceDirectory: sourceRoot,
       nativeSkillDirectory: destination,
-      policy,
+      // A smoke check runs through a launcher that gives it the explicit command environment.
+      policy: smokeCommandId ? smokeCommandPolicy(policy, smokeCommandId) : policy,
       serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }),
       devicePrivateKey: createPrivateKey({ key: identity.privateJwk, format: 'jwk' }),
       deviceId: config.deviceId,
       organizationAgentId: String(workspace.repositoryAgentId || ''),
       workspaceId,
       provider,
-      smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
+      smokeCommandId,
       organizationApprovalId,
       ...(provider === 'agy' ? {
         providerActivationCheck: () => attestAgySkillBundleActivation({
@@ -10157,6 +10164,7 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
 }
 
 if (isDirectExecution(process.argv[1], import.meta.url)) {
+  captureCredentialEnvironment();
   const argv = process.argv.slice(2);
   run(argv).then((value) => {
     print(value);

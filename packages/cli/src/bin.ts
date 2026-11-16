@@ -10,6 +10,7 @@ import {
   selectCliRuntime,
 } from './runtime-bootstrap.js';
 import { PINNED_NODE_VERSION, defaultDharmaHome, ensurePinnedNodeRuntime } from './pinnedNodeRuntime.js';
+import { captureCredentialEnvironment } from './credentialEnvironment.js';
 
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
@@ -46,6 +47,8 @@ if (args.includes('--help') || args.includes('-h')) {
     }
   }
 } else {
+  // Read credential variables once and keep them out of the environment that children inherit.
+  captureCredentialEnvironment();
   const { run, commandExitCode, formatCommandOutput } = await import('./index.js');
   run(args).then((value: unknown) => {
     process.stdout.write(formatCommandOutput(value));
