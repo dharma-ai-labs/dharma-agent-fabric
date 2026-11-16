@@ -1646,6 +1646,31 @@ test('acceptance commands run with an explicit environment instead of the relay 
   assert.equal(environmentValue(plain, 'ACCEPTANCE_PERMITTED_INPUT'), undefined);
 });
 
+test('relay Git checks after an acceptance command do not run a Git monitor hook the command configured', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const marker = resolve(fixture.root, 'monitor-hook-ran.json');
+  const hook = resolve(fixture.root, 'monitor-hook.cjs');
+  await writeFile(hook, [
+    'require("node:fs").writeFileSync(',
+    `  ${JSON.stringify(marker)},`,
+    '  JSON.stringify({ sentinel: process.env.ACCEPTANCE_PARENT_SENTINEL ?? null }));',
+    'process.exit(1);',
+  ].join('\n'));
+  const shellPath = (path: string) => `'${path.replace(/\\/g, '/')}'`;
+  fixture.policy.tasks.allowedCommands.configure = {
+    argv: ['git', 'config', 'core.fsmonitor', `${shellPath(process.execPath)} ${shellPath(hook)}`],
+    timeoutSeconds: 10,
+  };
+  fixture.unsigned.authority.commands.push({ commandId: 'configure' });
+  fixture.unsigned.acceptance.commands.push({ commandId: 'configure' });
+  const receipt = await withParentEnvironment({ ACCEPTANCE_PARENT_SENTINEL: 'synthetic-parent-sentinel' },
+    () => executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult }));
+  assert.equal(receipt.commandResults[1]?.exitCode, 0, receipt.commandResults[1]?.stderr);
+  const hookOutput = await readFile(marker, 'utf8').catch(() => undefined);
+  assert.equal(hookOutput, undefined, 'relay Git ran the monitor hook');
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+});
+
 test('acceptance command policy cannot inherit runner-owned environment names', async (t) => {
   for (const name of [...RUNNER_OWNED_NAMES, 'dharma_action_digest']) {
     await t.test(name, async (child) => {
