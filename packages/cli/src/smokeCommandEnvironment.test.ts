@@ -28,10 +28,11 @@ const ESSENTIALS = new Set((process.platform === 'win32' ? [
   'PATH', 'HOME', 'TMPDIR', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES', 'LC_COLLATE',
   'LC_NUMERIC', 'LC_TIME', 'LC_MONETARY', 'TZ', 'USER', 'LOGNAME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
 ]).map(name => name.toUpperCase()));
-// On Windows, Node's process library adds these names to every child environment block.
-const WINDOWS_PROCESS_NAMES = new Set(process.platform === 'win32'
+// Names the platform adds by itself: on Windows, Node's process library adds these to every
+// child environment block; on macOS, the system frameworks set the text encoding name at start.
+const PLATFORM_PROCESS_NAMES = new Set(process.platform === 'win32'
   ? ['HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERDOMAIN', 'USERNAME', 'USERPROFILE', 'WINDIR']
-  : []);
+  : process.platform === 'darwin' ? ['__CF_USER_TEXT_ENCODING'] : []);
 
 function policy() {
   return {
@@ -97,7 +98,7 @@ test('a smoke check gets operating-system essentials and its inherited names onl
   const names = (JSON.parse(result.stdout) as string[]).map(name => name.toUpperCase());
   assert.ok(names.includes('SYNTHETIC_INHERITED'));
   assert.ok(names.includes('PATH'));
-  const unexpected = names.filter(name => !ESSENTIALS.has(name) && !WINDOWS_PROCESS_NAMES.has(name)
+  const unexpected = names.filter(name => !ESSENTIALS.has(name) && !PLATFORM_PROCESS_NAMES.has(name)
     && name !== 'SYNTHETIC_INHERITED');
   assert.deepEqual(unexpected, []);
 });
@@ -127,7 +128,7 @@ test('the smoke launcher refuses malformed arguments without starting anything',
 });
 
 test('skills sync passes installSkillBundle the launcher-wrapped policy only for a smoke check', async () => {
-  const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const source = (await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
   const start = source.indexOf('const receipt = await installSkillBundle({');
   assert.ok(start > 0);
   const call = source.slice(start, source.indexOf('\n    });', start));
