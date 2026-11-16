@@ -27,6 +27,9 @@ import {
   type ProviderExecutionResult,
   type ProviderFailureCategory,
 } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { acceptanceCommandEnvironment } from './acceptanceEnvironment.js';
+
+export { acceptanceCommandEnvironment, type AcceptanceCommandEnvironmentInput } from './acceptanceEnvironment.js';
 
 type TaskKnowledgeToolScope = { directory: string; manifestSha256: string; catalogSha256: string };
 
@@ -363,12 +366,13 @@ async function runProcess(command: string, argv: string[], options: {
   signal?: AbortSignal;
   maximumOutputBytes?: number;
   requireCompleteOutput?: boolean;
-  environment?: Record<string, string>;
+  /** The complete child environment. When omitted, the child inherits the relay environment. */
+  childEnvironment?: Record<string, string>;
 }): Promise<Omit<CommandResult, 'commandId'>> {
   return new Promise((accept, reject) => {
     const child = spawn(command, argv, {
       cwd: options.cwd,
-      env: { ...process.env, DHARMA_TASK_WORKTREE: options.cwd, ...(options.environment || {}) },
+      env: options.childEnvironment ?? { ...process.env, DHARMA_TASK_WORKTREE: options.cwd },
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -1280,12 +1284,18 @@ export async function executeTask(input: {
           acceptanceTimeBudgetMs,
         ),
         signal: input.signal,
-        ...(decisionReceipt ? {
-          environment: {
-            DHARMA_EXTERNAL_IDEMPOTENCY_KEY: decisionReceipt.decisionId,
-            DHARMA_ACTION_DIGEST: decisionReceipt.actionDigest,
-          },
-        } : {}),
+        childEnvironment: acceptanceCommandEnvironment({
+          source: process.env,
+          platform: process.platform,
+          cwd,
+          command,
+          ...(decisionReceipt ? {
+            actionDecision: {
+              externalIdempotencyKey: decisionReceipt.decisionId,
+              actionDigest: decisionReceipt.actionDigest,
+            },
+          } : {}),
+        }),
       });
       if (remainingTaskMs() <= 0) throw new Error('Task expired during acceptance verification.');
       commandResults.push({ commandId, ...result });

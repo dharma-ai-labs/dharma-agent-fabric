@@ -151,6 +151,8 @@ commands:
 
 The provider may propose a new command, but the relay must request approval or reject it according to policy.
 
+Registered acceptance commands run with an explicit environment: operating-system essentials, the variable names their approved policy entry lists under `environment.inherit`, and the runner-owned names. They do not receive the whole relay environment. See the task runner package guide for the per-platform list and the limits on inherited names.
+
 ## Network policy
 
 Modes:
