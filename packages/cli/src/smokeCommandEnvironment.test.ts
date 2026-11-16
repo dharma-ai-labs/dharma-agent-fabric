@@ -126,12 +126,11 @@ test('a smoke check that runs past its timeout is stopped', async () => {
 test('a smoke check past its timeout is stopped before the caller stops a slow-starting launcher', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'smoke-launcher-'));
   const preload = join(directory, 'slow-start.cjs');
-  await writeFile(preload, 'const end = Date.now() + 2000; while (Date.now() < end) {}\n');
+  await writeFile(preload, 'const end = performance.now() + 2000; while (performance.now() < end) {}\n');
   const timeoutMs = 5000;
   let commandPid: number | undefined;
   try {
     const result = await new Promise<{ closedAfterMs: number; stdout: string; stderr: string }>((accept, reject) => {
-      const started = Date.now();
       const child = spawn(process.execPath, ['--require', preload, launcher, '--timeout-ms', String(timeoutMs), '--',
         process.execPath, '-e', 'process.stdout.write(String(process.pid)); setTimeout(() => {}, 20000)'],
       { env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -141,6 +140,8 @@ test('a smoke check past its timeout is stopped before the caller stops a slow-s
         if (/^[0-9]+$/.test(stdout)) commandPid = Number(stdout);
       });
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
+      // Timed on the monotonic clock from when spawn returns, as skills sync times it.
+      const started = performance.now();
       const outer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
       // Keeps a failing run short: stop the command if the pipes are still open well after the timeout.
       const watchdog = setTimeout(() => { if (commandPid) stopProcess(commandPid); }, timeoutMs + 4000);
@@ -148,7 +149,7 @@ test('a smoke check past its timeout is stopped before the caller stops a slow-s
       child.once('close', () => {
         clearTimeout(outer);
         clearTimeout(watchdog);
-        accept({ closedAfterMs: Date.now() - started, stdout, stderr });
+        accept({ closedAfterMs: Math.round(performance.now() - started), stdout, stderr });
       });
     });
     assert.ok(commandPid, `the command started: ${result.stdout} ${result.stderr}`);
