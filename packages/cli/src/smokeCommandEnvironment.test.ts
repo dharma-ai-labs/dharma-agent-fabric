@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -117,6 +119,63 @@ test('a smoke check that runs past its timeout is stopped', async () => {
   assert.notEqual(result.code, 0);
   assert.ok(result.elapsedMs < 20_000, `stopped after ${result.elapsedMs} ms`);
 });
+
+// Mirrors how skills sync runs a smoke check: piped output, a stop at exactly the policy
+// timeout, and a result only once both pipes close. The launcher starts slowly here (a
+// preload that holds the CPU), so its own stop has to count from process start.
+test('a smoke check past its timeout is stopped before the caller stops a slow-starting launcher', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'smoke-launcher-'));
+  const preload = join(directory, 'slow-start.cjs');
+  await writeFile(preload, 'const end = Date.now() + 2000; while (Date.now() < end) {}\n');
+  const timeoutMs = 5000;
+  let commandPid: number | undefined;
+  try {
+    const result = await new Promise<{ closedAfterMs: number; stdout: string; stderr: string }>((accept, reject) => {
+      const started = Date.now();
+      const child = spawn(process.execPath, ['--require', preload, launcher, '--timeout-ms', String(timeoutMs), '--',
+        process.execPath, '-e', 'process.stdout.write(String(process.pid)); setTimeout(() => {}, 20000)'],
+      { env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      let stdout = '', stderr = '';
+      child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+        stdout += chunk;
+        if (/^[0-9]+$/.test(stdout)) commandPid = Number(stdout);
+      });
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
+      const outer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+      // Keeps a failing run short: stop the command if the pipes are still open well after the timeout.
+      const watchdog = setTimeout(() => { if (commandPid) stopProcess(commandPid); }, timeoutMs + 4000);
+      child.once('error', reject);
+      child.once('close', () => {
+        clearTimeout(outer);
+        clearTimeout(watchdog);
+        accept({ closedAfterMs: Date.now() - started, stdout, stderr });
+      });
+    });
+    assert.ok(commandPid, `the command started: ${result.stdout} ${result.stderr}`);
+    assert.ok(result.closedAfterMs < timeoutMs + 2000, `output closed after ${result.closedAfterMs} ms`);
+    assert.equal(processRunning(commandPid!), false, 'the smoke command is not left running');
+  } finally {
+    if (commandPid && processRunning(commandPid)) stopProcess(commandPid);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+function processRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stopProcess(pid: number): void {
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // already stopped
+  }
+}
 
 test('the smoke launcher refuses malformed arguments without starting anything', async () => {
   for (const args of [[], ['--', process.execPath], ['--timeout-ms', '0', '--', process.execPath],
