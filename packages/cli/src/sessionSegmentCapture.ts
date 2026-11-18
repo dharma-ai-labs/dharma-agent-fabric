@@ -1,3 +1,4 @@
+import type { Stats } from 'node:fs';
 import { mkdir, open, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -108,6 +109,7 @@ async function readLedger(path: string, expected: Pick<SegmentLedger, 'workspace
   try {
     value = JSON.parse(await readFile(path, 'utf8')) as SegmentLedger;
   } catch (error) {
+    if (error instanceof SyntaxError) throw new Error('session_segment_ledger_invalid');
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     return { schema: 'dharma.session-segment-ledger/v1', ...expected, nextIndex: 0, nextOffset: 0, insideTurn: false,
       previousEnd: null, anchor: null, segments: [] };
@@ -218,13 +220,26 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
     if (report.stoppedReason) break;
     const localSessionId = providerSessionId(input.provider, sourcePath);
     const path = ledgerPath(input.ledgerRoot, input.workspaceId, input.provider, localSessionId);
-    const ledger = await readLedger(path, { workspaceId: input.workspaceId, provider: input.provider, sessionId: localSessionId });
-    const summary = { sessionId: localSessionId, segmentsCommitted: 0, segmentsSkipped: ledger.segments.length,
+    const summary = { sessionId: localSessionId, segmentsCommitted: 0, segmentsSkipped: 0,
       segmentsPlanned: 0, held: false, stoppedReason: null as string | null, failure: null as string | null };
     report.sessions.push(summary);
-    const source = await stat(sourcePath);
-    if (source.size < ledger.nextOffset || await anchorAt(sourcePath, ledger.nextOffset) !== ledger.anchor) {
-      summary.stoppedReason = 'session_source_changed';
+    // A failure stops this session only; later sessions are still captured.
+    const fail = (error: unknown) => {
+      summary.stoppedReason = 'session_capture_failed';
+      summary.failure = sessionFailureCode(error);
+    };
+    let ledger: SegmentLedger;
+    let source: Stats;
+    try {
+      ledger = await readLedger(path, { workspaceId: input.workspaceId, provider: input.provider, sessionId: localSessionId });
+      summary.segmentsSkipped = ledger.segments.length;
+      source = await stat(sourcePath);
+      if (source.size < ledger.nextOffset || await anchorAt(sourcePath, ledger.nextOffset) !== ledger.anchor) {
+        summary.stoppedReason = 'session_source_changed';
+        continue;
+      }
+    } catch (error) {
+      fail(error);
       continue;
     }
     const idle = now().getTime() - source.mtimeMs >= idleMs;
@@ -389,12 +404,25 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
         } else await emit(current, false);
       }
     } catch (error) {
-      if (!(error instanceof StopSession)) throw error;
+      if (!(error instanceof StopSession)) {
+        fail(error);
+        continue;
+      }
       summary.stoppedReason = error.reason;
       if (error.run) report.stoppedReason = error.reason;
     }
   }
   return report;
+}
+
+/** A stable code for a session failure. Messages are not reported: they can carry paths or content. */
+export function sessionFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  if (message === 'session_segment_ledger_invalid' || message.startsWith('session_capture_requires_')) return message;
+  if (message.includes('revision hash conflict')) return 'vault_revision_conflict';
+  if (message.startsWith('Trajectory capsule failed schema validation')) return 'capsule_schema_invalid';
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/.test(code) ? code : 'unexpected';
 }
 
 /**

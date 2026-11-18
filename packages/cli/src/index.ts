@@ -16,7 +16,7 @@ import {
 import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, listProviderSessionFiles, providerAdapters, providerExecutionRecords, providerLaunch, providerProcessEnvironment, providerSessionId, sessionWorkspaceQualified, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
-import { RELAY_SESSION_CAPTURE_TICK_MS, assertSessionSegmentUploadAvailable, captureSessionSegments, relaySessionCaptureBlocked, relaySessionCaptureSettings, type SessionSegmentCaptureReport } from './sessionSegmentCapture.js';
+import { RELAY_SESSION_CAPTURE_TICK_MS, assertSessionSegmentUploadAvailable, captureSessionSegments, relaySessionCaptureBlocked, relaySessionCaptureSettings, sessionFailureCode, type SessionSegmentCaptureReport } from './sessionSegmentCapture.js';
 import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -9739,11 +9739,22 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                 deadline, vault, fabric: fabric as SegmentCaptureFabric,
               });
               sessionSegmentsSynced += report.segments.filter((segment) => segment.outcome === 'synced').length;
+              const failed = report.sessions.filter((session) => session.failure)
+                .map(({ sessionId, failure }) => ({ sessionId, failure }));
+              sessionCaptureFailures += failed.length;
+              if (failed.length || (report.stoppedReason && report.stoppedReason !== 'time_budget_exhausted')) {
+                process.stderr.write(`${JSON.stringify({ event: 'relay_session_capture', workspaceId: canonicalWorkspace.workspaceId,
+                  provider, stoppedReason: report.stoppedReason, failed })}\n`);
+              }
               if (report.stoppedReason === 'time_budget_exhausted') nextSessionCaptureAt = 0;
               if (report.stoppedReason) return;
             }
           });
-        } catch { sessionCaptureFailures += 1; }
+        } catch (error) {
+          sessionCaptureFailures += 1;
+          process.stderr.write(`${JSON.stringify({ event: 'relay_session_capture_failed', workspaceId: canonicalWorkspace.workspaceId,
+            failure: sessionFailureCode(error) })}\n`);
+        }
       }
       const result = await withRepositoryRelayStage('task_poll', () => serialized(async () => {
         if (stopping) return { taskId: null };
