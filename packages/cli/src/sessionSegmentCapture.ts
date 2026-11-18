@@ -39,6 +39,7 @@ export interface SessionSegmentCaptureInput {
   idleMinutes?: number;
   maximumUploadBytes?: number;
   maximumRecordBytes?: number;
+  /** Epoch ms. The run stops after the first whole segment finished at or after it; the next run continues. */
   deadline?: number;
   now?: () => Date;
   /** Absent: plan only. Nothing is written, uploaded or recorded in the ledger. */
@@ -301,21 +302,22 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
       ledger.previousEnd = capsule.timeRange.end;
       report.segments.push(segment);
       summary.segmentsPlanned += 1;
-      if (!input.store) return;
-      ledger.anchor = await anchorAt(sourcePath, endOffset);
-      await writeLedger(path, ledger);
-      summary.segmentsCommitted += 1;
-      if (head) {
-        segment.outcome = 'already_on_server';
-        return;
+      if (input.store) {
+        ledger.anchor = await anchorAt(sourcePath, endOffset);
+        await writeLedger(path, ledger);
+        summary.segmentsCommitted += 1;
+        if (head) segment.outcome = 'already_on_server';
+        else {
+          segment.outcome = 'queued';
+          try {
+            await input.store.sync(capsule);
+          } catch (error) {
+            throw new StopSession((error as Error).message === DAILY_LIMIT_MESSAGE ? 'daily_upload_limit' : 'sync_failed', true);
+          }
+          segment.outcome = 'synced';
+        }
       }
-      segment.outcome = 'queued';
-      try {
-        await input.store.sync(capsule);
-      } catch (error) {
-        throw new StopSession((error as Error).message === DAILY_LIMIT_MESSAGE ? 'daily_upload_limit' : 'sync_failed', true);
-      }
-      segment.outcome = 'synced';
+      if (input.deadline !== undefined && now().getTime() >= input.deadline) throw new StopSession('time_budget_exhausted', true);
     };
 
     // Splits one turn that cannot fit a capsule. Every piece is closed; the
@@ -403,6 +405,9 @@ export function assertSessionSegmentUploadAvailable(available = SESSION_SEGMENT_
       + 'analysis window. Run capture-segments without --sync to plan segments locally.');
   }
 }
+
+/** One relay capture tick holds the task lock for at most about this long. */
+export const RELAY_SESSION_CAPTURE_TICK_MS = 30_000;
 
 export type RelaySessionCaptureSettings = { enabled: false } | {
   enabled: true; intervalMs: number; lookbackHours: number; idleMinutes: number; providers: Array<'claude' | 'codex'>;

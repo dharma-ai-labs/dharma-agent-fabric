@@ -16,7 +16,7 @@ import {
 import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, listProviderSessionFiles, providerAdapters, providerExecutionRecords, providerLaunch, providerProcessEnvironment, providerSessionId, sessionWorkspaceQualified, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
-import { assertSessionSegmentUploadAvailable, captureSessionSegments, relaySessionCaptureBlocked, relaySessionCaptureSettings, type SessionSegmentCaptureReport } from './sessionSegmentCapture.js';
+import { RELAY_SESSION_CAPTURE_TICK_MS, assertSessionSegmentUploadAvailable, captureSessionSegments, relaySessionCaptureBlocked, relaySessionCaptureSettings, type SessionSegmentCaptureReport } from './sessionSegmentCapture.js';
 import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -4802,7 +4802,7 @@ async function captureWorkspaceSessionSegments(input: {
   workspace: WorkspaceRecord; organizationId: string; deviceId: string; policy: OrganizationPolicy;
   provider: 'claude' | 'codex'; roots?: string[]; sessionIds?: string[] | null; since?: Date | null;
   maximumSessions: number; idleMinutes: number; maximumUploadBytes?: number; maximumRecordBytes?: number;
-  sourceClass: 'provider_discovery' | 'explicit_import';
+  deadline?: number; sourceClass: 'provider_discovery' | 'explicit_import';
   vault: Awaited<ReturnType<typeof openBootstrapVault>> | null; fabric: SegmentCaptureFabric | null;
 }): Promise<SessionSegmentCaptureReport> {
   const allowed = input.sessionIds ? new Set(input.sessionIds) : null;
@@ -4822,6 +4822,7 @@ async function captureWorkspaceSessionSegments(input: {
     provider: input.provider, sources: sources.map((source) => source.path), policy,
     ledgerRoot: resolve(dharmaHome(), 'evidence', 'session-segments'), sourceClass: input.sourceClass,
     idleMinutes: input.idleMinutes, maximumUploadBytes: input.maximumUploadBytes, maximumRecordBytes: input.maximumRecordBytes,
+    deadline: input.deadline,
     validate: async (capsule) => {
       const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), trajectoryCapsuleSchemaId(capsule), capsule);
       if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
@@ -9725,6 +9726,9 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
           // Re-read on every tick, so sessions listed after a preview are picked up.
           const sessionIds = sessionCapture.sessionIdsFile
             ? await readSessionAllowlist(new Map([['session-ids-file', sessionCapture.sessionIdsFile]])) : null;
+          // Capture holds the task lock, so one tick is bounded in time. A tick that
+          // runs out continues on the next loop pass, after a task poll.
+          const deadline = Date.now() + RELAY_SESSION_CAPTURE_TICK_MS;
           await serialized(async () => {
             for (const provider of sessionCapture.providers) {
               if (stopping) return;
@@ -9732,9 +9736,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
                 workspace: canonicalWorkspace, organizationId: fabric.config.organizationId, deviceId: fabric.config.deviceId,
                 policy, provider, sessionIds, since: new Date(Date.now() - sessionCapture.lookbackHours * 3_600_000),
                 maximumSessions: 50, idleMinutes: sessionCapture.idleMinutes, sourceClass: 'provider_discovery',
-                vault, fabric: fabric as SegmentCaptureFabric,
+                deadline, vault, fabric: fabric as SegmentCaptureFabric,
               });
               sessionSegmentsSynced += report.segments.filter((segment) => segment.outcome === 'synced').length;
+              if (report.stoppedReason === 'time_budget_exhausted') nextSessionCaptureAt = 0;
               if (report.stoppedReason) return;
             }
           });
