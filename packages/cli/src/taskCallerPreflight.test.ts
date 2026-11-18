@@ -246,6 +246,61 @@ test('an isolated VM Error realm is detected by the timeout-event assertion, not
   assert.deepEqual(f.events, []);
 });
 
+// The task runner refuses tasks that name registered commands, but the relay used to start the
+// task first: it synced policy, took the activation lock, posted `started` and hashed skill files,
+// and then the runner's refusal escaped without a terminal event and ended the relay loop.
+// The relay must refuse such a task right after the poll, with one terminal `failed` event.
+async function registeredCommandPorts(f: ReturnType<typeof fixture>) {
+  const taskRunner = await import('@dharma-ai-labs/agent-fabric-task-runner');
+  const RefusedError = taskRunner.RegisteredCommandsRefusedError;
+  f.dependencies.REGISTERED_COMMANDS_REFUSED = taskRunner.REGISTERED_COMMANDS_REFUSED;
+  f.dependencies.taskNamesRegisteredCommands = Reflect.get(taskRunner, 'taskNamesRegisteredCommands');
+  f.dependencies.requiredSkillFilesForTask = async () => { f.calls.push('skill-hash'); return []; };
+  // The runner's own refusal stays as the backstop behind the relay check.
+  f.dependencies.executeTask = async (input: { task: typeof f.task }) => {
+    f.calls.push('execute-task');
+    if (input.task.authority.commands.length > 0 || input.task.acceptance.commands.length > 0) throw new RefusedError();
+    f.calls.push('child-process');
+    return { status: 'completed', branch: null, commandResults: [],
+      startedAt: '2026-10-21T00:00:00.000Z', completedAt: '2026-10-21T00:00:01.000Z' };
+  };
+  return taskRunner.REGISTERED_COMMANDS_REFUSED;
+}
+
+for (const [name, names] of [
+  ['acceptance commands', (task: ReturnType<typeof fixture>['task']) => {
+    (task.acceptance.commands as string[]).push('npm.test');
+  }],
+  ['command ids only', (task: ReturnType<typeof fixture>['task']) => {
+    (task.authority.commands as string[]).push('npm.test');
+  }],
+] as const) {
+  test(`a polled task with ${name} gets one terminal failed preflight event and nothing else runs`, async () => {
+    const f = fixture(); names(f.task);
+    const code = await registeredCommandPorts(f);
+    assert.equal(code, 'registered_commands_refused');
+    const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
+    assert.deepEqual({ ...result }, { ok: false, taskId: f.task.taskId, code });
+    assert.deepEqual(JSON.parse(JSON.stringify(f.events)), [{ taskId: f.task.taskId, event: 'failed',
+      payload: { phase: 'preflight', code } }]);
+    assert.deepEqual(f.calls, ['poll', 'registry', 'event:failed'],
+      'no policy sync, config read, timer, activation lock, started event, skill hashing or execution');
+    assert.equal(f.intervalIds.size, 0);
+  });
+}
+
+test('a task without registered commands still gets started and runs as before', async () => {
+  const f = fixture();
+  await registeredCommandPorts(f);
+  const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
+  assert.equal(result.ok, true); assert.equal(result.taskId, f.task.taskId);
+  assert.deepEqual(f.calls, [...beforeDeviceRejection, 'public-key', 'active-skill', 'event:started',
+    'interval-create:2', 'skill-hash', 'receipt-store', 'execute-task', 'child-process', 'interval-clear:2',
+    'outcome', 'activation-lock-release', 'interval-clear:1']);
+  assert.deepEqual(f.events.map(event => event.event), ['started']);
+  assert.equal(f.intervalIds.size, 0);
+});
+
 test('in-memory removal of the device guard is detected by the rejection assertion', async () => {
   const f = fixture();
   await assert.rejects(() => assertForeignDeviceRejected(f, true), {
