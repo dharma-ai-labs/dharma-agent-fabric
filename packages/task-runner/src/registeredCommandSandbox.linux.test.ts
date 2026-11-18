@@ -25,6 +25,8 @@ import {
 // Every canary is synthetic. Nothing real is read or listed.
 
 const expectation = process.env.DHARMA_SANDBOX_EXPECT ?? '';
+// Registered command arguments cannot contain line breaks, so multi-line scripts are joined.
+const oneLine = (script: string) => script.replace(/\s*\n\s*/g, ' ').trim();
 
 async function exists(path: string) {
   return access(path).then(() => true, () => false);
@@ -160,7 +162,7 @@ if (!expectation) {
     const worktree = resolve(fixture.relayStateDirectory, 'worktrees', task.taskId);
     const args = { homeCanary, dharmaCanary, sentinel, testPid: process.pid, nonce, workspace: fixture.workspace, worktree,
       port: (server.address() as AddressInfo).port, disableUserns: sandbox.disableUserns };
-    const policy = policyWith({ canary: { argv: [process.execPath, '-e', CANARY_SCRIPT, JSON.stringify(args)], timeoutSeconds: 30 } });
+    const policy = policyWith({ canary: { argv: [process.execPath, '-e', oneLine(CANARY_SCRIPT), JSON.stringify(args)], timeoutSeconds: 30 } });
     const receipt = await executeTask({ task, policy, workspace: fixture.workspace, relayStateDirectory: fixture.relayStateDirectory,
       serverPublicKey: publicKey, receiptStore: new FileTaskReceiptStore(resolve(fixture.root, 'receipts')),
       registeredCommandSandbox: sandbox, providerExecutor: async () => providerResult });
@@ -198,7 +200,7 @@ if (!expectation) {
       spawn(process.execPath, ['-e', "setInterval(() => require('node:fs').appendFileSync('reports/tick.txt', 'x'), 100)"],
         { detached: true, stdio: 'ignore' }).unref();
       setInterval(() => {}, 1000);`;
-    const policy = policyWith({ spin: { argv: [process.execPath, '-e', script], timeoutSeconds: 2 } });
+    const policy = policyWith({ spin: { argv: [process.execPath, '-e', oneLine(script)], timeoutSeconds: 2 } });
     const receipt = await executeTask({ task, policy, workspace: fixture.workspace, relayStateDirectory: fixture.relayStateDirectory,
       serverPublicKey: publicKey, receiptStore: new FileTaskReceiptStore(resolve(fixture.root, 'receipts')),
       registeredCommandSandbox: sandbox, providerExecutor: async () => providerResult });
