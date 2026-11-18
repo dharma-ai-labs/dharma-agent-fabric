@@ -130,6 +130,7 @@ import { readNamedSessionPackageContent, readNamedSessionRepositoryContext, veri
 import { sessionNamesCommand, type SessionMessagingHost } from './sessionNames.js';
 import { readSessionMessageStdin, sessionMessageCommand } from './sessionMessageCommands.js';
 import { sessionWatchCommand } from './sessionWatch.js';
+import { claudeHookCommand, readHookStdin } from './claudeSessionHook.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
@@ -267,6 +268,7 @@ function print(value: Output): void {
 }
 
 export function formatCommandOutput(value:unknown):string{
+  if(value==='')return '';
   if(typeof value==='string')return value+'\n';
   const streaming=value&&typeof value==='object'&&!Array.isArray(value)
     &&(value as Record<string,unknown>).schema==='dharma.device-signing-maintenance-controller-progress/v1';
@@ -9881,6 +9883,13 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'bootstrap') return bootstrap(flags);
   if (command === 'sessions') return namedSessionCommand(String(subcommand), flags);
   if (command === 'msg') return sessionMessageCommand(String(subcommand), flags, sessionMessagingHost());
+  if (command === 'hook') {
+    // Run by the Claude plugin 1.0.7-preview hooks; an empty result prints nothing.
+    if (subcommand !== 'claude' || !['session-start', 'inbox'].includes(String(positional[2])) || positional.length !== 3
+      || [...flags].some(([key, value]) => key !== 'dry-run' || value !== true)) throw new Error('claude_hook_command_invalid');
+    return claudeHookCommand(String(positional[2]), { host: sessionMessagingHost(), stdin: () => readHookStdin(process.stdin),
+      dryRun: flags.get('dry-run') === true });
+  }
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
   if (command === 'providers' && subcommand === 'list') return {
@@ -10103,6 +10112,8 @@ if (isDirectExecution(process.argv[1], import.meta.url)) {
   run(argv).then((value) => {
     print(value);
     process.exitCode = commandExitCode(argv, value);
+    // A hook ends once its output is written: a pending relay socket (up to 90 s) must not keep it alive.
+    if (argv[0] === 'hook') process.stdout.write('', () => process.exit());
   }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${message}\n`);
