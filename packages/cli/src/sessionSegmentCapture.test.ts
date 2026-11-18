@@ -265,6 +265,23 @@ test('an idle tail whose last tool call has no result yet is held instead of spl
   assert.equal(split.committed.reduce((total, capsule) => total + capsule.localAnalysis!.recordCount, 0), records.length);
 });
 
+test('a turn whose records were all left out marks the segment around it partial', async () => {
+  const base = await fixture('dharma-segments-excluded-turn-', 0);
+  const elsewhere = join(base.root, 'elsewhere');
+  // A left-out turn in the middle joins the next turn; the last one of an idle file stands alone.
+  const left = [20, 39];
+  const turns = Array.from({ length: 40 }, (_, turn) => claudeTurn(left.includes(turn) ? elsewhere : base.workspace, turn, { outputBytes: 2_000 + turn }));
+  await writeFile(base.source, jsonl(turns.flat()));
+  const { store, committed } = fakeStore();
+  await captureSessionSegments(input(base, { store, now: () => new Date(Date.now() + 3_600_000), policy: policy(25_000) }));
+  assert.ok(committed.length >= 3);
+  const partial = committed.map((capsule, index) => capsule.coverage.state === 'partial' ? index : -1).filter((index) => index >= 0);
+  assert.equal(partial.length, 2, 'the segments that cover a left-out turn are partial');
+  assert.equal(partial.at(-1), committed.length - 1);
+  assert.equal(committed.reduce((total, capsule) => total + capsule.localAnalysis!.recordCount, 0),
+    turns.flat().length - turns[20]!.length - turns[39]!.length);
+});
+
 test('plan mode writes nothing and reports the same segments a sync run commits', async () => {
   const base = await fixture('dharma-segments-plan-', 30, { outputBytes: 2_000 });
   const later = () => new Date(Date.now() + 3_600_000);
