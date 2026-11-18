@@ -20,7 +20,7 @@ import {
   type UsableSandbox,
 } from './index.js';
 
-// Tests for running registered commands inside an operating-system sandbox (DIA-1560).
+// Tests for running registered commands inside an operating-system sandbox.
 // Everything here is pure or uses injected dependencies, so it runs on every operating system.
 // registeredCommandSandbox.linux.test.ts runs the real bubblewrap on Linux.
 

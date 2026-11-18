@@ -258,7 +258,7 @@ test('an isolated VM Error realm is detected by the timeout-event assertion, not
   assert.deepEqual(f.events, []);
 });
 
-// Tasks that name registered commands run only inside an operating-system sandbox (DIA-1560).
+// Tasks that name registered commands run only inside an operating-system sandbox.
 // The relay refuses such a task right after the poll, before policy sync, locks, `started` or
 // skill hashing, unless the task's network is `deny` and the live sandbox probe is usable. The
 // refusal is one terminal `failed` event that carries the reason.

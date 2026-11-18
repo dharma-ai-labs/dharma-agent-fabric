@@ -17,7 +17,7 @@ import {
   type TaskEnvelope,
 } from './index.js';
 
-// Real-sandbox tests (DIA-1560). They run only when DHARMA_SANDBOX_EXPECT is set:
+// Real-sandbox tests. They run only when DHARMA_SANDBOX_EXPECT is set:
 //   usable  - this Linux host must give a usable sandbox, and every case below must hold;
 //   refused - this host must refuse (CI turns the user-namespace restriction on for this run).
 // Unset, the file skips: that happens on Windows, macOS and local runs. Set on a host that is

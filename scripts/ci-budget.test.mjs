@@ -45,7 +45,7 @@ test('runtime, dependency identity, event policy and concurrency are unchanged',
   assert.equal(workflow.concurrency['cancel-in-progress'], true);
 });
 
-// Registered commands run inside an operating-system sandbox (DIA-1560). The Linux leg must prove
+// Registered commands run inside an operating-system sandbox. The Linux leg must prove
 // it with the real bubblewrap, and must also prove the refusal on a restricted host. Removing or
 // weakening either proof turns this test red.
 test('the Linux leg prepares the command sandbox, requires it to be usable and proves the refusal', () => {

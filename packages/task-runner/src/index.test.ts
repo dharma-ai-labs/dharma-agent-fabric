@@ -31,7 +31,7 @@ import {
 import * as taskRunner from './index.js';
 import { SANDBOX_HOME, SANDBOX_POLICY_VERSION, sandboxCommandLine, type UsableSandbox } from './index.js';
 
-// Registered commands run only inside an operating-system sandbox (DIA-1560). On every
+// Registered commands run only inside an operating-system sandbox. On every
 // operating system these unit tests replace bubblewrap with a stand-in: a Node wrapper that
 // reports its child on descriptor 3, as bubblewrap's --json-status-fd does, and then runs the
 // command on the host. That keeps the acceptance-loop checks (write scope, artifacts,
@@ -1928,7 +1928,7 @@ test('acceptance environment builder handles Windows essentials and case-insensi
   }
 });
 
-// DIA-1560: acceptance commands start only through the sandbox, and the relay Git checks that
+// Acceptance commands start only through the sandbox, and the relay Git checks that
 // follow a sandboxed command use pinned repository paths.
 type SpawnRecord = { command: string; argv: string[]; options: { cwd?: string; env?: Record<string, string>; stdio?: unknown; shell?: boolean; detached?: boolean }; pid?: number };
 function recordSpawns(t: TestContext, replace?: (record: SpawnRecord) => ReturnType<typeof childProcess.spawn> | undefined) {
