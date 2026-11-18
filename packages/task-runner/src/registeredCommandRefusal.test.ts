@@ -81,9 +81,9 @@ async function exists(path: string) {
 
 const USABLE_SANDBOX = {
   usable: true as const, host: 'linux' as const, bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0',
-  bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: 'bwrap-policy/1',
+  bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: 'bwrap-policy/2',
   layout: { bin: 'symlink', sbin: 'symlink', lib: 'symlink', lib32: 'absent', lib64: 'symlink', libx32: 'absent' } as const,
-  nodePrefix: '/usr', bindNodePrefix: false, maskNodeEtc: false, disableUserns: true,
+  nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [], disableUserns: true,
 };
 
 const assertRefusal = (reason?: string) => (error: unknown) => {

@@ -41,7 +41,7 @@ const STAND_IN_SANDBOX: UsableSandbox = {
   usable: true, host: 'linux', bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0',
   bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: SANDBOX_POLICY_VERSION,
   layout: { bin: 'symlink', sbin: 'symlink', lib: 'symlink', lib32: 'absent', lib64: 'symlink', libx32: 'absent' },
-  nodePrefix: '/usr', bindNodePrefix: false, maskNodeEtc: false, disableUserns: true,
+  nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [], disableUserns: true,
 };
 const STAND_IN_SCRIPT = [
   'const fs = require("node:fs"); const { spawn } = require("node:child_process");',

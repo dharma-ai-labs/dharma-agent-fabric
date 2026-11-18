@@ -31,7 +31,7 @@ function usable(overrides: Partial<UsableSandbox> = {}): UsableSandbox {
   return {
     usable: true, host: 'linux', bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0',
     bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: SANDBOX_POLICY_VERSION, layout: MERGED_USR,
-    nodePrefix: '/usr', bindNodePrefix: false, maskNodeEtc: false, disableUserns: true, ...overrides,
+    nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [], disableUserns: true, ...overrides,
   };
 }
 
@@ -76,29 +76,35 @@ test('argument list for merged /usr, Node under /usr, bubblewrap 0.9.0', () => {
   ]);
 });
 
-test('argument list for split /usr, Node under /opt with and without an etc folder, bubblewrap 0.6.1', () => {
-  for (const maskNodeEtc of [false, true]) {
-    const sandbox = usable({ layout: SPLIT_USR, bwrapVersion: '0.6.1', disableUserns: false,
-      nodePrefix: '/opt/hostedtoolcache/node/22.22.0/x64', bindNodePrefix: true, maskNodeEtc });
-    const args = sandboxCommandLine(sandbox, { worktree: W, cwd: `${W}/packages/a`, argv: ['node', '--test'] });
-    assert.equal(args.includes('--disable-userns'), false, 'bubblewrap below 0.8.0 has no --disable-userns');
-    for (const name of ['bin', 'sbin', 'lib', 'lib64']) {
-      const index = args.findIndex((value, i) => value === '--ro-bind' && args[i + 1] === `/${name}`);
-      assert.ok(index > 0, `/${name} is bound read-only on split /usr`);
-      assert.equal(args[index + 2], `/${name}`);
-    }
-    assert.equal(args.includes('--symlink'), false);
-    const prefix = args.findIndex((value, i) => value === '--ro-bind' && args[i + 1] === sandbox.nodePrefix);
-    assert.ok(prefix > 0, 'the relay Node prefix is bound read-only');
-    const etcMask = args.findIndex((value, i) => value === '--tmpfs' && args[i + 1] === `${sandbox.nodePrefix}/etc`);
-    assert.equal(etcMask > prefix, maskNodeEtc, 'the Node prefix etc folder is hidden only when it exists');
-    assert.equal(args[args.indexOf('--chdir') + 1], `${W}/packages/a`);
+const OPT_NODE = '/opt/hostedtoolcache/node/22.22.0/x64';
+const OPT_NODE_MOUNTS = [
+  { kind: 'bind', path: `${OPT_NODE}/bin/node` },
+  { kind: 'bind', path: `${OPT_NODE}/lib/node_modules/npm` },
+  { kind: 'symlink', target: '../lib/node_modules/npm/bin/npm-cli.js', path: `${OPT_NODE}/bin/npm` },
+] as const;
+
+test('argument list for split /usr, Node under /opt, bubblewrap 0.6.1', () => {
+  const sandbox = usable({ layout: SPLIT_USR, bwrapVersion: '0.6.1', disableUserns: false,
+    nodePrefix: OPT_NODE, bindNodePrefix: true, nodeMounts: OPT_NODE_MOUNTS });
+  const args = sandboxCommandLine(sandbox, { worktree: W, cwd: `${W}/packages/a`, argv: ['node', '--test'] });
+  assert.equal(args.includes('--disable-userns'), false, 'bubblewrap below 0.8.0 has no --disable-userns');
+  for (const name of ['bin', 'sbin', 'lib', 'lib64']) {
+    const index = args.findIndex((value, i) => value === '--ro-bind' && args[i + 1] === `/${name}`);
+    assert.ok(index > 0, `/${name} is bound read-only on split /usr`);
+    assert.equal(args[index + 2], `/${name}`);
   }
+  assert.deepEqual(mounts(args).filter(({ destination }) => destination.startsWith(OPT_NODE))
+    .map(({ flag, source, destination }) => [flag, source, destination]), [
+    ['--ro-bind', `${OPT_NODE}/bin/node`, `${OPT_NODE}/bin/node`],
+    ['--ro-bind', `${OPT_NODE}/lib/node_modules/npm`, `${OPT_NODE}/lib/node_modules/npm`],
+    ['--symlink', '../lib/node_modules/npm/bin/npm-cli.js', `${OPT_NODE}/bin/npm`],
+  ], 'only the Node binary, the npm package and its link are visible; the prefix itself and its etc folder are not');
+  assert.equal(args[args.indexOf('--chdir') + 1], `${W}/packages/a`);
 });
 
 test('argument list keeps every hard rule', () => {
   const variants = [usable(), usable({ layout: SPLIT_USR, disableUserns: false, bwrapVersion: '0.6.1' }),
-    usable({ nodePrefix: '/opt/node', bindNodePrefix: true, maskNodeEtc: true })];
+    usable({ nodePrefix: OPT_NODE, bindNodePrefix: true, nodeMounts: OPT_NODE_MOUNTS })];
   for (const sandbox of variants) {
     const argv = ['npm', 'run', '--', '--sandbox=off', '--bind', '/', '/'];
     const args = sandboxCommandLine(sandbox, { worktree: W, cwd: W, argv });
@@ -112,7 +118,7 @@ test('argument list keeps every hard rule', () => {
       || value === '--clearenv' || value === '--unsetenv'), false);
     const list = mounts(args);
     const allowedSources = new Set(['/usr', '/bin', '/sbin', '/lib', '/lib32', '/lib64', '/libx32', W, `${W}/.git`,
-      ...(sandbox.bindNodePrefix ? [sandbox.nodePrefix] : [])]);
+      ...sandbox.nodeMounts.filter(({ kind }) => kind === 'bind').map(({ path }) => path)]);
     for (const { flag, source } of list) {
       if (flag === '--symlink' || source === '') continue;
       if (source.startsWith('/etc/')) { assert.equal(flag, '--ro-bind-try'); continue; }
@@ -322,7 +328,7 @@ test('a passing probe returns a usable sandbox bound to the probed bubblewrap', 
   if (!result.usable) return;
   assert.deepEqual({ ...result, bwrapSha256: result.bwrapSha256.slice(0, 7) }, {
     usable: true, host: 'linux', bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0', bwrapSha256: 'sha256:',
-    policy: SANDBOX_POLICY_VERSION, layout: MERGED_USR, nodePrefix: '/usr', bindNodePrefix: false, maskNodeEtc: false,
+    policy: SANDBOX_POLICY_VERSION, layout: MERGED_USR, nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [],
     disableUserns: true,
   });
   assert.match(result.bwrapSha256, /^sha256:[0-9a-f]{64}$/);

@@ -137,7 +137,7 @@ if (!expectation) {
 
   test('the live probe is usable on this host and passed every policy check', async (t) => {
     const sandbox = await probe(t);
-    assert.equal(sandbox.policy, 'bwrap-policy/1');
+    assert.equal(sandbox.policy, 'bwrap-policy/2');
     assert.match(sandbox.bwrapPath, /^\/(usr\/)?bin\/bwrap$/);
     assert.match(sandbox.bwrapSha256, /^sha256:[0-9a-f]{64}$/);
     process.stdout.write(`# sandbox ${JSON.stringify({ ...sandbox, layout: undefined })}\n`);

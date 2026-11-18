@@ -91,7 +91,8 @@ files, the Dharma home, other processes and the network.
 **Boundary:** registered commands run only inside a bubblewrap sandbox on Linux
 and WSL2. Each command gets new user, process, IPC, host-name, cgroup and
 network namespaces; no capabilities; an empty read-only root with system
-folders and the relay's Node installation; private `/proc`, `/dev`, `/tmp` and
+folders and the relay's Node binary and npm package (not the rest of its
+installation folder); private `/proc`, `/dev`, `/tmp` and
 home; and the task worktree as the only writable folder, with its `.git`
 pointer read-only. A live probe checks this policy, not only the presence of
 bubblewrap, before every task that names registered commands. Tasks that name

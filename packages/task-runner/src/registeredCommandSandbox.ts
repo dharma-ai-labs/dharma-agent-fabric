@@ -11,7 +11,7 @@ import type { TaskEnvelope } from './index.js';
 // that name them, before the provider starts. There is no opt-out.
 
 /** Changes whenever the bubblewrap argument list changes. */
-export const SANDBOX_POLICY_VERSION = 'bwrap-policy/1';
+export const SANDBOX_POLICY_VERSION = 'bwrap-policy/2';
 /** The command's home folder inside the sandbox: an empty temporary file system. */
 export const SANDBOX_HOME = '/dharma-sandbox/home';
 const SANDBOX_HOSTNAME = 'dharma-sandbox';
@@ -45,6 +45,11 @@ export const SANDBOX_FIX: Readonly<Record<SandboxRefusalReason, string>> = Objec
 export type HostLayoutEntry = 'symlink' | 'directory' | 'absent';
 export type HostLayout = Record<typeof LAYOUT_NAMES[number], HostLayoutEntry>;
 
+/** One path of the relay's Node installation made visible inside the sandbox. */
+export type NodeMount =
+  | { kind: 'bind'; path: string }
+  | { kind: 'symlink'; target: string; path: string };
+
 export interface UsableSandbox {
   usable: true;
   host: 'linux' | 'wsl2';
@@ -58,8 +63,12 @@ export interface UsableSandbox {
   nodePrefix: string;
   /** True when the Node prefix is outside /usr and must be bound read-only. */
   bindNodePrefix: boolean;
-  /** True when <nodePrefix>/etc exists: it is hidden, because a global npmrc there can hold tokens. */
-  maskNodeEtc: boolean;
+  /**
+   * The only Node paths visible when the prefix is bound: the Node binary, the npm package and the
+   * npm/npx links into it. The rest of the prefix is not, because it can be a general per-user
+   * folder (for example ~/.local) that also holds other tools' data.
+   */
+  nodeMounts: readonly NodeMount[];
   /** True on bubblewrap 0.8.0 or newer. */
   disableUserns: boolean;
 }
@@ -111,8 +120,12 @@ export function sandboxCommandLine(sandbox: UsableSandbox, input: { worktree: st
     else if (sandbox.layout[name] === 'directory') args.push('--ro-bind', `/${name}`, `/${name}`);
   }
   for (const name of ETC_FILES) args.push('--ro-bind-try', `/etc/${name}`, `/etc/${name}`);
-  if (sandbox.bindNodePrefix) args.push('--ro-bind', sandbox.nodePrefix, sandbox.nodePrefix);
-  if (sandbox.maskNodeEtc) args.push('--tmpfs', `${sandbox.nodePrefix}/etc`);
+  if (sandbox.bindNodePrefix) {
+    for (const mount of sandbox.nodeMounts) {
+      if (mount.kind === 'bind') args.push('--ro-bind', mount.path, mount.path);
+      else args.push('--symlink', mount.target, mount.path);
+    }
+  }
   args.push('--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--tmpfs', SANDBOX_HOME,
     '--bind', worktree, worktree, '--ro-bind', `${worktree}/.git`, `${worktree}/.git`,
     '--remount-ro', '/', '--chdir', cwd, '--', ...argv);
@@ -199,7 +212,7 @@ const a = JSON.parse(process.argv[1]);
 const exists = p => { try { fs.lstatSync(p); return true; } catch { return false; } };
 const writable = p => { try { fs.writeFileSync(p, 'probe'); try { fs.unlinkSync(p); } catch {} return true; } catch { return false; } };
 const inside = (p, root) => p === root || p.startsWith(root.endsWith('/') ? root : root + '/');
-const keep = [a.worktree].concat(a.nodePrefix ? [a.nodePrefix] : []);
+const keep = [a.worktree].concat(a.nodePaths);
 const onlyPathsTo = dir => {
   let names; try { names = fs.readdirSync(dir); } catch { return true; }
   for (const name of names) {
@@ -376,17 +389,36 @@ export async function probeRegisteredCommandSandbox(deps: ProbeDependencies): Pr
     if (nodePrefix === '/' || within('/proc', nodePrefix) || within(deps.relayStateDirectory, nodePrefix)) {
       return refused('sandbox_probe_failed', 'failed checks: node_prefix_supported');
     }
-    const maskNodeEtc = await deps.lstat(`${nodePrefix}/etc`).then(() => true, (error: unknown) => {
-      if (missing(error)) return false;
-      throw error;
-    });
+    const nodeMounts = bindNodePrefix ? await nodeInstallationMounts(deps, nodePrefix, node) : [];
     const sandbox: UsableSandbox = { usable: true, host, bwrapPath, bwrapVersion: parsed.join('.'), bwrapSha256,
-      policy: SANDBOX_POLICY_VERSION, layout, nodePrefix, bindNodePrefix, maskNodeEtc,
+      policy: SANDBOX_POLICY_VERSION, layout, nodePrefix, bindNodePrefix, nodeMounts,
       disableUserns: atLeast(parsed, DISABLE_USERNS_BWRAP) };
     return await runProbe(deps, sandbox, node);
   } catch (error) {
     return refused('sandbox_probe_failed', `probe error ${String((error as NodeJS.ErrnoException)?.code ?? 'unexpected')}`);
   }
+}
+
+/**
+ * The Node paths to show inside the sandbox: the Node binary, `<prefix>/lib/node_modules/npm` when
+ * it is a folder, and `<prefix>/bin/npm` and `npx` when they are links into that folder.
+ */
+async function nodeInstallationMounts(deps: ProbeDependencies, nodePrefix: string, node: string): Promise<NodeMount[]> {
+  const mounts: NodeMount[] = [{ kind: 'bind', path: node }];
+  const npm = `${nodePrefix}/lib/node_modules/npm`;
+  const npmEntry = await deps.lstat(npm).catch((error: unknown) => { if (missing(error)) return null; throw error; });
+  if (!npmEntry || npmEntry.isSymbolicLink() || !npmEntry.isDirectory()) return mounts;
+  mounts.push({ kind: 'bind', path: npm });
+  for (const name of ['npm', 'npx']) {
+    const link = `${nodePrefix}/bin/${name}`;
+    if (link === node) continue;
+    const entry = await deps.lstat(link).catch((error: unknown) => { if (missing(error)) return null; throw error; });
+    if (!entry?.isSymbolicLink()) continue;
+    const target = await deps.readlink(link);
+    const resolved = resolve(dirname(link), target);
+    if (resolved !== npm && within(resolved, npm)) mounts.push({ kind: 'symlink', target, path: link });
+  }
+  return mounts;
 }
 
 async function runProbe(deps: ProbeDependencies, sandbox: UsableSandbox, node: string): Promise<RegisteredCommandSandbox> {
@@ -404,7 +436,7 @@ async function runProbe(deps: ProbeDependencies, sandbox: UsableSandbox, node: s
     const checks = [...PROBE_CHECKS.base, ...(sandbox.disableUserns ? PROBE_CHECKS.disableUserns : []),
       ...(sandbox.host === 'wsl2' ? PROBE_CHECKS.wsl : [])];
     const args = { outsideCanary, outsideWrite, home: deps.homedir(), relayPid: deps.relayPid, sentinel, worktree,
-      nodePrefix: sandbox.bindNodePrefix ? sandbox.nodePrefix : null, port: (server.address() as AddressInfo).port, checks };
+      nodePaths: sandbox.bindNodePrefix ? sandbox.nodeMounts.map(mount => mount.path) : [], port: (server.address() as AddressInfo).port, checks };
     const source = { ...process.env, SANDBOX_PROBE_SENTINEL: sentinel };
     const env = deps.commandEnvironment ? deps.commandEnvironment(source, worktree)
       : { PATH: process.env.PATH ?? '/usr/bin:/bin', DHARMA_TASK_WORKTREE: worktree };
