@@ -100,7 +100,11 @@ environment, never as arguments.
 Bubblewrap reports the command's start on a status descriptor. If it never
 reports the child, the task fails with a `runner` row
 (`registered_command_sandbox_failed`) and the command is not run again on the
-host. The command's own exit code is recorded; a command killed by a signal
+host. bubblewrap reports the child as soon as it is created, so a sandbox that
+fails during its own setup after that point shows as a failed command whose
+error output starts with `bwrap:`; the command did not run. The probe treats
+that case as `user_namespaces_unavailable`. The command's own exit code is
+recorded; a command killed by a signal
 shows `128 + signal number`. A timeout or cancellation kills the bubblewrap
 process group, and the private process namespace takes every descendant with
 it, including detached ones. Cancellation is immediate.
