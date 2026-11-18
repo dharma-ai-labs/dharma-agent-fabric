@@ -17,6 +17,11 @@ export interface FiniteLearningStudyConfiguration {
 }
 interface Decision { ok: boolean; code: string; execute?: boolean; fence?: number; retained?: boolean }
 const digest = (value: unknown) => sha256(canonicalize(value));
+// How long one ledger operation waits for another executor's write lock. Several executor processes
+// share one ledger, and one of them recording a 100-trajectory cohort keeps the lock busy for seconds on
+// a slow disk; SQLite's busy wait is not fair, so a waiter can be passed over for that whole burst.
+const DEFAULT_BUSY_TIMEOUT_MS = 30_000;
+const SQLITE_BUSY = 5;
 const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$(?![\s\S])/.test(value);
 const hash = (value: unknown): value is string => typeof value === 'string' && /^sha256:[a-f0-9]{64}$(?![\s\S])/.test(value);
 const cents = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
@@ -47,17 +52,17 @@ export class FiniteLearningStudyLedger {
   #identity: string;
   #now: () => number;
 
-  constructor(path: string, input: unknown, now: () => number = Date.now) {
+  constructor(path: string, input: unknown, now: () => number = Date.now,
+    options: { busyTimeoutMs?: number } = {}) {
     if (!isAbsolute(path) || path.includes('\0')) throw new Error('finite_study_durable_path_required');
     const plan = planFiniteLearningStudy(input);
     this.#configuration = plan.configuration;
     this.#configurationHash = plan.configurationHash;
     this.#identity = canonicalize(plan.configuration.identity);
     this.#now = now;
-    this.#db = new DatabaseSync(path);
+    this.#db = new DatabaseSync(path, { timeout: options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS });
     try {
-      this.#db.exec(`pragma busy_timeout=5000;
-        create table if not exists finite_study(id integer primary key check(id=1), configuration_hash text not null,
+      this.#db.exec(`create table if not exists finite_study(id integer primary key check(id=1), configuration_hash text not null,
           state text not null, reason text, last_observed integer not null, window_hash text);
         create table if not exists finite_trajectories(trajectory_id text primary key, receipt_hash text not null, ended_at text not null);
         create table if not exists finite_backlog(trajectory_id text primary key, receipt_hash text not null, ended_at text not null);
@@ -74,7 +79,14 @@ export class FiniteLearningStudyLedger {
   }
 
   #transaction<T>(operation: () => T): T {
-    this.#db.exec('begin immediate');
+    try { this.#db.exec('begin immediate'); }
+    catch (error) {
+      // Another executor kept the write lock for the whole busy timeout; nothing was written.
+      if ((Number((error as { errcode?: unknown }).errcode) & 0xff) === SQLITE_BUSY) {
+        throw new Error('finite_study_ledger_busy', { cause: error });
+      }
+      throw error;
+    }
     try { const value = operation(); this.#db.exec('commit'); return value; }
     catch (error) { this.#db.exec('rollback'); throw error; }
   }
