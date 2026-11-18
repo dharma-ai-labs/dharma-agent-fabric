@@ -42,7 +42,7 @@ test('actual CLI full-vault callsites all use the single scoped owner', async ()
   }
   visit(ast); assert.deepEqual(unscoped, []);
   // Keep both callsites explicit; neither may bypass openBootstrapVault or its key wipe/scope checks.
-  assert.deepEqual(owned, ['superviseNamedSessions', 'startCodexBootstrapNativeHost', 'capture', 'namedSessionCommand', 'namedSessionCommand', 'evidenceSync',
+  assert.deepEqual(owned, ['superviseNamedSessions', 'startCodexBootstrapNativeHost', 'capture', 'captureSegments', 'namedSessionCommand', 'namedSessionCommand', 'evidenceSync',
     'processEvidenceRequest', 'syncSignedTaskTrajectory', 'stageSignedTaskTrajectoryRecovery',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories',
     'finalizeRecoveredSignedTaskTrajectories', 'finalizeRecoveredSignedTaskTrajectories', 'relayWorkspaceLoop', 'run']);

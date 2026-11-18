@@ -14,6 +14,7 @@ import {currentBootstrapHostScope} from './bootstrapHostScope.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 import {applyServerEvidencePolicy, pathExistsOrThrow} from './index.js';
 import {withRepositoryRelayStage} from './repositoryRelaySupervisor.js';
+import {relaySessionCaptureSettings} from './sessionSegmentCapture.js';
 import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmission.js';
 
 // Issue 397. The real sync, apply, lock, signing control and verification bodies
@@ -111,7 +112,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
   const compiled = await compile({...fs, dirname, resolve, createHash, randomUUID, Buffer, Date, setTimeout, structuredClone,
     process: {platform: process.platform, pid: process.pid, kill: process.kill.bind(process), once() {}, removeListener() {},
       stderr: {write: (line: string) => logged.push(line)}},
-    AbortController, performance, withRepositoryRelayStage, admitSignedRequests,
+    AbortController, performance, withRepositoryRelayStage, admitSignedRequests, relaySessionCaptureSettings,
     withClientSigningControl: async (input: Parameters<typeof withDeviceSigningControl>[0], work: () => Promise<unknown>) => {
       await hooks.signing?.();
       return signingWithContention(input, work);

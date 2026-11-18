@@ -113,6 +113,9 @@ export function trajectoryCapsuleHash(capsule: Omit<TrajectoryCapsule, 'capsuleH
   }));
 }
 
+export const TRAJECTORY_SEGMENT_TOO_LARGE = 'trajectory_segment_exceeds_capsule_limit';
+const MAXIMUM_SEGMENT_INDEX = 999_999;
+
 function deterministicUuid(value: string): string {
   const bytes = createHash('sha256').update(value).digest().subarray(0, 16);
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
@@ -524,11 +527,20 @@ export function buildTrajectoryCapsule(input: {
     || verifiedAt! < activatedAt! || (expiresAt != null && verifiedAt! >= expiresAt))) {
     throw new Error('Active skill bundle must be verified inside its authorization window before task execution.');
   }
+  const segment = input.segment;
+  if (segment && (!Number.isSafeInteger(segment.index) || segment.index < 0 || segment.index > MAXIMUM_SEGMENT_INDEX)) {
+    throw new Error(`Trajectory segment index must be an integer from 0 to ${MAXIMUM_SEGMENT_INDEX}.`);
+  }
   const stats: RedactionStats = {
     classes: new Set(), redactedValues: 0, excludedPaths: 0, inputBytes: 0, outputBytes: 0,
   };
-  const trajectoryId = deterministicUuid(`${input.organizationId}:${input.deviceId}:${input.workspaceId}:${input.session.provider}:${input.session.sessionId}`);
-  const pseudonymousSessionId = sha256(`${input.organizationId}:${input.workspaceId}:${input.session.provider}:${input.session.sessionId}`);
+  const sessionIdentity = `${input.organizationId}:${input.deviceId}:${input.workspaceId}:${input.session.provider}:${input.session.sessionId}`;
+  const trajectoryId = deterministicUuid(segment ? `${sessionIdentity}:segment:${segment.index}` : sessionIdentity);
+  const sessionPseudonym = sha256(`${input.organizationId}:${input.workspaceId}:${input.session.provider}:${input.session.sessionId}`);
+  // HQ keeps one trajectory per pseudonymous session, so each segment carries the
+  // session pseudonym plus its index: the prefix relates the segments to one another.
+  const pseudonymousSessionId = segment
+    ? `${sessionPseudonym}:segment:${String(segment.index).padStart(6, '0')}` : sessionPseudonym;
   const seen = new Set<string>();
   const events: AgentEvent[] = [];
   const excludedClasses = new Set<string>();
@@ -670,6 +682,11 @@ export function buildTrajectoryCapsule(input: {
   const serializedBytes = () => Buffer.byteLength(canonicalize({
     ...base, capsuleHash: `sha256:${'0'.repeat(64)}`,
   }));
+  // A segment is a complete record range or nothing: the caller chooses a
+  // smaller range instead of receiving a collapsed partial capsule.
+  if (segment && serializedBytes() > input.policy.evidence.maximumCapsuleBytes) {
+    throw new Error(TRAJECTORY_SEGMENT_TOO_LARGE);
+  }
   while (serializedBytes() > input.policy.evidence.maximumCapsuleBytes && base.events.length > 1) {
     base.events.shift();
     base.events.forEach((event, index) => { event.sequence = index; });
@@ -696,10 +713,10 @@ export function buildTrajectoryCapsule(input: {
   return { ...base, capsuleHash: trajectoryCapsuleHash(base as Omit<TrajectoryCapsule, 'capsuleHash'>) };
 }
 
-export const TRAJECTORY_SEGMENT_TOO_LARGE = 'trajectory_segment_exceeds_capsule_limit';
-
-export function trajectorySegmentSessionLink(_sessionId: string): { sessionId: string; index: number } | null {
-  throw new Error('not_implemented');
+/** Reads the session pseudonym and segment index back from a segment capsule's sessionId. */
+export function trajectorySegmentSessionLink(sessionId: string): { sessionId: string; index: number } | null {
+  const match = /^(sha256:[a-f0-9]{64}):segment:(\d{6})$/.exec(sessionId);
+  return match ? { sessionId: match[1]!, index: Number(match[2]) } : null;
 }
 
 export { redactValue };

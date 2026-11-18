@@ -14,6 +14,7 @@ import { serializeSkillPreparationRecord } from './skillPreparationRecord.js';
 import { skillPreparationScopeRoot, withSkillPreparationTransaction } from './skillPreparationTransaction.js';
 import { prepareProvidersIndependently } from './skillPreparationPump.js';
 import { withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+import { relaySessionCaptureSettings } from './sessionSegmentCapture.js';
 import { currentBootstrapHostScope } from './bootstrapHostScope.js';
 import { nextSkillActivationResult, relaySkillActivationPath, requireActiveSkillInstall, skillActivationErrorCode }
   from './skillActivationResult.js';
@@ -349,6 +350,7 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     signal: controller.signal, serialized: (operation: () => Promise<unknown>) => operation(),
     readFile: (path: string, encoding: 'utf8') => readFile(checkedPath(path), encoding),
     waitForRelayRefresh: async () => {},
+    relaySessionCaptureSettings,
     VERSION: '0.2.102',
     resolve, mkdir: (path: string, options: Parameters<typeof mkdir>[1]) => mkdir(checkedPath(path), options),
     writeFile: (path: string, bytes: string, options: Parameters<typeof writeFile>[2]) => writeFile(checkedPath(path), bytes, options),

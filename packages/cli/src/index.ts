@@ -15,7 +15,8 @@ import {
 } from '@dharma-ai-labs/agent-fabric-contracts';
 import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
-import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, providerAdapters, providerExecutionRecords, providerLaunch, providerProcessEnvironment, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, listProviderSessionFiles, providerAdapters, providerExecutionRecords, providerLaunch, providerProcessEnvironment, providerSessionId, sessionWorkspaceQualified, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import { captureSessionSegments, relaySessionCaptureSettings, type SessionSegmentCaptureReport } from './sessionSegmentCapture.js';
 import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -4791,6 +4792,116 @@ async function capture(flags: Map<string, string | boolean>, batch = false): Pro
   } finally { await vault.close(); }
 }
 
+type SegmentCaptureFabric = AgentFabricClient & {
+  getTrajectoryHead(body: { trajectoryId: string; workspaceId: string }): Promise<Record<string, unknown>>;
+};
+
+// Segmented capture of whole long sessions. Without a vault and client it only
+// plans: nothing is written, uploaded or recorded in the segment ledger.
+async function captureWorkspaceSessionSegments(input: {
+  workspace: WorkspaceRecord; organizationId: string; deviceId: string; policy: OrganizationPolicy;
+  provider: 'claude' | 'codex'; roots?: string[]; sessionIds?: string[] | null; since?: Date | null;
+  maximumSessions: number; idleMinutes: number; maximumUploadBytes?: number; maximumRecordBytes?: number;
+  sourceClass: 'provider_discovery' | 'explicit_import';
+  vault: Awaited<ReturnType<typeof openBootstrapVault>> | null; fabric: SegmentCaptureFabric | null;
+}): Promise<SessionSegmentCaptureReport> {
+  const allowed = input.sessionIds ? new Set(input.sessionIds) : null;
+  const sources: Array<{ path: string; modifiedAt: Date }> = [];
+  for (const file of await listProviderSessionFiles(input.provider, input.roots)) {
+    if (sources.length >= input.maximumSessions) break;
+    if (input.since && file.modifiedAt < input.since) continue;
+    if (allowed && !allowed.has(providerSessionId(input.provider, file.path))) continue;
+    if (!await sessionWorkspaceQualified(input.provider, file.path, input.workspace.path)) continue;
+    sources.push(file);
+  }
+  sources.sort((left, right) => left.modifiedAt.getTime() - right.modifiedAt.getTime());
+  const { vault, fabric, policy } = input;
+  const workspaceId = input.workspace.workspaceId;
+  return captureSessionSegments({
+    organizationId: input.organizationId, deviceId: input.deviceId, workspaceId, workspacePath: input.workspace.path,
+    provider: input.provider, sources: sources.map((source) => source.path), policy,
+    ledgerRoot: resolve(dharmaHome(), 'evidence', 'session-segments'), sourceClass: input.sourceClass,
+    idleMinutes: input.idleMinutes, maximumUploadBytes: input.maximumUploadBytes, maximumRecordBytes: input.maximumRecordBytes,
+    validate: async (capsule) => {
+      const validation = await validateContract(resolve(import.meta.dirname, 'schemas'), trajectoryCapsuleSchemaId(capsule), capsule);
+      if (!validation.ok) throw new Error(`Trajectory capsule failed schema validation: ${JSON.stringify(validation.errors)}`);
+    },
+    store: vault && fabric ? {
+      commit: (item) => vault.commitCapture({
+        raw: { plaintext: item.raw, kind: 'raw-provider-turn', expectedContentId: item.rawContentId },
+        capsule: {
+          plaintext: Buffer.from(JSON.stringify(item.capsule)), trajectoryId: item.capsule.trajectoryId,
+          revision: item.capsule.revision, capsuleHash: item.capsule.capsuleHash,
+        },
+        session: {
+          sessionId: item.localSessionId, provider: input.provider, workspaceId,
+          sourceLocator: item.sourcePath, status: item.capsule.coverage.state, observedAt: item.observedAt,
+        },
+      }).then(() => undefined),
+      head: async (capsule) => acceptedTrajectoryHead(await fabric.getTrajectoryHead({
+        trajectoryId: capsule.trajectoryId, workspaceId,
+      }), capsule.trajectoryId),
+      sync: async (capsule) => {
+        await vault.queueCapsuleSync(capsule.trajectoryId, capsule.revision);
+        try {
+          await reserveDailyContentUpload(capsule as unknown as Record<string, unknown>, policy);
+          await fabric.syncTrajectory(capsule);
+        } catch (error) {
+          if (isDefinitiveSecretDisclosureRejection(error)) {
+            await vault.discardPendingCapsuleSync(capsule.trajectoryId, capsule.revision, 'secret_disclosure_forbidden');
+          }
+          throw error;
+        }
+        await vault.markCapsuleSynced(capsule.trajectoryId, capsule.revision);
+      },
+    } : undefined,
+  });
+}
+
+async function captureSegments(flags: Map<string, string | boolean>): Promise<Output> {
+  const provider = required(flags, 'provider');
+  if (provider !== 'claude' && provider !== 'codex') throw new Error('Segmented capture supports the claude and codex providers.');
+  const workspacePath = await realpath(required(flags, 'workspace'));
+  const policyPath = required(flags, 'policy');
+  const root = flags.get('source-root');
+  const sinceFlag = flags.get('since');
+  const since = typeof sinceFlag === 'string' ? new Date(sinceFlag) : null;
+  if (since && !Number.isFinite(since.getTime())) throw new Error('--since must be an ISO 8601 timestamp.');
+  const device = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
+  const registered = selectDeviceWorkspace(await registry(), {
+    organizationId: device.organizationId, deviceId: device.deviceId, path: workspacePath,
+  });
+  if (!registered) throw new Error('Workspace is not registered locally. Run dharma workspace add.');
+  let policy = await loadVerifiedWorkspacePolicy(policyPath, registered.workspaceId);
+  const fabric = flags.has('sync') ? await client() as SegmentCaptureFabric : null;
+  if (fabric && (fabric.config.organizationId !== device.organizationId || fabric.config.deviceId !== device.deviceId)) {
+    throw new Error('The enrolled device changed during evidence capture. Retry from the current device home.');
+  }
+  if (fabric) policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, registered.workspaceId, fabric);
+  const vault = fabric ? await openBootstrapVault({ root: resolve(dharmaHome(), 'vault'), rawLocalDays: rawLocalRetentionDays(policy) }) : null;
+  try {
+    if (vault && fabric) await syncPendingRetentionCapsules(vault, fabric, policy, registered.workspaceId);
+    const report = await captureWorkspaceSessionSegments({
+      workspace: registered, organizationId: device.organizationId, deviceId: device.deviceId, policy, provider,
+      roots: typeof root === 'string' ? [root] : undefined,
+      sessionIds: await readSessionAllowlist(flags),
+      since: since ?? (flags.has('lookback-hours')
+        ? new Date(Date.now() - boundedInteger(flags.get('lookback-hours'), 24, 1, 8_760, '--lookback-hours') * 3_600_000) : null),
+      maximumSessions: boundedInteger(flags.get('maximum-sessions'), 20, 1, 1_000, '--maximum-sessions'),
+      idleMinutes: boundedInteger(flags.get('idle-minutes'), 30, 0, 10_080, '--idle-minutes'),
+      maximumUploadBytes: flags.has('maximum-upload-bytes')
+        ? boundedInteger(flags.get('maximum-upload-bytes'), 1, 1, Number.MAX_SAFE_INTEGER, '--maximum-upload-bytes') : undefined,
+      maximumRecordBytes: flags.has('maximum-record-bytes')
+        ? boundedInteger(flags.get('maximum-record-bytes'), 16_777_216, 4_096, 67_108_864, '--maximum-record-bytes') : undefined,
+      sourceClass: typeof root === 'string' ? 'explicit_import' : 'provider_discovery',
+      vault, fabric,
+    });
+    const output = flags.get('output');
+    if (typeof output === 'string') await writeFile(resolve(output), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    return report;
+  } finally { await vault?.close(); }
+}
+
 async function evidencePreview(flags: Map<string, string | boolean>): Promise<Output> {
   const workspace = await realpath(required(flags, 'workspace'));
   const provider = required(flags, 'provider');
@@ -9218,6 +9329,7 @@ async function currentSessionOpenFailure() {
 async function relayStart(flags: Map<string, string | boolean>,
   startup: { workspaceId: string | null; leased: boolean } = { workspaceId: null, leased: false }): Promise<Output> {
   const anchor = resolve(required(flags, 'policy'));
+  relaySessionCaptureSettings(flags);
   const config = await readDeviceConfig();
   if (!config) throw new Error('Relay requires current enrollment.');
   const declared = await loadOrganizationPolicy(anchor);
@@ -9324,6 +9436,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, canonicalWorkspace.workspaceId, fabric));
   const leaseSeconds = Number(flags.get('lease-seconds') || 120);
   const pollMs = Math.min(Math.max(Number(flags.get('poll-seconds') || 3), 1), 60) * 1_000;
+  const sessionCapture = relaySessionCaptureSettings(flags);
+  let nextSessionCaptureAt = 0;
+  let sessionSegmentsSynced = 0;
+  let sessionCaptureFailures = 0;
   let stopping = signal.aborted;
   let stopPreparation: (() => void) | undefined;
   const stop = () => { stopping = true; stopPreparation?.(); };
@@ -9597,6 +9713,27 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
           if (evidenceRequestId) evidenceResponsesCompleted += 1;
         }
       }
+      // Opt-in (`--capture-sessions`): on its timer, new long sessions in this
+      // workspace become segmented trajectories without a manual command.
+      if (sessionCapture.enabled && canonicalWorkspace.accessMode !== 'knowledge_only' && evidencePolicyFresh
+        && !stopping && Date.now() >= nextSessionCaptureAt) {
+        nextSessionCaptureAt = Date.now() + sessionCapture.intervalMs;
+        try {
+          await serialized(async () => {
+            for (const provider of sessionCapture.providers) {
+              if (stopping) return;
+              const report = await captureWorkspaceSessionSegments({
+                workspace: canonicalWorkspace, organizationId: fabric.config.organizationId, deviceId: fabric.config.deviceId,
+                policy, provider, since: new Date(Date.now() - sessionCapture.lookbackHours * 3_600_000),
+                maximumSessions: 50, idleMinutes: sessionCapture.idleMinutes, sourceClass: 'provider_discovery',
+                vault, fabric: fabric as SegmentCaptureFabric,
+              });
+              sessionSegmentsSynced += report.segments.filter((segment) => segment.outcome === 'synced').length;
+              if (report.stoppedReason) return;
+            }
+          });
+        } catch { sessionCaptureFailures += 1; }
+      }
       const result = await withRepositoryRelayStage('task_poll', () => serialized(async () => {
         if (stopping) return { taskId: null };
         return executeOneTask(fabric, leaseSeconds);
@@ -9728,6 +9865,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
     ok: true, stopped: true, tasksCompleted, taskTrajectoriesRecovered,
     lastProviderFailureCategory,
     evidenceResponsesCompleted, trajectorySyncsCompleted,
+    ...(sessionCapture.enabled ? { sessionSegmentsSynced, sessionCaptureFailures } : {}),
     repositorySourceCandidates, repositorySourceFailures, repositorySourceState,
     skillPreparationsCompleted, skillPreparationFailures, skillActivationsCompleted, skillActivationFailures,
     skillActivationFailuresByProvider,
@@ -10038,6 +10176,7 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
   if (command === 'workspace' && subcommand === 'sync') return workspaceSync(flags, positional.slice(2));
   if (command === 'capture' || (command === 'evidence' && subcommand === 'capture')) return capture(flags);
   if (command === 'evidence' && subcommand === 'capture-batch') return capture(flags, true);
+  if (command === 'evidence' && subcommand === 'capture-segments') return captureSegments(flags);
   if (command === 'evidence' && subcommand === 'preview') return evidencePreview(flags);
   if (command === 'evidence' && subcommand === 'sync') return evidenceSync(flags);
   if (command === 'evidence' && subcommand === 'run-request') return runOneEvidenceRequest(flags);

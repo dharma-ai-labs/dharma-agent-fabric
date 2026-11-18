@@ -34,19 +34,19 @@ const at = (turn: number, second = 0) => new Date(Date.UTC(2026, 10, 18, 8, 0, 0
 function claudeTurn(cwd: string, turn: number, options: { outputBytes?: number; tools?: number } = {}) {
   const tools = options.tools ?? 1;
   const records: Array<Record<string, unknown>> = [
-    { type: 'user', cwd, timestamp: at(turn, 0), message: { role: 'user', content: `task ${turn}` } },
+    { type: 'user', cwd, timestamp: at(turn, 0), message: { role: 'user', content: `task ${turn} ${'p'.repeat(turn)}` } },
   ];
   for (let tool = 0; tool < tools; tool += 1) {
     records.push(
       { type: 'assistant', cwd, timestamp: at(turn, 1 + tool * 2), message: { role: 'assistant', content: [
-        { type: 'tool_use', id: `toolu_${turn}_${tool}`, name: 'Read', input: { file_path: `src/file-${tool}.ts` } },
+        { type: 'tool_use', id: `toolu_${turn}_${tool}`, name: 'Read', input: { file_path: `src/file-${tool}-${'f'.repeat(turn)}.ts` } },
       ] } },
       { type: 'user', cwd, timestamp: at(turn, 2 + tool * 2), message: { role: 'user', content: [
         { type: 'tool_result', tool_use_id: `toolu_${turn}_${tool}`, content: 'y'.repeat((options.outputBytes ?? 32) + tool) },
       ] } },
     );
   }
-  records.push({ type: 'assistant', cwd, timestamp: at(turn, 2 + tools * 2), message: { role: 'assistant', content: [{ type: 'text', text: `done ${turn}` }] } });
+  records.push({ type: 'assistant', cwd, timestamp: at(turn, 2 + tools * 2), message: { role: 'assistant', content: [{ type: 'text', text: `done ${turn} ${'d'.repeat(turn)}` }] } });
   return records;
 }
 
@@ -106,7 +106,7 @@ async function idleNow(path: string, minutes = 31) {
 }
 
 test('a session larger than the 8 MiB window becomes consecutive observed segments that cover every record', async () => {
-  const base = await fixture('dharma-segments-long-', 60, { outputBytes: 150_000 });
+  const base = await fixture('dharma-segments-long-', 60, { outputBytes: 170_000 });
   assert.ok((await stat(base.source)).size > 9 * 1024 * 1024);
   const { store, committed, synced } = fakeStore();
   const report = await captureSessionSegments(input(base, { store, now: () => new Date(Date.parse(at(60)) + 31 * 60_000) }));
@@ -187,7 +187,7 @@ test('a per-run upload budget stops cleanly and the next run continues without d
 });
 
 test('the per-run budget never exceeds the policy daily upload limit', async () => {
-  const base = await fixture('dharma-segments-daily-', 20, { outputBytes: 2_000 });
+  const base = await fixture('dharma-segments-daily-', 60, { outputBytes: 2_000 });
   const { store, committed } = fakeStore();
   const report = await captureSessionSegments(input(base, {
     store, now: () => new Date(Date.now() + 3_600_000), policy: policy(60_000, 70_000), maximumUploadBytes: 10_000_000,
