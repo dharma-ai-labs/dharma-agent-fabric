@@ -358,7 +358,13 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
         const resumedInsideTurn = first && ledger.insideTurn;
         first = false;
         if (turn.records.length === 0) {
-          if (current.length) current.at(-1)!.endOffset = turn.endOffset;
+          // Its bytes join the previous unit, and so does the fact that records were left out.
+          // Without a previous unit the bytes stay unread and join the next turn.
+          const previous = current.at(-1);
+          if (previous) {
+            previous.endOffset = turn.endOffset;
+            if (turn.coverage === 'partial') previous.coverage = 'partial';
+          }
           continue;
         }
         const unit = resumedInsideTurn ? null : sized(turn);
