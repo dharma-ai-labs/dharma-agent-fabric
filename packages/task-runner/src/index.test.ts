@@ -28,6 +28,7 @@ import {
   type ProviderTaskExecutor,
   type TaskEnvelope,
 } from './index.js';
+import * as taskRunner from './index.js';
 
 async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string[]) {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-required-artifact-'));
@@ -186,6 +187,13 @@ test('custom qualification reports cannot bypass receipt redaction or bind a dif
   }
 });
 
+// Relay-internal Git calls start with `-c name=value` configuration overrides.
+function gitSubcommand(argv: readonly string[]): string | undefined {
+  let index = 0;
+  while (argv[index] === '-c') index += 2;
+  return argv[index];
+}
+
 test('required artifact review v10: incomplete Git streams fail closed', async (t) => {
   for (const stream of ['tracked-overflow', 'untracked-overflow', 'unterminated'] as const) {
     await t.test(stream, async (child) => {
@@ -197,7 +205,7 @@ test('required artifact review v10: incomplete Git streams fail closed', async (
       await writeFile(outputPath, body);
       let intercepted = 0;
       const patch = child.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
-        if (command === 'git' && (stream === 'untracked-overflow' ? argv[0] === 'ls-files' : argv[0] === 'diff')) {
+        if (command === 'git' && gitSubcommand(argv) === (stream === 'untracked-overflow' ? 'ls-files' : 'diff')) {
           intercepted++;
           return originalSpawn(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]));', outputPath], options);
         }
@@ -461,7 +469,7 @@ test('task cancellation without artifacts is checked again after final Git inspe
   let inspections = 0;
   const patch = t.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
     const child = originalSpawn(command, argv, options);
-    if (command === 'git' && argv[0] === 'ls-files') {
+    if (command === 'git' && gitSubcommand(argv) === 'ls-files') {
       inspections++;
       child.once('close', () => controller.abort(new Error('private-cancellation-sentinel')));
     }
@@ -1560,3 +1568,320 @@ test(`one embedded ${outcome} receipt contains the task without a protected effe
   assert.equal(await readFile(protectedPath, 'utf8'), 'original protected content\n');
 });
 }
+
+type AcceptanceEnvironmentInput = {
+  source: NodeJS.ProcessEnv;
+  platform: NodeJS.Platform;
+  cwd: string;
+  command: { argv: string[]; timeoutSeconds: number; environment?: unknown };
+  actionDecision?: { externalIdempotencyKey: string; actionDigest: string };
+};
+
+function acceptanceEnvironment(input: AcceptanceEnvironmentInput): Record<string, string> {
+  const builder = Reflect.get(taskRunner, 'acceptanceCommandEnvironment') as
+    ((value: AcceptanceEnvironmentInput) => Record<string, string>) | undefined;
+  assert.equal(typeof builder, 'function', 'acceptance commands need an explicit environment builder');
+  return builder!(input);
+}
+
+const ENVIRONMENT_PROBE = 'process.stdout.write(JSON.stringify(process.env))';
+const RUNNER_OWNED_NAMES = ['DHARMA_TASK_WORKTREE', 'DHARMA_EXTERNAL_IDEMPOTENCY_KEY', 'DHARMA_ACTION_DIGEST'];
+const SYNTHETIC_DIGEST = `sha256:${'c'.repeat(64)}`;
+
+async function withParentEnvironment<T>(values: Record<string, string>, run: () => Promise<T>): Promise<T> {
+  const previous = new Map(Object.keys(values).map((name) => [name, process.env[name]]));
+  Object.assign(process.env, values);
+  try {
+    return await run();
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+function environmentValue(environment: NodeJS.ProcessEnv, name: string): string | undefined {
+  if (process.platform !== 'win32') return environment[name];
+  const key = Object.keys(environment).find((candidate) => candidate.toUpperCase() === name.toUpperCase());
+  return key === undefined ? undefined : environment[key];
+}
+
+function probeCommand(inherit?: string[]) {
+  return {
+    argv: [process.execPath, '-e', ENVIRONMENT_PROBE], timeoutSeconds: 10,
+    ...(inherit ? { ...{ environment: { inherit } } } : {}),
+  };
+}
+
+test('acceptance commands run with an explicit environment instead of the relay process environment', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  fixture.policy.tasks.allowedCommands.permitted = probeCommand(['ACCEPTANCE_PERMITTED_INPUT']);
+  fixture.policy.tasks.allowedCommands.plain = probeCommand();
+  for (const commandId of ['permitted', 'plain']) {
+    fixture.unsigned.authority.commands.push({ commandId });
+    fixture.unsigned.acceptance.commands.push({ commandId });
+  }
+  let worktree = '';
+  const receipt = await withParentEnvironment({
+    ACCEPTANCE_PARENT_SENTINEL: 'synthetic-parent-sentinel',
+    SYNTHETIC_SERVICE_TOKEN: 'synthetic-token-value',
+    ACCEPTANCE_PERMITTED_INPUT: 'synthetic-permitted-value',
+    DHARMA_TASK_WORKTREE: 'synthetic-forged-worktree',
+    DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'synthetic-forged-key',
+    DHARMA_ACTION_DIGEST: 'synthetic-forged-digest',
+  }, () => executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => { worktree = workspace; return fixture.providerResult; } }));
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  const permitted = JSON.parse(receipt.commandResults[1]!.stdout) as Record<string, string>;
+  const plain = JSON.parse(receipt.commandResults[2]!.stdout) as Record<string, string>;
+  for (const environment of [permitted, plain]) {
+    assert.equal(environmentValue(environment, 'ACCEPTANCE_PARENT_SENTINEL'), undefined);
+    assert.equal(environmentValue(environment, 'SYNTHETIC_SERVICE_TOKEN'), undefined);
+    assert.deepEqual(Object.keys(environment).filter((name) => /^npm_/i.test(name)), []);
+    assert.equal(environmentValue(environment, 'DHARMA_TASK_WORKTREE'), worktree);
+    assert.equal(environmentValue(environment, 'DHARMA_EXTERNAL_IDEMPOTENCY_KEY'), undefined);
+    assert.equal(environmentValue(environment, 'DHARMA_ACTION_DIGEST'), undefined);
+    const essentials = process.platform === 'win32'
+      ? ['PATH', 'PATHEXT', 'SystemRoot', 'ComSpec', 'TEMP', 'USERPROFILE']
+      : ['PATH', 'HOME', 'TMPDIR', 'LANG'];
+    for (const name of essentials) {
+      assert.equal(environmentValue(environment, name), environmentValue(process.env, name), name);
+    }
+  }
+  assert.equal(environmentValue(permitted, 'ACCEPTANCE_PERMITTED_INPUT'), 'synthetic-permitted-value');
+  assert.equal(environmentValue(plain, 'ACCEPTANCE_PERMITTED_INPUT'), undefined);
+});
+
+test('relay Git checks after an acceptance command do not run a Git monitor hook the command configured', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const marker = resolve(fixture.root, 'monitor-hook-ran.json');
+  const hook = resolve(fixture.root, 'monitor-hook.cjs');
+  await writeFile(hook, [
+    'require("node:fs").writeFileSync(',
+    `  ${JSON.stringify(marker)},`,
+    '  JSON.stringify({ sentinel: process.env.ACCEPTANCE_PARENT_SENTINEL ?? null }));',
+    'process.exit(1);',
+  ].join('\n'));
+  const shellPath = (path: string) => `'${path.replace(/\\/g, '/')}'`;
+  fixture.policy.tasks.allowedCommands.configure = {
+    argv: ['git', 'config', 'core.fsmonitor', `${shellPath(process.execPath)} ${shellPath(hook)}`],
+    timeoutSeconds: 10,
+  };
+  fixture.unsigned.authority.commands.push({ commandId: 'configure' });
+  fixture.unsigned.acceptance.commands.push({ commandId: 'configure' });
+  const receipt = await withParentEnvironment({ ACCEPTANCE_PARENT_SENTINEL: 'synthetic-parent-sentinel' },
+    () => executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult }));
+  assert.equal(receipt.commandResults[1]?.exitCode, 0, receipt.commandResults[1]?.stderr);
+  const hookOutput = await readFile(marker, 'utf8').catch(() => undefined);
+  assert.equal(hookOutput, undefined, 'relay Git ran the monitor hook');
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+});
+
+test('acceptance command policy cannot inherit runner-owned environment names', async (t) => {
+  for (const name of [...RUNNER_OWNED_NAMES, 'dharma_action_digest']) {
+    await t.test(name, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      fixture.policy.tasks.allowedCommands.probe = probeCommand([name]);
+      fixture.unsigned.authority.commands.push({ commandId: 'probe' });
+      fixture.unsigned.acceptance.commands.push({ commandId: 'probe' });
+      let providerCalls = 0;
+      const receipt = await withParentEnvironment({ [name]: 'synthetic-forged-value' }, () => executeTask({
+        ...fixture.input, task: fixture.signed(),
+        providerExecutor: async () => { providerCalls += 1; return fixture.providerResult; } }));
+      assert.equal(receipt.status, 'failed');
+      assert.equal(providerCalls, 0);
+      assert.equal(receipt.commandResults.some(({ commandId }) => commandId === 'probe'), false);
+      assert.match(receipt.commandResults.at(-1)?.stderr || '', /environment/);
+    });
+  }
+});
+
+test('signed tasks cannot carry their own acceptance-command environment', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  fixture.policy.tasks.allowedCommands.probe = probeCommand();
+  fixture.unsigned.authority.commands.push({ commandId: 'probe' });
+  for (const acceptance of [
+    { commands: [{ commandId: 'probe', environment: { DHARMA_TASK_WORKTREE: 'forged' } }], requiredArtifacts: [] },
+    { commands: [{ commandId: 'probe' }], requiredArtifacts: [], environment: { DHARMA_ACTION_DIGEST: 'forged' } },
+  ]) {
+    const task = fixture.signed({ acceptance } as unknown as Partial<TaskEnvelope>);
+    assert.throws(() => verifyTaskEnvelope(task, fixture.publicKey), /schema validation/);
+    let providerCalls = 0;
+    await assert.rejects(executeTask({ ...fixture.input, task,
+      providerExecutor: async () => { providerCalls += 1; return fixture.providerResult; } }));
+    assert.equal(providerCalls, 0);
+  }
+});
+
+test('decision-bound acceptance variables come only from the verified decision receipt', async () => {
+  const root = await mkdtemp(resolve(tmpdir(), 'dharma-acceptance-decision-'));
+  try {
+    const workspace = resolve(root, 'workspace');
+    await mkdir(workspace);
+    for (const argv of [['init', '-q'], ['config', 'user.email', 'test@dharma-ai.io'],
+      ['config', 'user.name', 'Dharma Test'], ['commit', '--allow-empty', '-qm', 'initial']]) {
+      assert.equal(spawnSync('git', argv, { cwd: workspace }).status, 0);
+    }
+    const policy: OrganizationPolicy = {
+      schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
+      evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1,
+        maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
+      tasks: { defaultNetwork: 'deny', defaultGit: 'task_branch', allowedCommands: { probe: probeCommand() },
+        writePaths: [], requireLocalConfirmationFor: [] },
+      skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
+    };
+    const taskKeys = generateKeyPairSync('ed25519');
+    const decisionKeys = generateKeyPairSync('ed25519');
+    const now = new Date();
+    const baseTask = {
+      schema: 'dharma.task/v1' as const, taskId: randomUUID(), organizationId: 'org_test', workspaceId: 'workspace',
+      taskType: 'external_request' as const,
+      target: { deviceId: 'device', endpointId: randomUUID(), provider: 'codex' as const },
+      requiredCapabilities: ['action_decision_receipts_v1'] as const,
+      skillBundle: null, instructions: 'Inspect the repository.', requiredSkills: [],
+      authority: { readPaths: ['.'], writePaths: [], commands: [{ commandId: 'probe' }], network: 'deny', git: 'task_branch' as const },
+      execution: { isolation: 'git_worktree' as const, timeoutSeconds: 120, leaseSeconds: 20, maximumConcurrentAgents: 1 },
+      acceptance: { commands: [{ commandId: 'probe' }], requiredArtifacts: [] },
+      budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
+      createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(), nonce: randomUUID(),
+    } satisfies Omit<TaskEnvelope, 'actionDecision' | 'signature'>;
+    const actionDecision = embedDecision(baseTask, 'release', decisionKeys.privateKey, now);
+    const unsigned = { ...baseTask, actionDecision };
+    const task = { ...unsigned, signature: signCanonicalObject(unsigned, taskKeys.privateKey) } as TaskEnvelope;
+    let providerInput: Parameters<ProviderTaskExecutor>[0] | undefined;
+    const receipt = await withParentEnvironment({
+      DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'synthetic-forged-key',
+      DHARMA_ACTION_DIGEST: 'synthetic-forged-digest',
+      DHARMA_TASK_WORKTREE: 'synthetic-forged-worktree',
+    }, () => executeTask({
+      task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: taskKeys.publicKey,
+      receiptStore: new FileTaskReceiptStore(resolve(root, 'receipts')),
+      actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey },
+      providerExecutor: async (input) => {
+        providerInput = input;
+        return { provider: 'codex', exitCode: 0, signal: null, timedOut: false, stdout: 'done', stderr: '',
+          stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}` };
+      },
+    }));
+    assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+    assert.equal(providerInput?.externalIdempotencyKey, actionDecision.id);
+    assert.equal(providerInput?.actionDigest, actionDecision.actionDigest);
+    const environment = JSON.parse(receipt.commandResults[1]!.stdout) as Record<string, string>;
+    assert.equal(environmentValue(environment, 'DHARMA_EXTERNAL_IDEMPOTENCY_KEY'), actionDecision.id);
+    assert.equal(environmentValue(environment, 'DHARMA_ACTION_DIGEST'), actionDecision.actionDigest);
+    assert.equal(environmentValue(environment, 'DHARMA_TASK_WORKTREE'), providerInput?.workspace);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('acceptance environment builder copies only POSIX essentials, permitted names and runner-owned values', () => {
+  const source = {
+    PATH: '/usr/local/bin:/usr/bin', HOME: '/home/customer', TMPDIR: '/tmp/customer', LANG: 'C.UTF-8',
+    LANGUAGE: 'en', LC_ALL: 'C.UTF-8', LC_CTYPE: 'C.UTF-8', LC_MESSAGES: 'C', LC_COLLATE: 'C', LC_NUMERIC: 'C',
+    LC_TIME: 'C', LC_MONETARY: 'C', TZ: 'UTC', USER: 'customer', LOGNAME: 'customer',
+    XDG_CONFIG_HOME: '/home/customer/.config', XDG_CACHE_HOME: '/home/customer/.cache',
+    HTTPS_PROXY: 'http://proxy.example.test:3128',
+    XDG_RUNTIME_DIR: '/run/user/1000', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+    SSH_AUTH_SOCK: '/tmp/agent.sock', GPG_AGENT_INFO: '/tmp/gpg', WSL_INTEROP: '/run/WSL/1_interop', WSLENV: 'X',
+    DISPLAY: ':0', WAYLAND_DISPLAY: 'wayland-0', CODEX_HOME: '/home/customer/.codex',
+    CLAUDE_CONFIG_DIR: '/home/customer/.claude', SHELL: '/bin/bash', TERM: 'xterm', INVOCATION_ID: 'synthetic',
+    JOURNAL_STREAM: '8:1', MANAGERPID: '1', npm_config_userconfig: '/home/customer/.npmrc', npm_lifecycle_event: 'test',
+    XPC_SERVICE_NAME: 'synthetic', XPC_FLAGS: '0x0', __CF_USER_TEXT_ENCODING: '0x1F5:0x0:0x0',
+    DHARMA_HOME: '/home/customer/.dharma', DHARMA_ORG_API_TOKEN: 'synthetic-token', DHARMA_VAULT_KEY: 'synthetic-key',
+    DHARMA_TASK_WORKTREE: '/forged', DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'forged-key', DHARMA_ACTION_DIGEST: 'forged-digest',
+    ACCEPTANCE_PARENT_SENTINEL: 'synthetic-parent-sentinel', path: '/lowercase-is-a-different-name',
+  };
+  const essentials = {
+    PATH: source.PATH, HOME: source.HOME, TMPDIR: source.TMPDIR, LANG: source.LANG, LANGUAGE: source.LANGUAGE,
+    LC_ALL: source.LC_ALL, LC_CTYPE: source.LC_CTYPE, LC_MESSAGES: source.LC_MESSAGES, LC_COLLATE: source.LC_COLLATE,
+    LC_NUMERIC: source.LC_NUMERIC, LC_TIME: source.LC_TIME, LC_MONETARY: source.LC_MONETARY, TZ: source.TZ,
+    USER: source.USER, LOGNAME: source.LOGNAME, XDG_CONFIG_HOME: source.XDG_CONFIG_HOME,
+    XDG_CACHE_HOME: source.XDG_CACHE_HOME,
+  };
+  for (const platform of ['linux', 'darwin'] as const) {
+    assert.deepEqual(acceptanceEnvironment({ source, platform, cwd: '/work/tree', command: probeCommand() }),
+      { ...essentials, DHARMA_TASK_WORKTREE: '/work/tree' }, platform);
+    assert.deepEqual(acceptanceEnvironment({ source, platform, cwd: '/work/tree',
+      command: probeCommand(['HTTPS_PROXY', 'NOT_PRESENT']),
+      actionDecision: { externalIdempotencyKey: 'decision-id', actionDigest: SYNTHETIC_DIGEST } }), {
+      ...essentials, HTTPS_PROXY: source.HTTPS_PROXY, DHARMA_TASK_WORKTREE: '/work/tree',
+      DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'decision-id', DHARMA_ACTION_DIGEST: SYNTHETIC_DIGEST,
+    }, platform);
+  }
+});
+
+test('acceptance command environment policy is bounded and cannot name runner-owned variables', () => {
+  const source = { HTTPS_PROXY: 'http://proxy.example.test:3128', NODE_EXTRA_CA_CERTS: '/etc/ssl/synthetic.pem' };
+  const command = (environment: unknown) => ({ argv: [process.execPath], timeoutSeconds: 10, environment });
+  assert.deepEqual(acceptanceEnvironment({ source, platform: 'linux', cwd: '/work',
+    command: command({ inherit: ['HTTPS_PROXY', 'NODE_EXTRA_CA_CERTS'] }) }),
+  { ...source, DHARMA_TASK_WORKTREE: '/work' });
+  assert.deepEqual(acceptanceEnvironment({ source, platform: 'linux', cwd: '/work', command: command({ inherit: [] }) }),
+    { DHARMA_TASK_WORKTREE: '/work' });
+  const invalid: unknown[] = [
+    { inherit: ['DHARMA_TASK_WORKTREE'] },
+    { inherit: ['DHARMA_EXTERNAL_IDEMPOTENCY_KEY'] },
+    { inherit: ['DHARMA_ACTION_DIGEST'] },
+    { inherit: ['dharma_action_digest'] },
+    { inherit: ['Dharma_Task_Worktree'] },
+    { inherit: ['DHARMA_HOME'] },
+    { inherit: ['1INVALID'] },
+    { inherit: ['NAME=VALUE'] },
+    { inherit: [''] },
+    { inherit: ['A'.repeat(129)] },
+    { inherit: ['HTTPS_PROXY', 'https_proxy'] },
+    { inherit: Array.from({ length: 33 }, (_, index) => `NAME_${index}`) },
+    { inherit: 'HTTPS_PROXY' },
+    { inherit: [42] },
+    { inherit: ['HTTPS_PROXY'], values: { HTTPS_PROXY: 'http://proxy.example.test' } },
+    {},
+    null,
+    ['HTTPS_PROXY'],
+  ];
+  for (const environment of invalid) {
+    for (const platform of ['linux', 'win32'] as const) {
+      assert.throws(() => acceptanceEnvironment({ source, platform, cwd: '/work', command: command(environment) }),
+        /environment/, `${platform} ${JSON.stringify(environment)}`);
+    }
+  }
+});
+
+test('acceptance environment builder handles Windows essentials and case-insensitive names', () => {
+  const source = {
+    Path: 'C:\\Windows\\system32;C:\\Program Files\\nodejs', PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    SystemRoot: 'C:\\Windows', windir: 'C:\\Windows', ComSpec: 'C:\\Windows\\system32\\cmd.exe', SystemDrive: 'C:',
+    TEMP: 'C:\\Users\\customer\\AppData\\Local\\Temp', TMP: 'C:\\Users\\customer\\AppData\\Local\\Temp',
+    USERPROFILE: 'C:\\Users\\customer', APPDATA: 'C:\\Users\\customer\\AppData\\Roaming',
+    LOCALAPPDATA: 'C:\\Users\\customer\\AppData\\Local', ProgramFiles: 'C:\\Program Files',
+    'ProgramFiles(x86)': 'C:\\Program Files (x86)', ProgramW6432: 'C:\\Program Files', ProgramData: 'C:\\ProgramData',
+    CommonProgramFiles: 'C:\\Program Files\\Common Files', NUMBER_OF_PROCESSORS: '8', PROCESSOR_ARCHITECTURE: 'AMD64',
+    OS: 'Windows_NT', https_proxy: 'http://proxy.example.test:3128',
+    HOMEDRIVE: 'C:', HOMEPATH: '\\Users\\customer', USERNAME: 'customer', USERDOMAIN: 'DOMAIN',
+    COMPUTERNAME: 'HOST', PSModulePath: 'C:\\modules', npm_config_cache: 'C:\\npm-cache',
+    Dharma_Task_Worktree: 'C:\\forged', dharma_action_digest: 'forged-digest', DHARMA_ORG_API_TOKEN: 'synthetic-token',
+    ACCEPTANCE_PARENT_SENTINEL: 'synthetic-parent-sentinel',
+  };
+  const { https_proxy: _proxy, HOMEDRIVE: _drive, HOMEPATH: _homePath, USERNAME: _user, USERDOMAIN: _domain,
+    COMPUTERNAME: _computer, PSModulePath: _modules, npm_config_cache: _npm, Dharma_Task_Worktree: _worktree,
+    dharma_action_digest: _digest, DHARMA_ORG_API_TOKEN: _token, ACCEPTANCE_PARENT_SENTINEL: _sentinel,
+    ...essentials } = source;
+  const environment = acceptanceEnvironment({ source, platform: 'win32', cwd: 'C:\\work\\tree',
+    command: probeCommand(['HTTPS_PROXY']) });
+  assert.deepEqual(environment, { ...essentials, https_proxy: source.https_proxy, DHARMA_TASK_WORKTREE: 'C:\\work\\tree' });
+  assert.equal(Object.keys(environment).filter((name) => name.toUpperCase() === 'PATH').length, 1);
+  assert.equal(Object.keys(environment).filter((name) => name.toUpperCase().startsWith('DHARMA_')).length, 1);
+  assert.deepEqual(acceptanceEnvironment({ source: { PATH: 'C:\\Windows', SYSTEMROOT: 'C:\\Windows' }, platform: 'win32',
+    cwd: 'C:\\work', command: probeCommand(),
+    actionDecision: { externalIdempotencyKey: 'decision-id', actionDigest: SYNTHETIC_DIGEST } }), {
+    PATH: 'C:\\Windows', SYSTEMROOT: 'C:\\Windows', DHARMA_TASK_WORKTREE: 'C:\\work',
+    DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'decision-id', DHARMA_ACTION_DIGEST: SYNTHETIC_DIGEST,
+  });
+  for (const name of [...RUNNER_OWNED_NAMES, 'dharma_task_worktree', 'DHARMA_HOME']) {
+    for (const platform of ['win32', 'linux'] as const) {
+      assert.throws(() => acceptanceEnvironment({ source, platform, cwd: 'C:\\work', command: probeCommand([name]) }),
+        /environment/, `${platform} ${name}`);
+    }
+  }
+});
