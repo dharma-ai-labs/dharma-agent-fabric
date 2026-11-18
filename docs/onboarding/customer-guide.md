@@ -352,6 +352,44 @@ The pull request targets the agent's permanent branch, not `main` and not anothe
 
 The first approved release establishes the organization's auto-update policy. Later R0-R2 releases can advance automatically after every gate passes. R3-R4 releases always stop for an organization administrator.
 
+## Host requirements for registered commands
+
+Tasks that name registered commands (acceptance commands such as `repo.test`)
+run them only inside an operating-system sandbox. The relay host must be Linux
+or WSL2 with:
+
+- bubblewrap 0.6.0 or newer from the distribution, installed at
+  `/usr/bin/bwrap` (for example `sudo apt-get install bubblewrap`);
+- unprivileged user namespaces allowed for bubblewrap. Ubuntu 24.04 restricts
+  them by default through AppArmor; an administrator must allow them. WSL1 and
+  containers do not qualify;
+- tasks with network authority `deny`.
+
+macOS and native Windows relays refuse these tasks. Tasks without registered
+commands are unaffected on every host.
+
+A refused task ends with one `failed` event with
+`code: 'registered_commands_refused'` and a `reason`. The relay also writes a
+`registered_command_sandbox` line at start with the reason and the fix:
+
+| Reason | What to do |
+|---|---|
+| `platform_unsupported` | Run the relay on Linux or WSL2. |
+| `bubblewrap_missing` | Install bubblewrap from the distribution. |
+| `bubblewrap_too_old` | Install bubblewrap 0.6.0 or newer. |
+| `bubblewrap_untrusted` | Reinstall bubblewrap so `/usr/bin/bwrap` is root-owned, not setuid and changeable only by root. |
+| `user_namespaces_unavailable` | Allow unprivileged user namespaces for bubblewrap, use WSL2 rather than WSL1, and run the relay on the host rather than in a container. |
+| `sandbox_probe_failed` | Run the relay on a supported host; report the named check. |
+| `network_not_denied` | Give the task network authority `deny`. |
+
+Already-enrolled devices: after updating, install bubblewrap, allow user
+namespaces, then restart the relay. Commands inside the sandbox have no network
+and no Git, see only the worktree and system folders, and must find their
+dependencies already in the worktree; toolchains installed under the user's
+home, other than the relay's Node, are not visible. A command killed by a
+signal shows exit code `128 + signal number`, and cancellation is immediate.
+Skill smoke checks are operator commands and are outside the sandbox.
+
 ## 10. Security, privacy, and offboarding
 
 - complete raw local evidence remains in the encrypted local vault unless an organization administrator explicitly authorizes bounded content sync;
