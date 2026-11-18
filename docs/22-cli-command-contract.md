@@ -100,7 +100,25 @@ dharma evidence sync --file <capsule.json> --workspace-id <id> --policy <path> -
 dharma evidence run-request --policy <policy.json> --workspace-id <id> --json
 dharma evidence disclosures --workspace <id> --json
 dharma evidence export-local <trajectory-id> --output <path> --json
+dharma evidence capture-segments --workspace <path> --provider claude|codex --policy <path> [--lookback-hours <n> | --since <iso>] [--maximum-sessions <n>] [--idle-minutes <n>] [--maximum-upload-bytes <n>] [--sync] [--output <path>]
 ```
+
+`capture-segments` reads whole Claude Code or Codex session files, without the
+8 MiB window that `capture` uses, and splits each session into consecutive
+segment capsules. Each segment is a complete run of turns under the policy's
+`maximumCapsuleBytes`, with its own trajectory and the `sessionId`
+`<session pseudonym>:segment:<six-digit index>`. Without `--sync` it only plans:
+it reports the segments and writes nothing. With `--sync` it writes each segment
+to the local vault and the upload queue, records it in the local segment ledger,
+and sends it. A second run skips the segments in the ledger. The last segment of
+a session that is still being written waits for `--idle-minutes`. One run never
+sends more than `--maximum-upload-bytes` or the policy's daily limit.
+
+`dharma relay start --capture-sessions` runs the same segmented capture with
+`--sync` on a timer for every registered workspace. It is off unless that flag is
+given. `--capture-interval-minutes` (5 to 1440, default 15),
+`--capture-lookback-hours` (1 to 720, default 24) and `--capture-idle-minutes`
+(5 to 1440, default 30) are accepted only together with `--capture-sessions`.
 
 ## Tasks
 
