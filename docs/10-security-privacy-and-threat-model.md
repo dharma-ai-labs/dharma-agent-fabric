@@ -81,7 +81,7 @@ A task modifies the active developer workspace or external path.
 
 **Controls:** canonical path containment, OS sandbox where possible, worktree root enforcement, write interception, command policy, post-task diff audit.
 
-**Operator rule:** registered and acceptance commands run the workspace's own code as the operating-system user that runs the local relay. That code can read anything that user can read, including other repositories, files in the home directory, and credential files stored there; path checks after each command look at writes, not reads. Enrol only workspaces whose code you trust to run as your own operating-system user.
+**Operator rule:** registered and acceptance commands run the workspace's own code as the operating-system user that runs the local relay. That code can read and change anything that user can, including other repositories, files in the home directory, and credential files stored there. Acceptance commands receive only an explicit environment, but they can still read the relay process environment through the operating system, so tokens or API keys held there are not protected from them. After the provider step and after each acceptance command, the relay runs a write-scope check with Git inside the temporary task worktree. It lists changed tracked files and new files that Git does not ignore, and raises an error if one is outside the signed write paths. It does not see reads, writes outside the task worktree, or writes to files that Git ignores. Enrol only workspaces whose code you trust to run as your own operating-system user.
 
 ## Data classification
 

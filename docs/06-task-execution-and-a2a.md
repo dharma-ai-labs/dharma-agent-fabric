@@ -155,7 +155,7 @@ Registered acceptance commands run with an explicit environment: operating-syste
 
 ### Workspace code runs as your user
 
-Registered commands and acceptance commands, such as `npm test`, run the workspace's own scripts and tests as the operating-system user that runs the local relay. That code can read and change anything that user can, including other repositories, files in the home directory, and credential files stored there. Enrol only workspaces whose code you trust to run as your own operating-system user.
+Registered commands and acceptance commands, such as `npm test`, run the workspace's own scripts and tests as the operating-system user that runs the local relay. That code can read and change anything that user can, including other repositories, files in the home directory, and credential files stored there. Acceptance commands receive only the explicit environment described above, but they can still read the relay process environment through the operating system, so tokens or API keys held there are not protected from them. Enrol only workspaces whose code you trust to run as your own operating-system user.
 
 ## Network policy
 

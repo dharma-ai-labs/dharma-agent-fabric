@@ -20,6 +20,17 @@ in relay-owned Git worktrees using registered command IDs and canonical
 arguments under explicit path, network, Git, budget, and Skill-pin authority.
 It is not a general remote shell.
 
+## Enrol only trusted workspaces
+
+Registered commands and acceptance commands run the workspace's own scripts and
+tests as the operating-system user that runs the local relay. That code can read
+and change anything that user can, including other repositories, files in the
+home directory, and credential files stored there. Acceptance commands receive
+only the explicit environment described under "Acceptance command environment",
+but they can still read the relay process environment through the operating
+system, so tokens or API keys held there are not protected from them. Enrol only
+workspaces whose code you trust to run as your own operating-system user.
+
 ## Receipt-required tasks
 
 A signed task opts into action-time authorization with
@@ -174,14 +185,6 @@ The provider launch environment is unchanged. Skill smoke checks run only from
 explicit command environment: operating-system essentials and the names the
 command's policy entry lists under `environment.inherit`, built by
 `registeredCommandEnvironment`. They get no runner-owned names.
-
-## Enrol only trusted workspaces
-
-Registered commands and acceptance commands run the workspace's own scripts and
-tests as the operating-system user that runs the local relay. That code can read
-and change anything that user can, including other repositories, files in the
-home directory, and credential files stored there. Enrol only workspaces whose
-code you trust to run as your own operating-system user.
 
 - [Task execution boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/06-task-execution-and-a2a.md)
 - [Bidirectional protocol](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/05-bidirectional-protocol.md)
