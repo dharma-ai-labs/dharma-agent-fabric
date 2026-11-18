@@ -24,6 +24,21 @@
       "license": "MIT",
       "category": "development",
       "keywords": ["agent-fabric", "agent-orchestration", "shared-knowledge", "mcp"]
+    },
+    {
+      "name": "dharma-agent-fabric-preview",
+      "source": "./plugins/claude/dharma-agent-fabric-preview",
+      "description": "Preview add-on (prototype, HQ allowlist only): name a Claude Code session for Agent Fabric session messages and receive them, framed as untrusted text, at the next prompt. Install beside dharma-agent-fabric; it does not replace it.",
+      "version": "1.0.7-preview",
+      "author": {
+        "name": "Dharma AI Labs, Inc",
+        "email": "nikita@dharma-ai.io"
+      },
+      "homepage": "https://dharma-ai.io/",
+      "repository": "https://github.com/dharma-ai-labs/dharma-agent-fabric",
+      "license": "MIT",
+      "category": "development",
+      "keywords": ["agent-fabric", "session-messages", "preview"]
     }
   ]
 }
