@@ -366,6 +366,8 @@ async function runActualRelay(f: Awaited<ReturnType<typeof fixture>>, cycles: nu
     RepositorySourceWatcher: class { invalidate() {} },
     BlockedRepositorySourceRetry: class { consider() { return false; } },
     currentBootstrapHostScope,
+    // No explicit vault key in this fixture: the vault key comes from the fixture key store below.
+    credentialVariable: () => undefined,
     loadVaultModule: async () => ({ LocalVault: { open: async () => ({ close: () => { vaultCloses++; } }) },
       loadOrCreateVaultMasterKey: async (_store: unknown, scope: unknown) => {
         assert.equal(scope, undefined, 'ordinary relay does not acquire host setup authority');

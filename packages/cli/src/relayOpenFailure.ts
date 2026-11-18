@@ -49,6 +49,9 @@ export function relayOpenFailureCode(error: unknown): RelayOpenFailureCode | und
 const WINDOWS_CREDENTIALS_REMEDY = 'Device credentials cannot be read. If the Windows password was reset by an administrator, '
   + 'restore the previous password or re-enroll this device.';
 
+const LOCK_RECONCILIATION_REMEDY ='A device lock needs owner-scoped reconciliation. Stop the Dharma relay and have the device owner '
+  + 'inspect the dharma-signing-controls-* or dharma-enrollment-locks-* lock, or contact support.';
+
 /** One line for `dharma status`; undefined for any code without a known next step. */
 export function relayOpenFailureRemedy(code: unknown, platform: NodeJS.Platform = process.platform): string | undefined {
   switch (code) {
@@ -62,6 +65,11 @@ export function relayOpenFailureRemedy(code: unknown, platform: NodeJS.Platform 
       return 'Device enrollment trust cannot be verified. Run dharma login to re-authenticate this device.';
     case 'connection_anchor_lock_unavailable':
       return 'The device enrollment lock cannot be checked. Close other Dharma relays for this user; the relay retries on its own.';
+    // An ownerless primary lock is quarantined on its own (#417). These stops are a lock that is not a regular file, a lock
+    // folder that is not private, or an abandoned recovery mutex: the relay never reclaims them, so this asks for the owner
+    // and grants no destructive step.
+    case 'connection_anchor_lock_invalid':
+    case 'connection_anchor_recovery_required': return LOCK_RECONCILIATION_REMEDY;
     default: return undefined;
   }
 }
@@ -73,6 +81,8 @@ const BACKEND_PLATFORM: Record<SecureSecretStore['backend'], NodeJS.Platform> = 
 export async function relayOpenFailureRemedyForHost(code: unknown,
   openStore: () => Promise<Pick<SecureSecretStore, 'backend'>> = createSystemSecureStore): Promise<string | undefined> {
   if (relayOpenFailureRemedy(code) === undefined) return undefined;
+  // The lock remedy is the same on every platform, so it never needs the credential store.
+  if (code === 'connection_anchor_lock_invalid' || code === 'connection_anchor_recovery_required') return LOCK_RECONCILIATION_REMEDY;
   const platform = await openStore().then(store => BACKEND_PLATFORM[store.backend] ?? process.platform, () => process.platform);
   return relayOpenFailureRemedy(code, platform);
 }

@@ -211,8 +211,11 @@ test('status says failing while a running relay fails every session open', async
     JSON.stringify({at: pollAt, workspaceId: f.workspaceId, version}));
   assert.equal((await f.reconnect()).state, 'acknowledged_recently');
   await f.writeReceipt(f.receipt);
+  // #484: the code alone left the device offline with no next step.
+  const remedy = 'A device lock needs owner-scoped reconciliation. Stop the Dharma relay and have the device owner '
+    + 'inspect the dharma-signing-controls-* or dharma-enrollment-locks-* lock, or contact support.';
   assert.deepEqual(await f.reconnect(), {state: 'failing', lastSuccessfulPollAt: pollAt, lastFailure: {
-    code: 'connection_anchor_lock_invalid', at: f.at, stage: 'session_open', category: 'unexpected'}});
+    code: 'connection_anchor_lock_invalid', at: f.at, stage: 'session_open', category: 'unexpected', remedy}});
 });
 
 test('status gives a one-line remedy when the relay cannot open its device identity', async t => {
