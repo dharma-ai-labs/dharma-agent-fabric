@@ -142,11 +142,12 @@ operating-system sandbox, so it can read the relay user's files and can read
 the relay process environment through the operating system's process
 inspection interfaces.
 
-Relay-internal Git calls, including the write-scope checks after each command,
-run with the same operating-system essentials and with `core.fsmonitor`
-disabled. A Git configuration change made by the provider or a command
-therefore does not start a monitor hook, and helper programs that Git starts do
-not receive other relay variables.
+Relay-internal Git calls, including the write-path check that runs once after
+the provider, run with the same operating-system essentials and with
+`core.fsmonitor` disabled. In this release line the write-path check does not
+run again after each acceptance command. A Git configuration change made by
+the provider or a command therefore does not start a monitor hook, and helper
+programs that Git starts do not receive other relay variables.
 
 The provider launch environment is unchanged. Skill smoke checks run only from
 `dharma skills sync --smoke-command`, never from the relay itself. They use the
