@@ -1,6 +1,6 @@
 {
   "name": "dharma-agent-fabric",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Connect Claude Code to your Dharma Agent Fabric organization. Read your agents, devices, tasks, evidence, evaluations and signed skills, and, with your confirmation, dispatch tasks, run analyses and, as an admin, manage signed skill rollouts.",
   "author": {
     "name": "Dharma AI Labs, Inc",

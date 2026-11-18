@@ -38,7 +38,7 @@ Manual publication checks require a nonzero immutable `GITHUB_SHA` matching the
 checkout; this validates that selected payload, not its change since a prior release.
 PR and push checks retain their separate base/before content-version comparison.
 
-This source candidate is Claude/Grok `1.0.7`; Codex remains `0.1.0`. A later change
+This source candidate is Claude/Grok `1.0.8`; Codex remains `0.1.0`. A later change
 to shared content requires each affected route's own version increment, not
 synchronized version numbers. A source change does not alter a previously
 reviewed or submitted bundle. Publisher review, strict client validation,
