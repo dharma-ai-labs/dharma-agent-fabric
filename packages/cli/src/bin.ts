@@ -50,6 +50,8 @@ if (args.includes('--help') || args.includes('-h')) {
   run(args).then((value: unknown) => {
     process.stdout.write(formatCommandOutput(value));
     process.exitCode = commandExitCode(args, value);
+    // A hook ends once its output is written: a pending relay socket (up to 90 s) must not keep it alive.
+    if (args[0] === 'hook') process.stdout.write('', () => process.exit());
   }).catch((error: unknown) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 2;
