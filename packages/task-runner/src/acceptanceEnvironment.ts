@@ -78,6 +78,25 @@ export function relayGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.
   return operatingSystemEssentials(source, platform);
 }
 
+export interface RegisteredCommandEnvironmentInput {
+  /** The environment that values are read from. */
+  source: NodeJS.ProcessEnv;
+  platform: NodeJS.Platform;
+  /** The registered command, as resolved from the approved command policy. */
+  command: object;
+  commandId?: string;
+}
+
+/**
+ * Builds the environment for a registered command that runs outside a task, such as a
+ * skill smoke check: operating-system essentials and the names the command's approved
+ * policy entry lists. It adds no runner-owned names.
+ */
+export function registeredCommandEnvironment(input: RegisteredCommandEnvironmentInput): Record<string, string> {
+  const policy = acceptanceCommandEnvironmentPolicy(input.command, input.commandId ?? 'registered command');
+  return operatingSystemEssentials(input.source, input.platform, policy?.inherit);
+}
+
 export interface AcceptanceCommandEnvironmentInput {
   /** The relay process environment that values are read from. */
   source: NodeJS.ProcessEnv;
@@ -97,8 +116,8 @@ export interface AcceptanceCommandEnvironmentInput {
  * names. Nothing else from the relay environment is passed.
  */
 export function acceptanceCommandEnvironment(input: AcceptanceCommandEnvironmentInput): Record<string, string> {
-  const policy = acceptanceCommandEnvironmentPolicy(input.command, input.commandId ?? 'acceptance command');
-  const environment = operatingSystemEssentials(input.source, input.platform, policy?.inherit);
+  const environment = registeredCommandEnvironment({ source: input.source, platform: input.platform,
+    command: input.command, commandId: input.commandId ?? 'acceptance command' });
   environment.DHARMA_TASK_WORKTREE = input.cwd;
   if (input.actionDecision) {
     environment.DHARMA_EXTERNAL_IDEMPOTENCY_KEY = input.actionDecision.externalIdempotencyKey;

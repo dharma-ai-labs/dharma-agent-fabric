@@ -13,6 +13,7 @@ async function caller(overrides:Record<string,unknown>={}){
   const calls:string[]=[],identity={organizationId:'org_fixture',deviceId:'device',workspaceId:'workspace',repositoryBindingId:'binding',endpointId:'endpoint'};
   let held=false,enabled=false;
   const deps:Record<string,unknown>={process:{platform:'linux',execPath:'/fixture/node',env:{},once:()=>{},removeListener:()=>{}},
+    relayChildEnvironment:()=>({}),
     namedSessionReadinessDiagnosticRequested:()=>false,currentBootstrapHostScope:()=>undefined,
     currentAcceptedSetupSessionScope:()=>undefined,currentNamedSessionChildOwner:()=>undefined,
     dharmaHome:()=>'/fixture/home',required:(flags:Map<string,unknown>,name:string)=>flags.get(name),resolve,

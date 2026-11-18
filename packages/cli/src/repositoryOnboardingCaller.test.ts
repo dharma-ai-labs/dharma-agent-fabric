@@ -60,6 +60,8 @@ function bootstrapDependencies(onboarding: Onboarding) {
     assertRelayStartupOwnership: async () => record('startup_preflight'),
     configPath: () => '/fixture-config/device.json',
     process: { platform: 'linux', env: { USER: 'fixture' }, stderr: { write: () => true } },
+    // The caller reads the token through the captured credential environment; here it is the fixture process env.
+    credentialVariable: (name: string) => (dependencies.process as { env: Record<string, string | undefined> }).env[name],
     platform: async () => 'linux',
     loadOrCreateInstallationId: async () => '11111111-1111-4111-8111-111111111111',
     loadOrCreateDeviceIdentity: async () => ({ publicKeyEd25519: 'fixture_public_key' }),

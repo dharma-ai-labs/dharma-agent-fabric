@@ -39,6 +39,22 @@ credentials. Reconcile the existing owner's identity and work before using its
 supported recovery process. Socket or health-file presence alone is not proof
 of a working session.
 
+## Credential variables
+
+The CLI reads `DHARMA_ORG_API_TOKEN`, `DHARMA_VAULT_KEY` and
+`DHARMA_ALLOW_ENV_KEY` once when it starts, keeps them in memory and removes
+them from its process environment. Child processes that inherit the
+environment (Git, npm, provider CLIs, registered commands, secure-store helpers)
+do not see them. Relay processes that the CLI starts (`relay supervise`,
+`relay start`, `sessions serve`) get an environment built for that start: the
+explicit vault key pair when `DHARMA_ALLOW_ENV_KEY=1` is set, and never the
+organization token. Organization commands still accept the token from the
+environment, and the explicit vault key still works in every relay process.
+
+This keeps the variables out of Dharma's child processes. It does not remove
+them from the shell, service manager or other parent that started the CLI, and
+on Linux it does not rewrite the environment block a process was started with.
+
 ## Legacy private user entry for a setup grant
 
 Use `dharma bootstrap --grant-prompt` with the portal's exact grant-free setup
