@@ -93,7 +93,10 @@ lookup) with:
   read-only; the root is remounted read-only after all mounts.
 
 Nothing else from the host is visible: not the relay user's home, the Dharma
-home, `/run`, `/var`, `/mnt` or other processes. The command environment is the
+home, `/opt`, the rest of `/etc`, `/run`, `/var`, `/mnt` or other processes.
+Toolchains installed under `/opt` or the home, and distribution packages that
+keep part of their files under `/etc` (for example OpenJDK), do not work inside
+the sandbox; such a command fails with a non-zero exit code, not a refusal. The command environment is the
 explicit acceptance-command environment below, with `HOME`, `TMPDIR`,
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` pointing at the sandbox's own folders and
 the relay Node's `bin` folder first on `PATH`. It is passed as the process

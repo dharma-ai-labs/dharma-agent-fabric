@@ -361,8 +361,9 @@ or WSL2 with:
 - bubblewrap 0.6.0 or newer from the distribution, installed at
   `/usr/bin/bwrap` (for example `sudo apt-get install bubblewrap`);
 - unprivileged user namespaces allowed for bubblewrap. Ubuntu 24.04 restricts
-  them by default through AppArmor; an administrator must allow them. WSL1 and
-  containers do not qualify;
+  them through AppArmor by default; if the relay reports
+  `user_namespaces_unavailable`, an administrator must allow them for
+  bubblewrap. WSL1 and containers do not qualify;
 - tasks with network authority `deny`.
 
 macOS and native Windows relays refuse these tasks. Tasks without registered
@@ -382,12 +383,20 @@ A refused task ends with one `failed` event with
 | `sandbox_probe_failed` | Run the relay on a supported host; report the named check. |
 | `network_not_denied` | Give the task network authority `deny`. |
 
-Already-enrolled devices: after updating, install bubblewrap, allow user
-namespaces, then restart the relay. Commands inside the sandbox have no network
-and no Git, see only the worktree and system folders, and must find their
-dependencies already in the worktree; toolchains installed under the user's
-home, other than the relay's Node, are not visible. A command killed by a
-signal shows exit code `128 + signal number`, and cancellation is immediate.
+Already-enrolled devices: after updating, install bubblewrap and restart the
+relay. Change user-namespace settings only if the start line then reports
+`user_namespaces_unavailable`, and then only for bubblewrap.
+
+Commands inside the sandbox have no network and no Git and must find their
+dependencies already in the worktree. They see only the worktree, `/usr`, the
+`/bin`-style folders, a few named `/etc` files and the relay's Node binary and
+npm. Not visible: toolchains under the user's home or under `/opt` (other than
+the relay's Node), and distribution packages that keep part of their files
+under `/etc`, such as OpenJDK. A command that needs one of these fails as an
+ordinary acceptance command, with a non-zero exit code and the tool's or
+bubblewrap's error on standard error; it is not a sandbox refusal. A command
+killed by a signal shows exit code `128 + signal number`, and cancellation is
+immediate.
 Skill smoke checks are operator commands and are outside the sandbox.
 
 ## 10. Security, privacy, and offboarding
