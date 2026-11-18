@@ -1,7 +1,8 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
-import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { KeyObject } from 'node:crypto';
 import {
@@ -32,6 +33,42 @@ import {
   acceptanceCommandEnvironmentPolicy,
   relayGitEnvironment,
 } from './acceptanceEnvironment.js';
+import {
+  parseSandboxStatus,
+  probeRegisteredCommandSandbox,
+  registeredCommandAdmission,
+  RegisteredCommandSandboxFailedError,
+  sandboxCommandEnvironment,
+  sandboxCommandLine,
+  taskNamesRegisteredCommands,
+  type ProbeDependencies,
+  type RegisteredCommandSandbox,
+  type SandboxRefusalReason,
+  type UsableSandbox,
+} from './registeredCommandSandbox.js';
+
+export {
+  PROBE_CHECKS,
+  SANDBOX_FIX,
+  SANDBOX_HOME,
+  SANDBOX_POLICY_VERSION,
+  parseSandboxStatus,
+  probeRegisteredCommandSandbox,
+  registeredCommandAdmission,
+  RegisteredCommandSandboxFailedError,
+  registeredCommandSandboxLogLine,
+  sandboxCommandEnvironment,
+  sandboxCommandLine,
+  taskNamesRegisteredCommands,
+  type HostLayout,
+  type HostLayoutEntry,
+  type ProbeDependencies,
+  type RefusedSandbox,
+  type RegisteredCommandSandbox,
+  type SandboxedRun,
+  type SandboxRefusalReason,
+  type UsableSandbox,
+} from './registeredCommandSandbox.js';
 
 export {
   acceptanceCommandEnvironment,
@@ -227,28 +264,18 @@ export class ActionDecisionDeniedError extends Error {
 export const REGISTERED_COMMANDS_REFUSED = 'registered_commands_refused';
 
 /**
- * Registered commands (acceptance commands, and for Claude tasks the same commands
- * offered as Bash tools) would run as the relay's operating-system user without a
- * sandbox. Until command isolation exists, the runner refuses every task that names
- * one, before any worktree, provider process or command starts. There is no opt-in.
+ * Registered commands run only inside an operating-system sandbox. The runner refuses a task
+ * that names one, before any worktree, provider process or command starts, unless the relay
+ * passed a usable sandbox and the task's network is `deny`. `reason` says which condition
+ * failed. There is no opt-in.
  */
 export class RegisteredCommandsRefusedError extends Error {
   readonly code = REGISTERED_COMMANDS_REFUSED;
 
-  constructor() {
-    super('Task names registered commands, which this relay refuses to run until command isolation exists. '
-      + 'Remove authority.commands and acceptance.commands from the task.');
+  constructor(readonly reason: SandboxRefusalReason = 'sandbox_probe_failed') {
+    super(`Task names registered commands, which this relay runs only with command isolation in an operating-system sandbox (${reason}).`);
     this.name = 'RegisteredCommandsRefusedError';
   }
-}
-
-/**
- * True when a task names registered commands: a non-empty `authority.commands` or
- * `acceptance.commands`. The relay checks this at preflight and `executeTask()` checks
- * it again, so both refuse the same tasks.
- */
-export function taskNamesRegisteredCommands(task: Pick<TaskEnvelope, 'authority' | 'acceptance'>) {
-  return task.authority.commands.length > 0 || task.acceptance.commands.length > 0;
 }
 
 function normalizePolicyPath(value: string) {
@@ -407,16 +434,39 @@ async function runProcess(command: string, argv: string[], options: {
   requireCompleteOutput?: boolean;
   /** The complete child environment. When omitted, the child inherits the relay environment. */
   childEnvironment?: Record<string, string>;
+  /**
+   * Runs the command inside this sandbox: bubblewrap starts it with the sandbox environment and
+   * reports its child on descriptor 3. If no child is reported, the call rejects with
+   * `RegisteredCommandSandboxFailedError` and nothing runs on the host.
+   */
+  sandbox?: { sandbox: UsableSandbox; worktree: string };
 }): Promise<Omit<CommandResult, 'commandId'>> {
   return new Promise((accept, reject) => {
-    const child = spawn(command, argv, {
-      cwd: options.cwd,
-      env: options.childEnvironment ?? { ...process.env, DHARMA_TASK_WORKTREE: options.cwd },
-      shell: false,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-    });
+    const sandbox = options.sandbox;
+    const child = sandbox
+      ? spawn(sandbox.sandbox.bwrapPath, sandboxCommandLine(sandbox.sandbox, { worktree: sandbox.worktree, cwd: options.cwd,
+        argv: [command, ...argv] }), {
+        cwd: sandbox.worktree,
+        env: sandboxCommandEnvironment(options.childEnvironment ?? {}, sandbox.sandbox),
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      })
+      : spawn(command, argv, {
+        cwd: options.cwd,
+        env: options.childEnvironment ?? { ...process.env, DHARMA_TASK_WORKTREE: options.cwd },
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      });
+    const status: Buffer[] = [];
+    if (sandbox) {
+      const statusStream = child.stdio[3] as NodeJS.ReadableStream | null | undefined;
+      statusStream?.on('data', (chunk: Buffer) => { if (status.length < 64) status.push(chunk); });
+      statusStream?.on('error', () => undefined);
+    }
     const outputLimit = options.maximumOutputBytes ?? 1_000_000;
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -429,8 +479,8 @@ async function runProcess(command: string, argv: string[], options: {
       if (kind === 'stdout') stdoutBytes += chunk.length;
       else stderrBytes += chunk.length;
     };
-    child.stdout.on('data', (chunk: Buffer) => collect(stdout, chunk, 'stdout'));
-    child.stderr.on('data', (chunk: Buffer) => collect(stderr, chunk, 'stderr'));
+    child.stdout!.on('data', (chunk: Buffer) => collect(stdout, chunk, 'stdout'));
+    child.stderr!.on('data', (chunk: Buffer) => collect(stderr, chunk, 'stderr'));
     let escalation: NodeJS.Timeout | undefined;
     const cancel = () => {
       terminateProcessTree(child, false);
@@ -450,9 +500,20 @@ async function runProcess(command: string, argv: string[], options: {
         reject(new Error('Process output exceeds the supported limit.'));
         return;
       }
+      let exitCode = code;
+      let exitSignal = signal;
+      if (sandbox) {
+        const reported = parseSandboxStatus(Buffer.concat(status).toString('utf8'));
+        if (reported.childPid === null && !timedOut && !options.signal?.aborted) {
+          const firstLine = stderrBuffer.toString('utf8').split('\n').find(line => line.trim()) ?? '';
+          reject(new RegisteredCommandSandboxFailedError(firstLine.slice(0, 200)));
+          return;
+        }
+        if (reported.exitCode !== null) { exitCode = reported.exitCode; exitSignal = null; }
+      }
       accept({
-        exitCode: code,
-        signal,
+        exitCode,
+        signal: exitSignal,
         timedOut,
         stdoutSha256: `sha256:${createHash('sha256').update(stdoutBuffer).digest('hex')}`,
         stderrSha256: `sha256:${createHash('sha256').update(stderrBuffer).digest('hex')}`,
@@ -463,9 +524,31 @@ async function runProcess(command: string, argv: string[], options: {
   });
 }
 
+/**
+ * Repository paths read right after `git worktree add`, before the provider or any command ran.
+ * Relay Git after a sandboxed command uses these instead of the worktree's `.git` pointer file.
+ */
+interface PinnedRepository { worktree: string; gitDir: string; pointer: Buffer }
+
+async function pinRepository(worktree: string): Promise<PinnedRepository> {
+  const pointer = await readFile(resolve(worktree, '.git'));
+  const match = /^gitdir: (.+?)\r?\n?$/.exec(pointer.toString('utf8'));
+  if (!match) throw new Error('Task worktree Git pointer is not a gitdir file.');
+  return { worktree, gitDir: resolve(worktree, match[1]!), pointer };
+}
+
 // Relay-internal Git runs with operating-system essentials only and with the file-system monitor
 // hook disabled, because a provider or acceptance command can change the repository configuration.
-function relayGit(repository: string, argv: string[], requireCompleteOutput?: boolean) {
+// After a sandboxed command it also uses the pinned repository paths, checks that the pointer file
+// is unchanged, and turns off external diff and text-conversion drivers.
+async function relayGit(repository: string, argv: string[], requireCompleteOutput?: boolean, pinned?: PinnedRepository) {
+  if (pinned) {
+    const current = await readFile(resolve(pinned.worktree, '.git')).catch(() => Buffer.alloc(0));
+    if (!current.equals(pinned.pointer)) throw new Error('Task worktree Git pointer changed during a registered command.');
+    const [subcommand, ...rest] = argv;
+    argv = [`--git-dir=${pinned.gitDir}`, `--work-tree=${pinned.worktree}`, subcommand!,
+      ...(subcommand === 'diff' ? ['--no-ext-diff', '--no-textconv'] : []), ...rest];
+  }
   return runProcess('git', ['-c', 'core.fsmonitor=false', ...argv], {
     cwd: repository,
     timeoutMs: 30_000,
@@ -479,18 +562,18 @@ async function git(repository: string, argv: string[]): Promise<void> {
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
 }
 
-async function gitOutput(repository: string, argv: string[]) {
-  const result = await relayGit(repository, argv, true);
+async function gitOutput(repository: string, argv: string[], pinned?: PinnedRepository) {
+  const result = await relayGit(repository, argv, true, pinned);
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
   return result.stdout;
 }
 
 async function assertTaskWriteScope(worktree: string, startingCommit: string, writePaths: string[],
-  actor: 'Provider' | 'Acceptance command'): Promise<void> {
+  actor: 'Provider' | 'Acceptance command', pinned?: PinnedRepository): Promise<void> {
   const trackedChanges = await gitOutput(worktree, [
     'diff', '--name-only', '-z', '--diff-filter=ACDMRTUXB', startingCommit, '--',
-  ]);
-  const untrackedChanges = await gitOutput(worktree, ['ls-files', '-z', '--others', '--exclude-standard']);
+  ], pinned);
+  const untrackedChanges = await gitOutput(worktree, ['ls-files', '-z', '--others', '--exclude-standard'], pinned);
   if ((trackedChanges && !trackedChanges.endsWith('\0')) || (untrackedChanges && !untrackedChanges.endsWith('\0'))) {
     throw new Error('Git path output was incomplete.');
   }
@@ -1088,6 +1171,45 @@ function interruptedActionReceipt(record: ActionExecutionJournalRecord, now: Dat
   };
 }
 
+/**
+ * Probes this host's sandbox for registered commands. The relay calls it before every task that
+ * names registered commands and passes the result to `executeTask()`.
+ */
+export function detectRegisteredCommandSandbox(options: { relayStateDirectory: string } & Partial<ProbeDependencies>) {
+  return probeRegisteredCommandSandbox({
+    platform: process.platform,
+    execPath: process.execPath,
+    homedir,
+    relayPid: process.pid,
+    lstat: path => lstat(path),
+    readlink: path => readlink(path),
+    realpath: path => realpath(path),
+    readFile: path => readFile(path),
+    execFile: (file, args, execOptions) => new Promise((accept, reject) => {
+      execFile(file, args, { ...execOptions, shell: false, windowsHide: true }, (error, stdout, stderr) => {
+        if (error) reject(error);
+        else accept({ stdout: String(stdout), stderr: String(stderr) });
+      });
+    }),
+    runSandboxed: async (sandbox, run) => {
+      const [command, ...argv] = run.argv;
+      try {
+        const result = await runProcess(command!, argv, { cwd: run.cwd, timeoutMs: run.timeoutMs,
+          childEnvironment: run.env, maximumOutputBytes: 64_000, sandbox: { sandbox, worktree: run.worktree } });
+        return { started: true, exitCode: result.exitCode, timedOut: result.timedOut, stdout: result.stdout, stderr: result.stderr };
+      } catch (error) {
+        if (error instanceof RegisteredCommandSandboxFailedError) {
+          return { started: false, exitCode: null, timedOut: false, stdout: '', stderr: error.stderrFirstLine };
+        }
+        throw error;
+      }
+    },
+    commandEnvironment: (source, cwd) => acceptanceCommandEnvironment({ source, platform: process.platform, cwd,
+      command: { argv: ['node'], timeoutSeconds: 10 }, commandId: 'sandbox.probe' }),
+    ...options,
+  });
+}
+
 export async function executeTask(input: {
   task: TaskEnvelope;
   policy: OrganizationPolicy;
@@ -1103,6 +1225,11 @@ export async function executeTask(input: {
   requiredSkillFiles?: Array<{ skillId: string; path: string }>;
   actionDecisions?: ActionDecisionReceiver;
   actionExecutionJournal?: FileActionExecutionJournal;
+  /**
+   * The sandbox the relay probed for this task. Required, and usable, for any task that names
+   * registered commands; such a task is refused without it.
+   */
+  registeredCommandSandbox?: RegisteredCommandSandbox;
 }): Promise<TaskReceipt> {
   verifyTaskEnvelope(input.task, input.serverPublicKey, new Date(), input.serverPublicKeyResolver);
   const providerQualification = input.providerQualification === undefined ? undefined
@@ -1117,7 +1244,10 @@ export async function executeTask(input: {
   if (input.task.organizationId !== input.policy.organizationId) throw new Error('Task organization does not match policy.');
   const previous = await input.receiptStore.get(input.task.taskId);
   if (previous) return previous;
-  if (taskNamesRegisteredCommands(input.task)) throw new RegisteredCommandsRefusedError();
+  const admission = registeredCommandAdmission(input.task, input.registeredCommandSandbox);
+  if (!admission.admitted) throw new RegisteredCommandsRefusedError(admission.reason);
+  const commandSandbox = taskNamesRegisteredCommands(input.task) && input.registeredCommandSandbox?.usable
+    ? input.registeredCommandSandbox : null;
   if (input.task.execution.isolation !== 'git_worktree') throw new Error('Only Git worktree isolation is supported.');
   if (input.task.authority.git !== 'task_branch') throw new Error('Pilot tasks require task_branch Git authority.');
   assertTaskWithinLocalPolicy(input.task, input.policy);
@@ -1233,6 +1363,7 @@ export async function executeTask(input: {
       await mkdir(worktreeRoot, { recursive: true, mode: 0o700 });
       await rm(worktree, { recursive: true, force: true });
       await git(input.workspace, ['worktree', 'add', '--detach', worktree, 'HEAD']);
+      const pinnedRepository = commandSandbox ? await pinRepository(worktree) : undefined;
       await git(worktree, ['switch', '-c', branch]);
       const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'])).trim();
     const assertArtifactCurrent = () => {
@@ -1243,7 +1374,9 @@ export async function executeTask(input: {
     const readOnlyPaths = new Set(readOnlyArtifacts);
     const readOnlyFingerprints = await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, { paths: readOnlyPaths });
     const artifactIntegrity = { paths: readOnlyPaths, expected: readOnlyFingerprints };
-    const allowedCommands = input.task.authority.commands.map(({ commandId }) => resolveRegisteredCommand(input.policy, commandId).argv);
+    // Every named command must resolve in the policy loaded before the provider. The provider
+    // gets none of them as tools: registered commands run only in the sandboxed acceptance loop.
+    for (const { commandId } of input.task.authority.commands) resolveRegisteredCommand(input.policy, commandId);
     for (const { commandId } of input.task.acceptance.commands) {
       acceptanceCommandEnvironmentPolicy(resolveRegisteredCommand(input.policy, commandId), commandId);
     }
@@ -1272,7 +1405,7 @@ export async function executeTask(input: {
       workspace: worktree,
       instructions: providerInstructions,
       timeoutSeconds: providerTimeBudgetSeconds,
-      allowedCommandArgv: allowedCommands,
+      allowedCommandArgv: [] as string[][],
       allowWrites: input.task.authority.writePaths.length > 0,
       ...(skillFileInstructions ? { requiredSkillPaths: (input.requiredSkillFiles ?? []).map(({ path }) => path) } : {}),
       ...(knowledgeDirectory && input.verifiedRepositoryKnowledge && input.task.target.provider === 'codex' ? {
@@ -1332,6 +1465,7 @@ export async function executeTask(input: {
       if (acceptanceTimeBudgetMs <= 0) throw new Error('Task expired before acceptance verification.');
       const result = await runProcess(executable!, argv, {
         cwd,
+        ...(commandSandbox ? { sandbox: { sandbox: commandSandbox, worktree } } : {}),
         timeoutMs: Math.min(
           command.timeoutSeconds * 1_000,
           input.task.execution.timeoutSeconds * 1_000,
@@ -1355,7 +1489,8 @@ export async function executeTask(input: {
       if (remainingTaskMs() <= 0) throw new Error('Task expired during acceptance verification.');
       commandResults.push({ commandId, ...result });
       await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, artifactIntegrity);
-      await assertTaskWriteScope(worktree, startingCommit, input.task.authority.writePaths, 'Acceptance command');
+      await assertTaskWriteScope(worktree, startingCommit, input.task.authority.writePaths, 'Acceptance command',
+        pinnedRepository);
       assertArtifactCurrent();
       if (receiptRequired && commandId === input.task.acceptance.externalEffectReceiptCommandId
         && decisionReceipt) {
