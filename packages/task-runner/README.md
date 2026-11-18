@@ -175,6 +175,14 @@ explicit command environment: operating-system essentials and the names the
 command's policy entry lists under `environment.inherit`, built by
 `registeredCommandEnvironment`. They get no runner-owned names.
 
+## Enrol only trusted workspaces
+
+Registered commands and acceptance commands run the workspace's own scripts and
+tests as the operating-system user that runs the local relay. That code can read
+and change anything that user can, including other repositories, files in the
+home directory, and credential files stored there. Enrol only workspaces whose
+code you trust to run as your own operating-system user.
+
 - [Task execution boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/06-task-execution-and-a2a.md)
 - [Bidirectional protocol](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/05-bidirectional-protocol.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/task-runner)
