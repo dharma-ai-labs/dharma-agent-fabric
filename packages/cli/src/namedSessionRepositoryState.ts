@@ -3,7 +3,7 @@ import type { CodexLocalWorkCapture } from '@dharma-ai-labs/agent-fabric-provide
 import { serializeRepositoryPackageSnapshot, type RepositoryPackageSnapshot } from './repositoryPackage.js';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import type { NamedSessionTaskExportResult } from './namedSessionTaskExport.js';
-import { stageNamedSessionTaskExport } from './namedSessionTaskExportSync.js';
+import { CODEX_TASK_EXPORT_UPLOAD_ENABLED, stageNamedSessionTaskExport } from './namedSessionTaskExportSync.js';
 
 export interface NamedSessionRepositoryState {
   schema: 'dharma.named-session-repository-state/v1';
@@ -39,6 +39,8 @@ export async function retainNamedSessionRepositoryState(input: {
   activeBundleId: string;
   activeBundleHash: string;
   taskExport?: { policy: OrganizationPolicy; contextBytes: Uint8Array; contextHash: string };
+  /** Issue #467: while the upload is off nothing is staged, so the vault holds no export that can never be sent. */
+  taskExportUploadEnabled?: boolean;
 }): Promise<NamedSessionRepositoryState> {
   const { binding, capture, before, after } = input;
   for (const key of ['organizationId', 'repositoryBindingId', 'workspaceId', 'deviceId',
@@ -65,7 +67,7 @@ export async function retainNamedSessionRepositoryState(input: {
   const resultBytes = serializeRepositoryPackageSnapshot(after);
   let portableExport: NamedSessionRepositoryState['portableExport'];
   let exportOutbox: NamedSessionRepositoryState['exportOutbox'];
-  if (input.taskExport) {
+  if (input.taskExport && (input.taskExportUploadEnabled ?? CODEX_TASK_EXPORT_UPLOAD_ENABLED)) {
     const staged = await stageNamedSessionTaskExport(input.vault, { capture, binding, ...input.taskExport });
     const exported = staged.exported;
     if (exported.state === 'ready') {

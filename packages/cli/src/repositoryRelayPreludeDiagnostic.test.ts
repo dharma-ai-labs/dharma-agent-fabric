@@ -32,7 +32,8 @@ for (const stage of ['session_open', 'vault_open']) {
 }
 
 const lockCodes = ['connection_anchor_lock_invalid', 'connection_anchor_busy', 'connection_anchor_recovery_required',
-  'connection_anchor_lock_unavailable', 'connection_anchor_lock_cleanup_unconfirmed', 'device_signing_control_unavailable'];
+  'connection_anchor_lock_unavailable', 'connection_anchor_lock_cleanup_unconfirmed', 'device_signing_control_unavailable',
+  'connection_anchor_lock_flush_failed'];
 
 async function observedFailure(error: Error) {
   const controller = new AbortController(), events: unknown[] = [];
