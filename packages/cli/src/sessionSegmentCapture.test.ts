@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFile, mkdir, mkdtemp, realpath, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import test from 'node:test';
@@ -508,6 +508,18 @@ test('in content mode the relay timer captures only sessions a person listed aft
   assert.equal(relaySessionCaptureBlocked(listed, content), null);
   assert.throws(() => relaySessionCaptureSettings(new Map([['capture-session-ids-file', 'previewed-sessions.json']]), available),
     /relay_session_capture_setting_invalid/, 'the allowlist without the opt-in flag is refused');
+});
+
+test('the docs say segment upload waits for HQ and the capture timer belongs to a foreground relay start', async () => {
+  const read = async (name: string) => (await readFile(new URL(`../../../docs/${name}`, import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
+  const contract = await read('22-cli-command-contract.md');
+  const guide = await read('onboarding/customer-guide.md');
+  for (const [name, text] of [['contract', contract], ['guide', guide]] as const) {
+    assert.match(text, /session_segment_upload_unavailable/, name);
+  }
+  assert.match(contract, /only to a foreground `dharma relay start`/);
+  assert.match(contract, /--capture-session-ids-file/);
+  assert.doesNotMatch(guide, /relay start [^\n]*--capture-sessions/, 'the guide does not offer a timer that is refused');
 });
 
 test('relay session capture is off unless explicitly enabled and its timer is bounded', () => {
