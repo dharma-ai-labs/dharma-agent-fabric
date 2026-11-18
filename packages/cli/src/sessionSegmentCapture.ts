@@ -56,7 +56,7 @@ export interface SessionSegmentCaptureReport {
   stoppedReason: string | null;
   sessions: Array<{
     sessionId: string; segmentsCommitted: number; segmentsSkipped: number; segmentsPlanned: number;
-    held: boolean; stoppedReason: string | null;
+    held: boolean; stoppedReason: string | null; failure: string | null;
   }>;
   segments: Array<{
     sessionId: string; trajectoryId: string; index: number; capsuleHash: string; status: string;
@@ -220,7 +220,7 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
     const path = ledgerPath(input.ledgerRoot, input.workspaceId, input.provider, localSessionId);
     const ledger = await readLedger(path, { workspaceId: input.workspaceId, provider: input.provider, sessionId: localSessionId });
     const summary = { sessionId: localSessionId, segmentsCommitted: 0, segmentsSkipped: ledger.segments.length,
-      segmentsPlanned: 0, held: false, stoppedReason: null as string | null };
+      segmentsPlanned: 0, held: false, stoppedReason: null as string | null, failure: null as string | null };
     report.sessions.push(summary);
     const source = await stat(sourcePath);
     if (source.size < ledger.nextOffset || await anchorAt(sourcePath, ledger.nextOffset) !== ledger.anchor) {

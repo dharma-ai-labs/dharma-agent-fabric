@@ -282,6 +282,31 @@ test('a turn whose records were all left out marks the segment around it partial
     turns.flat().length - turns[20]!.length - turns[39]!.length);
 });
 
+test('one failing session does not stop the sessions after it, and its reason is reported', async () => {
+  const base = await fixture('dharma-segments-failing-session-', 20, { outputBytes: 2_000 });
+  const second = join(base.root, 'session-2.jsonl');
+  await writeFile(second, jsonl(Array.from({ length: 5 }, (_, turn) => claudeTurn(base.workspace, 100 + turn)).flat()));
+  const { store, committed } = fakeStore();
+  let commits = 0;
+  const failing = {
+    ...store,
+    async commit(item: Parameters<typeof store.commit>[0]) {
+      if (commits++ === 0) throw new Error('Trajectory capsule revision hash conflict');
+      return store.commit(item);
+    },
+  };
+  const report = await captureSessionSegments(input(base, {
+    store: failing as unknown as SessionSegmentCaptureInput['store'], sources: [base.source, second],
+    now: () => new Date(Date.now() + 3_600_000),
+  }));
+  assert.equal(report.stoppedReason, null);
+  assert.equal(report.sessions[0]!.stoppedReason, 'session_capture_failed');
+  assert.equal(report.sessions[0]!.failure, 'vault_revision_conflict');
+  assert.equal(report.sessions[1]!.stoppedReason, null);
+  assert.equal(report.sessions[1]!.segmentsCommitted, committed.length);
+  assert.ok(committed.length >= 1);
+});
+
 test('plan mode writes nothing and reports the same segments a sync run commits', async () => {
   const base = await fixture('dharma-segments-plan-', 30, { outputBytes: 2_000 });
   const later = () => new Date(Date.now() + 3_600_000);
