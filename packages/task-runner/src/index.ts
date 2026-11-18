@@ -242,6 +242,15 @@ export class RegisteredCommandsRefusedError extends Error {
   }
 }
 
+/**
+ * True when a task names registered commands: a non-empty `authority.commands` or
+ * `acceptance.commands`. The relay checks this at preflight and `executeTask()` checks
+ * it again, so both refuse the same tasks.
+ */
+export function taskNamesRegisteredCommands(task: Pick<TaskEnvelope, 'authority' | 'acceptance'>) {
+  return task.authority.commands.length > 0 || task.acceptance.commands.length > 0;
+}
+
 function normalizePolicyPath(value: string) {
   return value.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
 }
@@ -1108,9 +1117,7 @@ export async function executeTask(input: {
   if (input.task.organizationId !== input.policy.organizationId) throw new Error('Task organization does not match policy.');
   const previous = await input.receiptStore.get(input.task.taskId);
   if (previous) return previous;
-  if (input.task.authority.commands.length > 0 || input.task.acceptance.commands.length > 0) {
-    throw new RegisteredCommandsRefusedError();
-  }
+  if (taskNamesRegisteredCommands(input.task)) throw new RegisteredCommandsRefusedError();
   if (input.task.execution.isolation !== 'git_worktree') throw new Error('Only Git worktree isolation is supported.');
   if (input.task.authority.git !== 'task_branch') throw new Error('Pilot tasks require task_branch Git authority.');
   assertTaskWithinLocalPolicy(input.task, input.policy);

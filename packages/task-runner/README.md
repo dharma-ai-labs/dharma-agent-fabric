@@ -38,6 +38,13 @@ completed and has a stored receipt still returns that receipt. Network-authorize
 receipt-required tasks need an external-effect receipt command, so they are
 refused too.
 
+The local relay checks the same condition first, with the exported
+`taskNamesRegisteredCommands()` predicate, right after it polls the task and
+before it syncs policy, takes the skill activation lock or posts `started`. It
+posts one terminal `failed` task event with
+`{ phase: 'preflight', code: 'registered_commands_refused' }` and keeps polling.
+The `executeTask()` check stays as a backstop.
+
 There is no opt-in. The only local policy file, `.dharma/approved-policy.json`,
 lives in the workspace directory, so a repository change could carry a switch
 there and turn the commands back on without the operator.
