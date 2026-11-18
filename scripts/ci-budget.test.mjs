@@ -63,7 +63,9 @@ test('the Linux leg prepares the command sandbox, requires it to be usable and p
   }
   assert.match(prepare.run, /apt-get install -y --no-install-recommends bubblewrap/);
   assert.match(prepare.run, /\/usr\/bin\/bwrap --version/);
-  assert.match(prepare.run, /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0/);
+  // The usable proof runs on the image's default user-namespace settings; it only reports them.
+  assert.match(prepare.run, /apparmor_restrict_unprivileged_userns=\$\(cat /);
+  assert.doesNotMatch(prepare.run, /sysctl/, 'the usable proof does not relax host settings');
   assert.equal(validation.env?.DHARMA_SANDBOX_EXPECT, "${{ runner.os == 'Linux' && 'usable' || '' }}");
   assert.equal(validation['continue-on-error'], undefined);
   assert.match(refusal.run, /sysctl -w user\.max_user_namespaces=0\n/);

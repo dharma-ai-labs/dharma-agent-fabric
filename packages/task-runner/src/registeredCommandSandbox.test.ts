@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import {
@@ -337,6 +337,80 @@ test('a passing probe returns a usable sandbox bound to the probed bubblewrap', 
   assert.match(args.sentinel, /^[0-9a-f-]{36}$/);
 });
 
+test('a relay Node installed in a general folder under the home exposes only node and npm, never the whole folder', async () => {
+  // Node unpacked into ~/.local (or installed there by a version manager): the folder above
+  // bin/node also holds the user's share/ and state/ folders, where tools keep credentials.
+  const prefix = '/home/relay/.local';
+  const enoent = () => Object.assign(new Error('missing'), { code: 'ENOENT' });
+  let probeArgs = '';
+  let probed: UsableSandbox | undefined;
+  const base = probeDeps([]);
+  const result = await withState(directory => probeRegisteredCommandSandbox(probeDeps([], { relayStateDirectory: directory,
+    execPath: `${prefix}/bin/node`,
+    lstat: async (path: string) => {
+      if (path === `${prefix}/lib/node_modules/npm`) return stats({ file: false, dir: true });
+      if (path === `${prefix}/bin/npm` || path === `${prefix}/bin/npx`) return stats({ file: false, link: true });
+      if (path === `${prefix}/etc` || path.startsWith(`${prefix}/`)) throw enoent();
+      return base.lstat(path);
+    },
+    readlink: async (path: string) => {
+      if (path === `${prefix}/bin/npm`) return '../lib/node_modules/npm/bin/npm-cli.js';
+      if (path === `${prefix}/bin/npx`) return '../lib/node_modules/npm/bin/npx-cli.js';
+      return base.readlink(path);
+    },
+    runSandboxed: async (sandbox, input) => {
+      probed = sandbox;
+      probeArgs = input.argv.at(-1)!;
+      return { started: true, exitCode: 0, timedOut: false, stderr: '',
+        stdout: `${JSON.stringify({ checks: Object.fromEntries([...PROBE_CHECKS.base, ...PROBE_CHECKS.disableUserns].map(name => [name, true])) })}\n` };
+    } })));
+  assert.equal(result.usable, true);
+  if (!result.usable) return;
+  assert.equal(probed, result, 'the probe ran with the same mounts the commands get');
+  const args = sandboxCommandLine(result, { worktree: W, cwd: W, argv: ['npm', 'test'] });
+  const underPrefix = mounts(args).filter(({ flag, destination }) => flag !== '--symlink' && destination.startsWith(prefix));
+  assert.deepEqual(underPrefix.map(({ flag, source, destination }) => [flag, source, destination]), [
+    ['--ro-bind', `${prefix}/bin/node`, `${prefix}/bin/node`],
+    ['--ro-bind', `${prefix}/lib/node_modules/npm`, `${prefix}/lib/node_modules/npm`],
+  ], 'only the Node binary and the npm package are bound from the prefix');
+  const links = mounts(args).filter(({ flag, destination }) => flag === '--symlink' && destination.startsWith(prefix));
+  assert.deepEqual(links.map(({ source, destination }) => [source, destination]), [
+    ['../lib/node_modules/npm/bin/npm-cli.js', `${prefix}/bin/npm`],
+    ['../lib/node_modules/npm/bin/npx-cli.js', `${prefix}/bin/npx`],
+  ]);
+  assert.equal(sandboxCommandEnvironment({ PATH: '/usr/bin:/bin' }, result).PATH, `${prefix}/bin:/usr/bin:/bin`);
+  const parsed = JSON.parse(probeArgs) as Record<string, unknown>;
+  assert.equal(Object.values(parsed).some(value => value === prefix
+    || (Array.isArray(value) && value.includes(prefix))), false,
+  'the probe does not count the whole prefix as an allowed path under the home');
+});
+
+test('npm links that leave the npm package are not recreated in the sandbox', async () => {
+  const prefix = '/home/relay/.nvm/versions/node/v22.22.0';
+  const enoent = () => Object.assign(new Error('missing'), { code: 'ENOENT' });
+  const base = probeDeps([]);
+  const result = await withState(directory => probeRegisteredCommandSandbox(probeDeps([], { relayStateDirectory: directory,
+    execPath: `${prefix}/bin/node`,
+    lstat: async (path: string) => {
+      if (path === `${prefix}/lib/node_modules/npm`) return stats({ file: false, dir: true });
+      if (path === `${prefix}/bin/npm` || path === `${prefix}/bin/npx`) return stats({ file: false, link: true });
+      if (path.startsWith(`${prefix}/`)) throw enoent();
+      return base.lstat(path);
+    },
+    readlink: async (path: string) => {
+      if (path === `${prefix}/bin/npm`) return '../../../../../.ssh/id_ed25519';
+      if (path === `${prefix}/bin/npx`) return '/home/relay/.local/share/tool/auth.json';
+      return base.readlink(path);
+    } })));
+  assert.equal(result.usable, true);
+  if (!result.usable) return;
+  const args = sandboxCommandLine(result, { worktree: W, cwd: W, argv: ['true'] });
+  assert.deepEqual(mounts(args).filter(({ destination }) => destination.startsWith(prefix)).map(({ flag, source }) => [flag, source]), [
+    ['--ro-bind', `${prefix}/bin/node`],
+    ['--ro-bind', `${prefix}/lib/node_modules/npm`],
+  ]);
+});
+
 test('WSL hosts must also prove the Windows interop cut', async () => {
   let checksRequested: string[] = [];
   const result = await withState(directory => probeRegisteredCommandSandbox(probeDeps([], { relayStateDirectory: directory,
@@ -383,6 +457,18 @@ test('every refusal reason has one fix line and the relay start line shows it', 
   const line = JSON.parse(registeredCommandSandboxLogLine(usable()));
   assert.deepEqual(line, { event: 'registered_command_sandbox', usable: true, host: 'linux', bwrapPath: '/usr/bin/bwrap',
     bwrapVersion: '0.9.0', bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: SANDBOX_POLICY_VERSION });
+});
+
+test('the customer guide names what is not visible inside the sandbox and asks for namespace changes only on that reason', async () => {
+  const guide = await readFile(new URL('../../../docs/onboarding/customer-guide.md', import.meta.url), 'utf8');
+  const section = guide.slice(guide.indexOf('## Host requirements for registered commands'));
+  const requirements = section.slice(0, section.indexOf('\n## ', 1));
+  assert.match(requirements, /`\/opt`/, 'toolchains under /opt are named as not visible');
+  assert.match(requirements, /OpenJDK/, 'distribution packages that keep configuration under /etc are named');
+  assert.match(requirements, /exit code/, 'the symptom of a missing toolchain is named');
+  assert.doesNotMatch(requirements, /install bubblewrap, allow user\s+namespaces, then restart/,
+    'enrolled devices change user namespaces only when the relay reports user_namespaces_unavailable');
+  assert.match(requirements, /only if[\s\S]{0,80}`user_namespaces_unavailable`/);
 });
 
 test('plausible opt-out names change nothing', async () => {
