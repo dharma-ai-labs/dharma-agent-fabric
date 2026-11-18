@@ -81,6 +81,8 @@ A task modifies the active developer workspace or external path.
 
 **Controls:** canonical path containment, OS sandbox where possible, worktree root enforcement, write interception, command policy, post-task diff audit.
 
+**Operator rule:** registered and acceptance commands run the workspace's own code as the operating-system user that runs the local relay. That code can read anything that user can read, including other repositories, files in the home directory, and credential files stored there; path checks after each command look at writes, not reads. Enrol only workspaces whose code you trust to run as your own operating-system user.
+
 ## Data classification
 
 | Class | Examples | Default handling |
