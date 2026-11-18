@@ -770,6 +770,15 @@ export class LocalVault {
     return rows.map(row => ({ workKey: row.workKey, descriptorHash: row.descriptorHash }));
   }
 
+  /** Every unacknowledged task export of this binding; listProviderSessionTaskExports returns at most 100. */
+  countProviderSessionTaskExports(bindingId: string, identity: LocalProviderSessionIdentity): number {
+    if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
+    const row = this.#database.prepare(`
+      select count(*) as count from provider_session_task_exports where binding_id = ? and acknowledged_at is null
+    `).get(bindingId) as { count: number };
+    return Number(row.count);
+  }
+
   acknowledgeProviderSessionTaskExport(bindingId: string, identity: LocalProviderSessionIdentity,
     workKey: string, descriptorHash: string, receiptHash?: string): void {
     if (!this.getProviderSessionBinding(bindingId, identity)) throw new Error('provider_session_binding_unavailable');
