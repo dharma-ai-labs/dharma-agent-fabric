@@ -36,7 +36,11 @@ import {
   FileTaskReceiptStore,
   providerInstructionsForTask,
   REGISTERED_COMMANDS_REFUSED,
+  detectRegisteredCommandSandbox,
+  registeredCommandAdmission,
+  registeredCommandSandboxLogLine,
   taskNamesRegisteredCommands,
+  type RegisteredCommandSandbox,
   type TaskEnvelope,
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
@@ -7869,12 +7873,23 @@ async function executeOneTask(
     });
     return { ok: false, taskId: task.taskId, code: 'knowledge_only_task_denied' };
   }
-  // The runner refuses tasks that name registered commands until command isolation
-  // exists. Refuse them here too, before policy sync, locks, `started` or skill hashing,
-  // so the task gets a terminal event and the relay loop keeps running.
+  // Registered commands run only inside an operating-system sandbox. Before policy sync, locks,
+  // `started` or skill hashing, a task that names them needs network `deny` (checked first) and
+  // a usable sandbox from a live probe of this host. Otherwise it gets one terminal `failed`
+  // event with the reason and the relay loop keeps running. The runner checks the same again.
+  let registeredCommandSandbox: RegisteredCommandSandbox | undefined;
   if (taskNamesRegisteredCommands(task)) {
-    await fabric.postTaskEvent(task.taskId, 'failed', { phase: 'preflight', code: REGISTERED_COMMANDS_REFUSED });
-    return { ok: false, taskId: task.taskId, code: REGISTERED_COMMANDS_REFUSED };
+    const sandbox = task.authority.network === 'deny'
+      ? await detectRegisteredCommandSandbox({ relayStateDirectory: resolve(dharmaHome(), 'relay') })
+      : undefined;
+    const admission = registeredCommandAdmission(task, sandbox);
+    if (!admission.admitted) {
+      await fabric.postTaskEvent(task.taskId, 'failed', {
+        phase: 'preflight', code: REGISTERED_COMMANDS_REFUSED, reason: admission.reason,
+      });
+      return { ok: false, taskId: task.taskId, code: REGISTERED_COMMANDS_REFUSED, reason: admission.reason };
+    }
+    registeredCommandSandbox = sandbox;
   }
   const taskPolicy = await refreshVerifiedWorkspacePolicyForTransmission(
     resolve(workspace.path, '.dharma', 'approved-policy.json'),
@@ -7940,6 +7955,7 @@ async function executeOneTask(
       } } : {}),
       requiredSkillFiles,
       ...(serverPublicKeyResolver ? { serverPublicKeyResolver } : {}),
+      ...(registeredCommandSandbox ? { registeredCommandSandbox } : {}),
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
       ...(task.actionDecision ? {
         actionDecisions: {
@@ -9363,6 +9379,10 @@ async function relayStart(flags: Map<string, string | boolean>,
   await loadVerifiedWorkspacePolicyUnlessReplayAhead(anchor, selected.workspaceId);
   const release = await acquireRelayProcessLease();
   startup.leased = true;
+  // One start line that says whether this host can run registered commands. Each task that
+  // names them is probed again before it runs; this line is for the operator only.
+  process.stderr.write(`${registeredCommandSandboxLogLine(
+    await detectRegisteredCommandSandbox({ relayStateDirectory: resolve(dharmaHome(), 'relay') }))}\n`);
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.once('SIGINT', stop);
