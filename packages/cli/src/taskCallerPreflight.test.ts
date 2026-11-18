@@ -74,6 +74,7 @@ function fixture() {
   let refreshFailure: Error | null = null;
   let activeSkill: { bundleId: string; bundleHash: string } | null = null;
   let unsafeProviders: string[] = [];
+  let sandbox: unknown = { usable: false, reason: 'platform_unsupported', detail: 'platform=win32', fix: 'synthetic fix' };
   const config = { deviceId: task.target.deviceId, organizationId: task.organizationId,
     serverPublicKeyEd25519: 'synthetic_key_never_parsed' };
   const fabric = {
@@ -92,9 +93,15 @@ function fixture() {
       if (refreshFailure) throw refreshFailure;
       return policy;
     },
-    // The real task-runner predicate, so the relay and runner checks cannot drift.
+    // The real task-runner predicate and admission, so the relay and runner checks cannot drift.
     REGISTERED_COMMANDS_REFUSED: taskRunner.REGISTERED_COMMANDS_REFUSED,
     taskNamesRegisteredCommands: taskRunner.taskNamesRegisteredCommands,
+    registeredCommandAdmission: taskRunner.registeredCommandAdmission,
+    // The live probe is a port here; task-runner tests cover its real behaviour.
+    detectRegisteredCommandSandbox: async (options: { relayStateDirectory: string }) => {
+      assert.equal(options.relayStateDirectory, resolve('/fixture/home', 'relay'));
+      calls.push('sandbox-probe'); return sandbox;
+    },
     PROVIDER_UNSAFE_PATH: 'provider_unsafe_path',
     relayProviderUnsafePath: async (provider: string) => {
       if (!unsafeProviders.includes(provider)) return false;
@@ -139,7 +146,8 @@ function fixture() {
     unregister: () => { registered = false; },
     failRefresh: () => { refreshFailure = new Error('fixture policy refresh denied'); },
     setActiveSkill: (value: typeof activeSkill) => { activeSkill = value; },
-    setUnsafeProviders: (value: string[]) => { unsafeProviders = value; } };
+    setUnsafeProviders: (value: string[]) => { unsafeProviders = value; },
+    setSandbox: (value: unknown) => { sandbox = value; } };
 }
 
 const beforeDeviceRejection = ['poll', 'registry', 'policy-refresh', 'config-read',
@@ -250,54 +258,97 @@ test('an isolated VM Error realm is detected by the timeout-event assertion, not
   assert.deepEqual(f.events, []);
 });
 
-// The task runner refuses tasks that name registered commands, but the relay used to start the
-// task first: it synced policy, took the activation lock, posted `started` and hashed skill files,
-// and then the runner's refusal escaped without a terminal event and ended the relay loop.
-// The relay must refuse such a task right after the poll, with one terminal `failed` event.
+// Tasks that name registered commands run only inside an operating-system sandbox (DIA-1560).
+// The relay refuses such a task right after the poll, before policy sync, locks, `started` or
+// skill hashing, unless the task's network is `deny` and the live sandbox probe is usable. The
+// refusal is one terminal `failed` event that carries the reason.
+const USABLE_SANDBOX = {
+  usable: true, host: 'linux', bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0', bwrapSha256: `sha256:${'a'.repeat(64)}`,
+  policy: 'bwrap-policy/1', layout: { bin: 'symlink', sbin: 'symlink', lib: 'symlink', lib32: 'absent', lib64: 'symlink', libx32: 'absent' },
+  nodePrefix: '/usr', bindNodePrefix: false, maskNodeEtc: false, disableUserns: true,
+};
+
 function registeredCommandPorts(f: ReturnType<typeof fixture>) {
   const RefusedError = taskRunner.RegisteredCommandsRefusedError;
+  const executed: unknown[] = [];
   f.dependencies.requiredSkillFilesForTask = async () => { f.calls.push('skill-hash'); return []; };
-  // The runner's own refusal stays as the backstop behind the relay check.
-  f.dependencies.executeTask = async (input: { task: typeof f.task }) => {
+  // The runner's own admission stays as the backstop behind the relay check.
+  f.dependencies.executeTask = async (input: { task: typeof f.task; registeredCommandSandbox?: unknown }) => {
     f.calls.push('execute-task');
-    if (input.task.authority.commands.length > 0 || input.task.acceptance.commands.length > 0) throw new RefusedError();
+    executed.push(input.registeredCommandSandbox);
+    const admission = taskRunner.registeredCommandAdmission(input.task as never, input.registeredCommandSandbox as never);
+    if (!admission.admitted) throw new RefusedError(admission.reason);
     f.calls.push('child-process');
     return { status: 'completed', branch: null, commandResults: [],
       startedAt: '2026-10-21T00:00:00.000Z', completedAt: '2026-10-21T00:00:01.000Z' };
   };
-  return taskRunner.REGISTERED_COMMANDS_REFUSED;
+  return { code: taskRunner.REGISTERED_COMMANDS_REFUSED, executed };
 }
 
-for (const [name, names] of [
-  ['acceptance commands', (task: ReturnType<typeof fixture>['task']) => {
-    (task.acceptance.commands as string[]).push('npm.test');
-  }],
-  ['command ids only', (task: ReturnType<typeof fixture>['task']) => {
+const nameCommands = {
+  'acceptance commands': (task: ReturnType<typeof fixture>['task']) => {
     (task.authority.commands as string[]).push('npm.test');
-  }],
-] as const) {
-  test(`a polled task with ${name} gets one terminal failed preflight event and nothing else runs`, async () => {
-    const f = fixture(); names(f.task);
-    const code = registeredCommandPorts(f);
-    assert.equal(code, 'registered_commands_refused');
-    const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
-    assert.deepEqual({ ...result }, { ok: false, taskId: f.task.taskId, code });
-    assert.deepEqual(JSON.parse(JSON.stringify(f.events)), [{ taskId: f.task.taskId, event: 'failed',
-      payload: { phase: 'preflight', code } }]);
-    assert.deepEqual(f.calls, ['poll', 'registry', 'event:failed'],
-      'no policy sync, config read, timer, activation lock, started event, skill hashing or execution');
-    assert.equal(f.intervalIds.size, 0);
-  });
+    (task.acceptance.commands as string[]).push('npm.test');
+  },
+  'command ids only': (task: ReturnType<typeof fixture>['task']) => {
+    (task.authority.commands as string[]).push('npm.test');
+  },
+};
+
+for (const [name, names] of Object.entries(nameCommands)) {
+  for (const reason of ['platform_unsupported', 'bubblewrap_missing', 'bubblewrap_too_old', 'bubblewrap_untrusted',
+    'user_namespaces_unavailable', 'sandbox_probe_failed'] as const) {
+    test(`a polled task with ${name} on a host whose sandbox is ${reason} gets one terminal failed preflight event`, async () => {
+      const f = fixture(); names(f.task);
+      f.setSandbox({ usable: false, reason, detail: 'synthetic detail', fix: 'synthetic fix' });
+      const { code, executed } = registeredCommandPorts(f);
+      assert.equal(code, 'registered_commands_refused');
+      const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
+      assert.deepEqual({ ...result }, { ok: false, taskId: f.task.taskId, code, reason });
+      assert.deepEqual(JSON.parse(JSON.stringify(f.events)), [{ taskId: f.task.taskId, event: 'failed',
+        payload: { phase: 'preflight', code, reason } }]);
+      assert.deepEqual(f.calls, ['poll', 'registry', 'sandbox-probe', 'event:failed'],
+        'no policy sync, config read, timer, activation lock, started event, skill hashing or execution');
+      assert.deepEqual(executed, []);
+      assert.equal(f.intervalIds.size, 0);
+    });
+  }
 }
 
-test('a task without registered commands still gets started and runs as before', async () => {
+test('a polled task with registered commands and a network grant is refused without a probe', async () => {
+  const f = fixture(); nameCommands['acceptance commands'](f.task);
+  f.task.authority.network = 'package_registry_only';
+  f.setSandbox(USABLE_SANDBOX);
+  const { code } = registeredCommandPorts(f);
+  const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
+  assert.deepEqual({ ...result }, { ok: false, taskId: f.task.taskId, code, reason: 'network_not_denied' });
+  assert.deepEqual(JSON.parse(JSON.stringify(f.events)), [{ taskId: f.task.taskId, event: 'failed',
+    payload: { phase: 'preflight', code, reason: 'network_not_denied' } }]);
+  assert.deepEqual(f.calls, ['poll', 'registry', 'event:failed']);
+});
+
+test('an admitted task with registered commands reaches the runner with the probed sandbox', async () => {
+  const f = fixture(); nameCommands['acceptance commands'](f.task);
+  f.setSandbox(USABLE_SANDBOX);
+  const { executed } = registeredCommandPorts(f);
+  const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(f.calls, ['poll', 'registry', 'sandbox-probe', ...beforeDeviceRejection.slice(2), 'public-key', 'active-skill',
+    'event:started', 'interval-create:2', 'skill-hash', 'receipt-store', 'execute-task', 'child-process', 'interval-clear:2',
+    'outcome', 'activation-lock-release', 'interval-clear:1']);
+  assert.deepEqual(executed, [USABLE_SANDBOX]);
+  assert.deepEqual(f.events.map(event => event.event), ['started']);
+});
+
+test('a task without registered commands never probes and runs as before', async () => {
   const f = fixture();
-  registeredCommandPorts(f);
+  const { executed } = registeredCommandPorts(f);
   const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
   assert.equal(result.ok, true); assert.equal(result.taskId, f.task.taskId);
   assert.deepEqual(f.calls, [...beforeDeviceRejection, 'public-key', 'active-skill', 'event:started',
     'interval-create:2', 'skill-hash', 'receipt-store', 'execute-task', 'child-process', 'interval-clear:2',
     'outcome', 'activation-lock-release', 'interval-clear:1']);
+  assert.deepEqual(executed, [undefined]);
   assert.deepEqual(f.events.map(event => event.event), ['started']);
   assert.equal(f.intervalIds.size, 0);
 });
