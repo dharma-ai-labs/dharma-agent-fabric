@@ -20,40 +20,140 @@ in relay-owned Git worktrees using registered command IDs and canonical
 arguments under explicit path, network, Git, budget, and Skill-pin authority.
 It is not a general remote shell.
 
-## Tasks that name registered commands are refused
+## Registered commands run inside an operating-system sandbox
 
-Registered commands, meaning acceptance commands and, for Claude tasks, the same
-commands offered to the provider as Bash tools, would run as the relay's
-operating-system user without a sandbox. Code written during the task could then
-read that user's credential files. Until command isolation exists, `executeTask()`
-refuses every task with a non-empty `authority.commands` or
-`acceptance.commands`.
+Registered commands are the acceptance commands a task names, including the
+external-effect receipt command. They run code the provider may have written,
+so they run only inside a bubblewrap sandbox on Linux and WSL2. Every other
+host refuses tasks that name them, before the provider starts. There is no
+opt-out: no flag, environment variable, configuration key or policy field turns
+the sandbox off.
 
-The refusal happens after signature, expiry and organization checks and before
-any worktree, provider process or command starts. `executeTask()` throws
-`RegisteredCommandsRefusedError`, whose `code` is
-`registered_commands_refused` (exported as `REGISTERED_COMMANDS_REFUSED`). No
-task receipt is written, so nothing claims the task ran. A task that was already
-completed and has a stored receipt still returns that receipt. Network-authorized
-receipt-required tasks need an external-effect receipt command, so they are
-refused too.
+### Admission
 
-The local relay checks the same condition first, with the exported
-`taskNamesRegisteredCommands()` predicate, right after it polls the task and
-before it syncs policy, takes the skill activation lock or posts `started`. It
-posts one terminal `failed` task event with
-`{ phase: 'preflight', code: 'registered_commands_refused' }` and keeps polling.
-The `executeTask()` check stays as a backstop.
+The local relay decides, right after it polls a task and before it syncs
+policy, takes the skill activation lock or posts `started`:
 
-There is no opt-in. The only local policy file, `.dharma/approved-policy.json`,
-lives in the workspace directory, so a repository change could carry a switch
-there and turn the commands back on without the operator.
+1. A task with an empty `authority.commands` and `acceptance.commands` runs as
+   before. It is never probed.
+2. A task that names registered commands must have network authority `deny`.
+   Otherwise it is refused with reason `network_not_denied`.
+3. The relay runs a live sandbox probe (below) for this task. If the probe is
+   not usable, the task is refused with the probe's reason.
 
-Tasks that name no registered commands run exactly as before. The provider gets
-no command tools.
+A refusal posts one terminal `failed` task event with
+`{ phase: 'preflight', code: 'registered_commands_refused', reason }` and the
+relay keeps polling. An admitted task passes the probed sandbox to
+`executeTask({ registeredCommandSandbox })`. `executeTask()` applies the same
+admission again, after signature, expiry and organization checks and before any
+worktree, provider process or command starts. Without a usable sandbox it throws
+`RegisteredCommandsRefusedError` (`code` `registered_commands_refused`, plus
+`reason`). No task receipt is written, so nothing claims the task ran. A task
+that was already completed and has a stored receipt still returns that receipt.
 
-The sections below describe the command path that the isolation work will
-re-enable.
+| Reason | Fix |
+|---|---|
+| `platform_unsupported` | Run the relay on Linux or WSL2. macOS and native Windows refuse. |
+| `bubblewrap_missing` | Install bubblewrap from the distribution, then restart the relay. |
+| `bubblewrap_too_old` | Install bubblewrap 0.6.0 or newer. |
+| `bubblewrap_untrusted` | Reinstall bubblewrap so `/usr/bin/bwrap` is a root-owned, non-setuid file that only root can change. |
+| `user_namespaces_unavailable` | Allow unprivileged user namespaces for bubblewrap (an administrator setting), use WSL2 rather than WSL1, and run the relay on the host rather than in a container. |
+| `sandbox_probe_failed` | The sandbox started but a policy check failed. Run the relay on a supported host and report the named check. |
+| `network_not_denied` | Give tasks that name registered commands the network authority `deny`. |
+
+The relay also writes one `registered_command_sandbox` line to its log at start,
+with the probe result or the reason and fix line.
+
+### Provider command tools
+
+When a task names registered commands, the provider gets no command tools
+(`allowedCommandArgv` is empty). For Claude tasks this means no `Bash(...)`
+tools: the commands run only in the sandboxed acceptance loop after the
+provider stops. Every named command must still resolve in the policy the relay
+loaded before the provider started; the workspace policy file is not read again.
+
+### The sandbox
+
+Each command starts as `/usr/bin/bwrap` (or `/bin/bwrap`, never a `PATH`
+lookup) with:
+
+- new user, process, IPC, host-name, cgroup and network namespaces, with no
+  `-try` fallback: a host that cannot create one refuses;
+- `--disable-userns` on bubblewrap 0.8.0 or newer, `--die-with-parent`,
+  `--new-session`, `--cap-drop ALL`;
+- an empty root with read-only `/usr`, the `/bin`-style folders, a few `/etc`
+  files (dynamic linker, time zone, name-service, `passwd`, `group`, `hosts`)
+  and, when it is outside `/usr`, only the relay's Node binary, its
+  `lib/node_modules/npm` package and the `bin/npm` and `bin/npx` links into
+  that package. The rest of that installation folder is not visible: it can be
+  a general per-user folder such as `~/.local` that holds other tools' data,
+  and its `etc` folder can hold a global npm configuration with tokens;
+- private `/proc`, `/dev` and `/tmp`, and an empty home at `/dharma-sandbox/home`;
+- the task worktree as the only writable folder, with its `.git` pointer file
+  read-only; the root is remounted read-only after all mounts.
+
+Nothing else from the host is visible: not the relay user's home, the Dharma
+home, `/opt`, the rest of `/etc`, `/run`, `/var`, `/mnt` or other processes.
+Toolchains installed under `/opt` or the home, and distribution packages that
+keep part of their files under `/etc` (for example OpenJDK), do not work inside
+the sandbox; such a command fails with a non-zero exit code, not a refusal. The command environment is the
+explicit acceptance-command environment below, with `HOME`, `TMPDIR`,
+`XDG_CONFIG_HOME` and `XDG_CACHE_HOME` pointing at the sandbox's own folders and
+the relay Node's `bin` folder first on `PATH`. It is passed as the process
+environment, never as arguments.
+
+Bubblewrap reports the command's start on a status descriptor. If it never
+reports the child, the task fails with a `runner` row
+(`registered_command_sandbox_failed`) and the command is not run again on the
+host. bubblewrap reports the child as soon as it is created, so a sandbox that
+fails during its own setup after that point shows as a failed command whose
+error output starts with `bwrap:`; the command did not run. The probe treats
+that case as `user_namespaces_unavailable`. The command's own exit code is
+recorded; a command killed by a signal
+shows `128 + signal number`. A timeout or cancellation kills the bubblewrap
+process group, and the private process namespace takes every descendant with
+it, including detached ones. Cancellation is immediate.
+
+### The live probe
+
+The probe runs for every task that names registered commands; a usable answer is
+never cached. On macOS and native Windows it returns `platform_unsupported`
+without touching a file or starting a process. On Linux it checks that
+bubblewrap is a root-owned regular file that is not writable by group or others
+and not setuid, at least 0.6.0, and records its `sha256`. It then runs a check
+program through the same argument builder and launcher as real commands, in a
+fresh probe worktree with a synthetic canary beside it and a host loopback
+listener. The program must report that the canary, the relay user's home and the
+relay process and environment are hidden; network fails and only loopback
+exists; writes outside the worktree fail and writes inside succeed; the `.git`
+pointer is read-only; no inherited socket or file descriptors are open; no
+capabilities remain; no agent sockets are visible; nested user namespaces fail
+(bubblewrap 0.8.0 or newer); and on WSL2, that Windows interop and drives are
+cut. A failed check refuses with `sandbox_probe_failed` and names only the
+check, never values.
+
+### Relay Git after a command
+
+The relay's own Git checks after each sandboxed command use the repository
+paths read from the worktree's `.git` pointer when the worktree was created,
+before the provider ran (`--git-dir` and `--work-tree`). They check that the
+pointer bytes are unchanged (a change fails the task) and run `diff` with
+`--no-ext-diff --no-textconv`. Other relay Git calls are unchanged.
+
+### Limits
+
+- Commands have no network. Tasks that need network for their commands are
+  refused.
+- Git is not available inside the sandbox: the repository's object store is
+  outside the worktree.
+- Toolchains installed under the relay user's home, other than the relay's own
+  Node, are not visible. Dependencies must already be in the worktree; nothing
+  installs them.
+- The provider process itself is trusted, not sandboxed.
+- No seccomp filter yet. On bubblewrap below 0.8.0, nested user namespaces are
+  not blocked.
+- Skill smoke checks (`dharma skills sync --smoke-command`) are an operator
+  command, outside this sandbox.
 
 ## Receipt-required tasks
 
@@ -192,11 +292,10 @@ harmless. They locate per-user tool configuration and credential files, and are
 passed only because npm and Git need them.
 
 The allowlist removes relay variables from the command's own environment, so
-they do not reach its output or the task receipt by accident. It is not an
-isolation boundary. The command still runs as the relay user without an
-operating-system sandbox, so it can read the relay user's files and can read
-the relay process environment through the operating system's process
-inspection interfaces.
+they do not reach its output or the task receipt by accident. The allowlist is
+not the isolation boundary; the operating-system sandbox above is. Inside it,
+`HOME`, `TMPDIR`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` point at the sandbox's
+own empty folders, and the relay user's files and processes are not visible.
 
 Relay-internal Git calls, including the write-scope checks after each command,
 run with the same operating-system essentials and with `core.fsmonitor`

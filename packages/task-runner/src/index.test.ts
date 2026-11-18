@@ -29,11 +29,40 @@ import {
   type TaskEnvelope,
 } from './index.js';
 import * as taskRunner from './index.js';
+import { SANDBOX_HOME, SANDBOX_POLICY_VERSION, sandboxCommandLine, type UsableSandbox } from './index.js';
 
-// the runner refuses every task that names registered commands until
-// command isolation exists (see registeredCommandRefusal.test.ts). These tests cover the
-// command path that the isolation work will re-enable, so they stay in place, skipped.
-const REGISTERED_COMMANDS_REFUSED_SKIP = 'The runner refuses registered commands until command isolation exists';
+// Registered commands run only inside an operating-system sandbox. On every
+// operating system these unit tests replace bubblewrap with a stand-in: a Node wrapper that
+// reports its child on descriptor 3, as bubblewrap's --json-status-fd does, and then runs the
+// command on the host. That keeps the acceptance-loop checks (write scope, artifacts,
+// environment, decision receipts) covered everywhere. registeredCommandSandbox.linux.test.ts
+// runs the real bubblewrap on Linux.
+const STAND_IN_SANDBOX: UsableSandbox = {
+  usable: true, host: 'linux', bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0',
+  bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: SANDBOX_POLICY_VERSION,
+  layout: { bin: 'symlink', sbin: 'symlink', lib: 'symlink', lib32: 'absent', lib64: 'symlink', libx32: 'absent' },
+  nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [], disableUserns: true,
+};
+const STAND_IN_SCRIPT = [
+  'const fs = require("node:fs"); const { spawn } = require("node:child_process");',
+  'const [cwd, command, ...args] = process.argv.slice(1);',
+  'fs.writeSync(3, JSON.stringify({ "child-pid": process.pid }) + "\\n");',
+  'const child = spawn(command, args, { cwd, stdio: ["ignore", "inherit", "inherit"] });',
+  'child.on("error", () => process.exit(127));',
+  'child.on("exit", (code, signal) => {',
+  '  const exitCode = code ?? 128 + (require("node:os").constants.signals[signal] ?? 0);',
+  '  fs.writeSync(3, JSON.stringify({ "exit-code": exitCode }) + "\\n"); process.exit(exitCode);',
+  '});',
+].join('\n');
+const hostSpawn = childProcess.spawn;
+function standInSpawn(command: string, argv: readonly string[], options: object) {
+  if (command !== STAND_IN_SANDBOX.bwrapPath) return hostSpawn(command, argv, options);
+  const separator = argv.indexOf('--');
+  const cwd = argv[argv.indexOf('--chdir') + 1]!;
+  return hostSpawn(process.execPath, ['-e', STAND_IN_SCRIPT, cwd, ...argv.slice(separator + 1)], options);
+}
+Object.assign(childProcess, { spawn: standInSpawn });
+syncBuiltinESMExports();
 
 async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string[]) {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-required-artifact-'));
@@ -74,7 +103,7 @@ async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string
   };
   return { root, workspace, policy, unsigned, signed, providerResult, publicKey,
     input: { policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey,
-      receiptStore: new FileTaskReceiptStore(resolve(root, 'receipts')) } };
+      receiptStore: new FileTaskReceiptStore(resolve(root, 'receipts')), registeredCommandSandbox: STAND_IN_SANDBOX } };
 }
 
 test('optional provider qualification follows the existing task executor and stored receipt', async (t) => {
@@ -252,7 +281,7 @@ test('required artifact review v10: ignored outputs require signed write authori
 
 test('required artifact review v10: existing read-only artifacts remain unchanged through acceptance', async (t) => {
   for (const mutate of [false, true]) {
-    await t.test(mutate ? 'changed by acceptance' : 'unchanged', { skip: mutate && REGISTERED_COMMANDS_REFUSED_SKIP }, async (child) => {
+    await t.test(mutate ? 'changed by acceptance' : 'unchanged', async (child) => {
       const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
       await mkdir(resolve(fixture.workspace, 'reports'));
       await writeFile(resolve(fixture.workspace, 'reports/result.json'), 'private-read-only-sentinel');
@@ -337,7 +366,7 @@ test('required artifacts reject ambiguous or unauthorized references before prov
   }
 });
 
-test('required artifacts check the final state after registered acceptance commands', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
+test('required artifacts check the final state after registered acceptance commands', async (t) => {
   for (const operation of ['create', 'remove'] as const) {
     await t.test(operation, async (child) => {
       const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
@@ -722,7 +751,7 @@ test('required artifact review v8: impossible ancestor file requirements fail be
   }
 });
 
-test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async () => {
+test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-runner-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
@@ -765,8 +794,8 @@ test('signed task runs only a registered command in a relay-owned worktree and d
       stderrSha256: `sha256:${'0'.repeat(64)}`,
     };
   };
-  const first = await executeTask({ task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey, receiptStore: store, providerExecutor });
-  const second = await executeTask({ task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey, receiptStore: store, providerExecutor });
+  const first = await executeTask({ registeredCommandSandbox: STAND_IN_SANDBOX, task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey, receiptStore: store, providerExecutor });
+  const second = await executeTask({ registeredCommandSandbox: STAND_IN_SANDBOX, task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: publicKey, receiptStore: store, providerExecutor });
   assert.equal(first.status, 'completed');
   assert.equal(first.commandResults[0]?.commandId, 'provider.codex');
   assert.equal(first.commandResults[1]?.stdout, 'verified');
@@ -1083,7 +1112,7 @@ test('provider changes outside signed write paths fail even when untracked or co
   assert.match(committed.commandResults.at(-1)?.stderr || '', /outside the signed task authority/);
 });
 
-test('acceptance commands cannot expand signed write scope or run a later command after a violation', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
+test('acceptance commands cannot expand signed write scope or run a later command after a violation', async (t) => {
   for (const variant of ['untracked', 'tracked', 'committed', 'receipt-required'] as const) {
     await t.test(variant, async (child) => {
       const fixture = await requiredArtifactFixture(child, []);
@@ -1127,7 +1156,7 @@ test('acceptance commands cannot expand signed write scope or run a later comman
   }
 });
 
-test('acceptance commands preserve authorized outputs and read-only tasks', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
+test('acceptance commands preserve authorized outputs and read-only tasks', async (t) => {
   for (const variant of ['authorized', 'read-only'] as const) {
     await t.test(variant, async (child) => {
       const fixture = await requiredArtifactFixture(child, variant === 'authorized' ? ['reports/result.json'] : []);
@@ -1283,7 +1312,7 @@ test('receipt-required task fails closed before provider execution without an em
   assert.equal(executions, 0);
 });
 
-test('receipt-required task executes only a KMS-signed release and acknowledges its effect', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async () => {
+test('receipt-required task executes only a KMS-signed release and acknowledges its effect', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-action-release-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
@@ -1315,7 +1344,7 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
   const task = { ...unsigned, signature: signCanonicalObject(unsigned, taskKeys.privateKey) } as TaskEnvelope;
   let executions = 0;
   let decisionConsumptions = 0;
-  const result = await executeTask({
+  const result = await executeTask({ registeredCommandSandbox: STAND_IN_SANDBOX,
     task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: taskKeys.publicKey,
     receiptStore: new FileTaskReceiptStore(resolve(root, 'receipts')),
     actionDecisions: {
@@ -1378,7 +1407,7 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
     signature: signCanonicalObject(networkUnsigned, taskKeys.privateKey),
   } as TaskEnvelope;
   let networkExecutions = 0;
-  await assert.rejects(executeTask({
+  await assert.rejects(executeTask({ registeredCommandSandbox: STAND_IN_SANDBOX,
     task: networkTask,
     policy: networkPolicy,
     workspace,
@@ -1394,8 +1423,11 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
         stdoutSha256: `sha256:${'2'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
       };
     },
-  }), /registered external-effect receipt verifier/);
+  }), (error: unknown) => error instanceof taskRunner.RegisteredCommandsRefusedError && error.reason === 'network_not_denied');
   assert.equal(networkExecutions, 0);
+  // Tasks with registered commands and a network grant are refused before anything runs: their
+  // commands would need the host network. The external-effect receipt path below is refused the
+  // same way until a command-level network deny exists for network-granted tasks.
 
   const effectScript = [
     'const receipt = {',
@@ -1429,20 +1461,22 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
   const receiptDecision = embedDecision(receiptBase, 'release', decisionKeys.privateKey, new Date());
   const receiptUnsigned = { ...receiptBase, actionDecision: receiptDecision };
   const receiptTask = { ...receiptUnsigned, signature: signCanonicalObject(receiptUnsigned, taskKeys.privateKey) } as TaskEnvelope;
-  const effectResult = await executeTask({
+  let effectExecutions = 0;
+  await assert.rejects(executeTask({ registeredCommandSandbox: STAND_IN_SANDBOX,
     task: receiptTask, policy: receiptPolicy, workspace,
     relayStateDirectory: resolve(root, 'effect-state'), serverPublicKey: taskKeys.publicKey,
     receiptStore: new FileTaskReceiptStore(resolve(root, 'effect-receipts')),
     actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey },
-    providerExecutor: async () => ({
-      provider: 'codex', exitCode: 0, signal: null, timedOut: false,
-      stdout: 'provider requested the remote change', stderr: '',
-      stdoutSha256: `sha256:${'3'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
-    }),
-  });
-  assert.equal(effectResult.status, 'completed');
-  assert.equal(effectResult.actionAcknowledgement?.disposition, 'executed');
-  assert.equal(effectResult.externalEffectReceipt?.providerReference, 'remote-change-42');
+    providerExecutor: async () => {
+      effectExecutions += 1;
+      return {
+        provider: 'codex', exitCode: 0, signal: null, timedOut: false,
+        stdout: 'provider requested the remote change', stderr: '',
+        stdoutSha256: `sha256:${'3'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+      };
+    },
+  }), (error: unknown) => error instanceof taskRunner.RegisteredCommandsRefusedError && error.reason === 'network_not_denied');
+  assert.equal(effectExecutions, 0);
 });
 
 test('one-use receipt replay guard rejects a second consumption atomically', async () => {
@@ -1619,7 +1653,7 @@ function probeCommand(inherit?: string[]) {
   };
 }
 
-test('acceptance commands run with an explicit environment instead of the relay process environment', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
+test('acceptance commands run with an explicit environment instead of the relay process environment', async (t) => {
   const fixture = await requiredArtifactFixture(t, []);
   fixture.policy.tasks.allowedCommands.permitted = probeCommand(['ACCEPTANCE_PERMITTED_INPUT']);
   fixture.policy.tasks.allowedCommands.plain = probeCommand();
@@ -1649,16 +1683,19 @@ test('acceptance commands run with an explicit environment instead of the relay 
     assert.equal(environmentValue(environment, 'DHARMA_ACTION_DIGEST'), undefined);
     const essentials = process.platform === 'win32'
       ? ['PATH', 'PATHEXT', 'SystemRoot', 'ComSpec', 'TEMP', 'USERPROFILE']
-      : ['PATH', 'HOME', 'TMPDIR', 'LANG'];
+      : ['PATH', 'LANG'];
     for (const name of essentials) {
       assert.equal(environmentValue(environment, name), environmentValue(process.env, name), name);
     }
+    // Inside the sandbox the home and temporary folders are the sandbox's own, empty ones.
+    assert.equal(environmentValue(environment, 'HOME'), SANDBOX_HOME);
+    assert.equal(environmentValue(environment, 'TMPDIR'), '/tmp');
   }
   assert.equal(environmentValue(permitted, 'ACCEPTANCE_PERMITTED_INPUT'), 'synthetic-permitted-value');
   assert.equal(environmentValue(plain, 'ACCEPTANCE_PERMITTED_INPUT'), undefined);
 });
 
-test('relay Git checks after an acceptance command do not run a Git monitor hook the command configured', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
+test('relay Git checks after an acceptance command do not run a Git monitor hook the command configured', async (t) => {
   const fixture = await requiredArtifactFixture(t, []);
   const marker = resolve(fixture.root, 'monitor-hook-ran.json');
   const hook = resolve(fixture.root, 'monitor-hook.cjs');
@@ -1683,7 +1720,7 @@ test('relay Git checks after an acceptance command do not run a Git monitor hook
   assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
 });
 
-test('acceptance command policy cannot inherit runner-owned environment names', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
+test('acceptance command policy cannot inherit runner-owned environment names', async (t) => {
   for (const name of [...RUNNER_OWNED_NAMES, 'dharma_action_digest']) {
     await t.test(name, async (child) => {
       const fixture = await requiredArtifactFixture(child, []);
@@ -1719,7 +1756,7 @@ test('signed tasks cannot carry their own acceptance-command environment', async
   }
 });
 
-test('decision-bound acceptance variables come only from the verified decision receipt', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async () => {
+test('decision-bound acceptance variables come only from the verified decision receipt', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-acceptance-decision-'));
   try {
     const workspace = resolve(root, 'workspace');
@@ -1759,7 +1796,7 @@ test('decision-bound acceptance variables come only from the verified decision r
       DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'synthetic-forged-key',
       DHARMA_ACTION_DIGEST: 'synthetic-forged-digest',
       DHARMA_TASK_WORKTREE: 'synthetic-forged-worktree',
-    }, () => executeTask({
+    }, () => executeTask({ registeredCommandSandbox: STAND_IN_SANDBOX,
       task, policy, workspace, relayStateDirectory: resolve(root, 'state'), serverPublicKey: taskKeys.publicKey,
       receiptStore: new FileTaskReceiptStore(resolve(root, 'receipts')),
       actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey },
@@ -1889,4 +1926,153 @@ test('acceptance environment builder handles Windows essentials and case-insensi
         /environment/, `${platform} ${name}`);
     }
   }
+});
+
+// Acceptance commands start only through the sandbox, and the relay Git checks that
+// follow a sandboxed command use pinned repository paths.
+type SpawnRecord = { command: string; argv: string[]; options: { cwd?: string; env?: Record<string, string>; stdio?: unknown; shell?: boolean; detached?: boolean }; pid?: number };
+function recordSpawns(t: TestContext, replace?: (record: SpawnRecord) => ReturnType<typeof childProcess.spawn> | undefined) {
+  const records: SpawnRecord[] = [];
+  const current = childProcess.spawn;
+  const patch = t.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
+    const record: SpawnRecord = { command, argv: [...argv], options: options as SpawnRecord['options'] };
+    records.push(record);
+    const child = replace?.(record) ?? current(command, argv, options);
+    if (child.pid !== undefined) record.pid = child.pid;
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { patch.mock.restore(); syncBuiltinESMExports(); });
+  return records;
+}
+
+async function commandFixture(t: TestContext, script: string, options: { timeoutSeconds?: number } = {}) {
+  const fixture = await requiredArtifactFixture(t, []);
+  fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e', script], timeoutSeconds: options.timeoutSeconds ?? 10 };
+  fixture.unsigned.authority.commands.push({ commandId: 'verify' });
+  fixture.unsigned.acceptance.commands.push({ commandId: 'verify' });
+  return fixture;
+}
+
+test('acceptance commands start bubblewrap with the built argument list, the sandbox environment and a status descriptor', async (t) => {
+  const fixture = await commandFixture(t, 'process.stdout.write("inside")');
+  const spawns = recordSpawns(t);
+  let worktree = '';
+  const receipt = await withParentEnvironment({ ACCEPTANCE_PARENT_SENTINEL: 'synthetic-parent-sentinel' },
+    () => executeTask({ ...fixture.input, task: fixture.signed(),
+      providerExecutor: async ({ workspace }) => { worktree = workspace; return fixture.providerResult; } }));
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  assert.equal(receipt.commandResults[1]?.stdout, 'inside');
+  const sandboxed = spawns.filter(({ command }) => command === STAND_IN_SANDBOX.bwrapPath);
+  assert.equal(sandboxed.length, 1);
+  const [record] = sandboxed;
+  assert.deepEqual(record!.argv, sandboxCommandLine(STAND_IN_SANDBOX, { worktree, cwd: worktree,
+    argv: [process.execPath, '-e', 'process.stdout.write("inside")'] }));
+  assert.deepEqual(record!.options.stdio, ['ignore', 'pipe', 'pipe', 'pipe']);
+  assert.equal(record!.options.shell, false);
+  assert.equal(record!.options.cwd, worktree);
+  assert.equal(record!.options.env?.HOME, SANDBOX_HOME);
+  assert.equal(record!.options.env?.TMPDIR, '/tmp');
+  assert.equal(record!.options.env?.DHARMA_TASK_WORKTREE, worktree);
+  assert.equal(Object.hasOwn(record!.options.env ?? {}, 'ACCEPTANCE_PARENT_SENTINEL'), false);
+  assert.equal(spawns.filter(({ command, argv }) => command === process.execPath
+    && argv[1] === 'process.stdout.write("inside")').length, 0, 'the command never starts directly');
+});
+
+test('the provider gets no command tools when the task names registered commands', async (t) => {
+  const fixture = await commandFixture(t, 'process.exit(0)');
+  const seen: string[][][] = [];
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async (input) => { seen.push(input.allowedCommandArgv); return fixture.providerResult; } });
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  assert.deepEqual(seen, [[]]);
+});
+
+test('a sandbox that never reports its child fails the task once and never runs the command on the host', async (t) => {
+  const fixture = await commandFixture(t, 'process.exit(0)');
+  const marker = resolve(fixture.root, 'host-run');
+  fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e',
+    `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`], timeoutSeconds: 10 };
+  const spawns = recordSpawns(t, ({ command, options }) => command === STAND_IN_SANDBOX.bwrapPath
+    ? hostSpawn(process.execPath, ['-e', 'process.stderr.write("bwrap: setting up uid map: Permission denied\\n"); process.exit(1)'], options as childProcess.SpawnOptions)
+    : undefined);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
+  assert.equal(receipt.status, 'failed');
+  const last = receipt.commandResults.at(-1)!;
+  assert.equal(last.commandId, 'runner');
+  assert.match(last.stderr, /registered_command_sandbox_failed/);
+  assert.equal(spawns.filter(({ command }) => command === STAND_IN_SANDBOX.bwrapPath).length, 1);
+  assert.equal(await readFile(marker, 'utf8').catch(() => undefined), undefined);
+});
+
+test('a timed-out sandboxed command kills the bubblewrap process group', { skip: process.platform === 'win32' }, async (t) => {
+  const fixture = await commandFixture(t, 'setInterval(() => {}, 1000)', { timeoutSeconds: 1 });
+  const spawns = recordSpawns(t);
+  const kills: Array<[number, string | number | undefined]> = [];
+  const originalKill = process.kill.bind(process);
+  t.mock.method(process, 'kill', (pid: number, signal?: string | number) => { kills.push([pid, signal]); return originalKill(pid, signal); });
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
+  const result = receipt.commandResults.find(({ commandId }) => commandId === 'verify');
+  assert.equal(result?.timedOut, true);
+  assert.equal(receipt.status, 'failed');
+  const sandboxPid = spawns.find(({ command }) => command === STAND_IN_SANDBOX.bwrapPath)?.pid;
+  assert.ok(sandboxPid);
+  assert.ok(kills.some(([pid, signal]) => pid === -sandboxPid! && signal === 'SIGKILL'), 'the bubblewrap process group is killed');
+});
+
+test('relay Git after a sandboxed command uses the pinned repository paths and no diff drivers', async (t) => {
+  const fixture = await commandFixture(t, 'process.exit(0)');
+  const spawns = recordSpawns(t);
+  let worktree = '';
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => { worktree = workspace; return fixture.providerResult; } });
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  const sandboxIndex = spawns.findIndex(({ command }) => command === STAND_IN_SANDBOX.bwrapPath);
+  const before = spawns.slice(0, sandboxIndex).filter(({ command }) => command === 'git');
+  const after = spawns.slice(sandboxIndex + 1).filter(({ command }) => command === 'git');
+  assert.ok(before.length > 0 && after.length >= 2);
+  for (const { argv } of before) assert.equal(argv.some(value => value.startsWith('--git-dir=')), false, 'provider-phase Git is unchanged');
+  const pointer = await readFile(resolve(worktree, '.git'), 'utf8');
+  const gitDir = resolve(worktree, pointer.replace(/^gitdir:\s*/, '').trim());
+  for (const { argv } of after) {
+    assert.ok(argv.includes(`--git-dir=${gitDir}`), argv.join(' '));
+    assert.ok(argv.includes(`--work-tree=${worktree}`), argv.join(' '));
+    if (argv.includes('diff')) assert.ok(argv.includes('--no-ext-diff') && argv.includes('--no-textconv'), argv.join(' '));
+  }
+});
+
+test('a changed worktree Git pointer after a sandboxed command fails the task', async (t) => {
+  // The stand-in runs the command on the host, so it can change the pointer; the real sandbox
+  // mounts the pointer read-only (registeredCommandSandbox.linux.test.ts).
+  const fixture = await commandFixture(t, 'require("node:fs").appendFileSync(".git", "\\n")');
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /Git pointer changed/);
+});
+
+test('tasks without registered commands keep plain relay Git and never start bubblewrap', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const spawns = recordSpawns(t);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
+  assert.equal(receipt.status, 'completed');
+  assert.equal(spawns.some(({ command }) => command === STAND_IN_SANDBOX.bwrapPath), false);
+  assert.equal(spawns.some(({ argv }) => argv.some(value => value.startsWith('--git-dir=') || value === '--no-ext-diff')), false);
+});
+
+test('commands run from the policy loaded before the provider; the workspace policy file is not read again', async (t) => {
+  const fixture = await commandFixture(t, 'process.stdout.write("from loaded policy")');
+  await mkdir(resolve(fixture.workspace, '.dharma'));
+  await writeFile(resolve(fixture.workspace, '.dharma', 'approved-policy.json'), JSON.stringify({ tasks: { allowedCommands: {
+    verify: { argv: [process.execPath, '-e', 'process.stdout.write("from workspace file")'], timeoutSeconds: 10 } } } }));
+  const fsPromises = (await import('node:fs/promises')).default;
+  const reads: string[] = [];
+  const original = fsPromises.readFile;
+  const patch = t.mock.method(fsPromises, 'readFile', (...args: Parameters<typeof original>) => {
+    reads.push(String(args[0])); return original(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { patch.mock.restore(); syncBuiltinESMExports(); });
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
+  assert.equal(receipt.commandResults[1]?.stdout, 'from loaded policy');
+  assert.equal(reads.some(path => path.endsWith('approved-policy.json')), false);
 });
