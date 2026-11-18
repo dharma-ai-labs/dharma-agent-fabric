@@ -43,13 +43,13 @@ async function fixture(t: TestContext, provider: 'codex' | 'claude' = 'codex') {
     skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 }, retention: {}, budgets: {},
   };
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-  const signed = (commands: { authority: string[]; acceptance: string[] }) => {
+  const signed = (commands: { authority: string[]; acceptance: string[] }, network = 'deny') => {
     const unsigned = {
       schema: 'dharma.task/v1' as const, taskId: randomUUID(), organizationId: 'org_test', workspaceId: 'workspace',
       taskType: 'external_request' as const, target: { deviceId: 'device', provider },
       skillBundle: null, instructions: 'Verify the repository.', requiredSkills: [],
       authority: { readPaths: ['.'], writePaths: [], commands: commands.authority.map(commandId => ({ commandId })),
-        network: 'deny', git: 'task_branch' as const },
+        network, git: 'task_branch' as const },
       execution: { isolation: 'git_worktree' as const, timeoutSeconds: 10, leaseSeconds: 20, maximumConcurrentAgents: 1 },
       acceptance: { commands: commands.acceptance.map(commandId => ({ commandId })), requiredArtifacts: [] },
       budget: { mode: 'byok_local' as const, maximumDharmaCostCents: 0 },
@@ -79,7 +79,19 @@ async function exists(path: string) {
   return access(path).then(() => true, () => false);
 }
 
-function assertRefusal(error: unknown) {
+const USABLE_SANDBOX = {
+  usable: true as const, host: 'linux' as const, bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0',
+  bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: 'bwrap-policy/1',
+  layout: { bin: 'symlink', sbin: 'symlink', lib: 'symlink', lib32: 'absent', lib64: 'symlink', libx32: 'absent' } as const,
+  nodePrefix: '/usr', bindNodePrefix: false, maskNodeEtc: false, disableUserns: true,
+};
+
+const assertRefusal = (reason?: string) => (error: unknown) => {
+  assert.equal(Reflect.get(error as object, 'reason'), reason ?? 'sandbox_probe_failed');
+  return assertRefusalError(error);
+};
+
+function assertRefusalError(error: unknown) {
   const RefusalError = Reflect.get(taskRunner, 'RegisteredCommandsRefusedError') as (new (...args: never[]) => Error) | undefined;
   assert.equal(typeof RefusalError, 'function', 'task-runner exports RegisteredCommandsRefusedError');
   assert.ok(error instanceof RefusalError!);
@@ -100,7 +112,7 @@ for (const [name, commands] of [
     const spawns = countSpawns(t);
     let providerCalls = 0;
     await assert.rejects(executeTask({ ...f.input, task,
-      providerExecutor: async () => { providerCalls++; throw new Error('provider must not start'); } }), assertRefusal);
+      providerExecutor: async () => { providerCalls++; throw new Error('provider must not start'); } }), assertRefusal());
     assert.equal(providerCalls, 0);
     assert.deepEqual(spawns, [], 'no child process is spawned on refusal');
     assert.equal(await exists(f.marker), false, 'the registered command did not run');
@@ -114,10 +126,29 @@ test('a Claude task that names registered commands is refused before any provide
   const task = f.signed({ authority: ['verify'], acceptance: ['verify'] });
   const spawns = countSpawns(t);
   // No injected executor: the default provider adapter would hand the commands to Claude as Bash tools.
-  await assert.rejects(executeTask({ ...f.input, task }), assertRefusal);
+  await assert.rejects(executeTask({ ...f.input, task }), assertRefusal());
   assert.deepEqual(spawns, [], 'neither the provider CLI nor Git was started');
   assert.equal(await exists(f.marker), false);
 });
+
+for (const [name, sandbox, network, reason] of [
+  ['an unusable sandbox', { usable: false, reason: 'user_namespaces_unavailable', detail: 'd', fix: 'f' }, 'deny', 'user_namespaces_unavailable'],
+  ['a macOS or Windows host', { usable: false, reason: 'platform_unsupported', detail: 'd', fix: 'f' }, 'deny', 'platform_unsupported'],
+  ['a network grant, even with a usable sandbox', USABLE_SANDBOX, 'package_registry_only', 'network_not_denied'],
+] as const) {
+  test(`a task that names registered commands on ${name} is refused with reason ${reason}`, async (t) => {
+    const f = await fixture(t);
+    const task = f.signed({ authority: ['verify'], acceptance: ['verify'] }, network);
+    const spawns = countSpawns(t);
+    let providerCalls = 0;
+    await assert.rejects(executeTask({ ...f.input, task, registeredCommandSandbox: sandbox,
+      providerExecutor: async () => { providerCalls++; throw new Error('provider must not start'); } }), assertRefusal(reason));
+    assert.equal(providerCalls, 0);
+    assert.deepEqual(spawns, []);
+    assert.equal(await exists(f.marker), false);
+    assert.equal(await exists(resolve(f.relayStateDirectory, 'worktrees', task.taskId)), false, 'no worktree was created');
+  });
+}
 
 test('a task that names no registered commands runs exactly as before', async (t) => {
   const f = await fixture(t);
