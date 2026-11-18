@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import * as taskRunner from '@dharma-ai-labs/agent-fabric-task-runner';
 
 type Caller = (fabric: unknown, leaseSeconds: number) => Promise<Record<string, unknown>>;
 
@@ -91,6 +92,9 @@ function fixture() {
       if (refreshFailure) throw refreshFailure;
       return policy;
     },
+    // The real task-runner predicate, so the relay and runner checks cannot drift.
+    REGISTERED_COMMANDS_REFUSED: taskRunner.REGISTERED_COMMANDS_REFUSED,
+    taskNamesRegisteredCommands: taskRunner.taskNamesRegisteredCommands,
     PROVIDER_UNSAFE_PATH: 'provider_unsafe_path',
     relayProviderUnsafePath: async (provider: string) => {
       if (!unsafeProviders.includes(provider)) return false;
@@ -250,11 +254,8 @@ test('an isolated VM Error realm is detected by the timeout-event assertion, not
 // task first: it synced policy, took the activation lock, posted `started` and hashed skill files,
 // and then the runner's refusal escaped without a terminal event and ended the relay loop.
 // The relay must refuse such a task right after the poll, with one terminal `failed` event.
-async function registeredCommandPorts(f: ReturnType<typeof fixture>) {
-  const taskRunner = await import('@dharma-ai-labs/agent-fabric-task-runner');
+function registeredCommandPorts(f: ReturnType<typeof fixture>) {
   const RefusedError = taskRunner.RegisteredCommandsRefusedError;
-  f.dependencies.REGISTERED_COMMANDS_REFUSED = taskRunner.REGISTERED_COMMANDS_REFUSED;
-  f.dependencies.taskNamesRegisteredCommands = Reflect.get(taskRunner, 'taskNamesRegisteredCommands');
   f.dependencies.requiredSkillFilesForTask = async () => { f.calls.push('skill-hash'); return []; };
   // The runner's own refusal stays as the backstop behind the relay check.
   f.dependencies.executeTask = async (input: { task: typeof f.task }) => {
@@ -277,7 +278,7 @@ for (const [name, names] of [
 ] as const) {
   test(`a polled task with ${name} gets one terminal failed preflight event and nothing else runs`, async () => {
     const f = fixture(); names(f.task);
-    const code = await registeredCommandPorts(f);
+    const code = registeredCommandPorts(f);
     assert.equal(code, 'registered_commands_refused');
     const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
     assert.deepEqual({ ...result }, { ok: false, taskId: f.task.taskId, code });
@@ -291,7 +292,7 @@ for (const [name, names] of [
 
 test('a task without registered commands still gets started and runs as before', async () => {
   const f = fixture();
-  await registeredCommandPorts(f);
+  registeredCommandPorts(f);
   const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
   assert.equal(result.ok, true); assert.equal(result.taskId, f.task.taskId);
   assert.deepEqual(f.calls, [...beforeDeviceRejection, 'public-key', 'active-skill', 'event:started',

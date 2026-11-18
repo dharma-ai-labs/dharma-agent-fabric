@@ -35,6 +35,8 @@ import {
   FileActionExecutionJournal,
   FileTaskReceiptStore,
   providerInstructionsForTask,
+  REGISTERED_COMMANDS_REFUSED,
+  taskNamesRegisteredCommands,
   type TaskEnvelope,
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
@@ -7866,6 +7868,13 @@ async function executeOneTask(
       phase: 'preflight', code: 'knowledge_only_task_denied',
     });
     return { ok: false, taskId: task.taskId, code: 'knowledge_only_task_denied' };
+  }
+  // The runner refuses tasks that name registered commands until command isolation
+  // exists. Refuse them here too, before policy sync, locks, `started` or skill hashing,
+  // so the task gets a terminal event and the relay loop keeps running.
+  if (taskNamesRegisteredCommands(task)) {
+    await fabric.postTaskEvent(task.taskId, 'failed', { phase: 'preflight', code: REGISTERED_COMMANDS_REFUSED });
+    return { ok: false, taskId: task.taskId, code: REGISTERED_COMMANDS_REFUSED };
   }
   const taskPolicy = await refreshVerifiedWorkspacePolicyForTransmission(
     resolve(workspace.path, '.dharma', 'approved-policy.json'),
