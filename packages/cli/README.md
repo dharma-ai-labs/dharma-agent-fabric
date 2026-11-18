@@ -621,8 +621,16 @@ Work receipts expose only `portableExport` status and its blob hash, never the
 artifact content or a bootstrap grant. Policy scope, expiry, immutability and
 size are checked again during preparation. The artifact is task-level evidence,
 not native-wire replay, a publication, an independent grade or an admitted
-learning observation. This local preparation does not upload it. Server retention,
-device authentication, current authority and dedicated admission remain required.
+learning observation. The client does not upload it yet: no server route accepts
+task exports (issue #464), so staged exports are held encrypted in the local
+vault and session health reports `taskExports` as `pending` with the code
+`task_export_upload_not_available` and the number held. Holding an export does
+not keep its raw capture: the capture still expires after the local raw retention
+period (30 days by default), and health then reports `taskExports` as `blocked`
+with the code `task_export_retained_content_unavailable`. The switch
+`CODEX_TASK_EXPORT_UPLOAD_ENABLED` in `namedSessionTaskExportSync.ts` turns the
+upload on once a server route exists. Server retention, device authentication,
+current authority and dedicated admission remain required.
 
 If an authoritative scoped question read reports expiry, named-session recovery
 retains the encrypted answer and an encrypted expiry disposition without
