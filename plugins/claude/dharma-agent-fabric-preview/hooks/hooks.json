@@ -1,0 +1,27 @@
+{
+  "description": "Agent Fabric session messages (preview). SessionStart records this session's id and cwd on this device only. UserPromptSubmit adds framed, untrusted messages as context only when this session is the attached one. Both exit 0 and print nothing otherwise. There is no Stop hook.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/dharma-hook.mjs\" session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/dharma-hook.mjs\" inbox",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
