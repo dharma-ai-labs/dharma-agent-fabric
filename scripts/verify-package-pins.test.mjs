@@ -93,3 +93,19 @@ test('CLI pins provider-adapters published with providerCapabilityWithoutExecuta
     `provider-adapters ${provider.version} is published without providerCapabilityWithoutExecutable`);
   assert.equal(cli.dependencies[provider.name], provider.version);
 });
+
+test('CLI pins contracts, task-runner and local-vault published with the 0.2.225 exports', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const [cli, contracts, runner, vault] = await Promise.all(['cli', 'contracts', 'task-runner', 'local-vault'].map(manifest));
+  const atLeast = (version, floor) => version.localeCompare(floor, undefined, {numeric: true}) >= 0;
+  // Each of these is on npm without an export the 0.2.225 CLI uses, so a published CLI pinned to it
+  // would fail at module load or at the call: contracts 0.1.18 lacks the session-message/v1 helpers (#445), task-runner
+  // 0.1.43 lacks registeredCommandEnvironment and acceptanceCommandEnvironmentPolicy (#487, #489), and
+  // local-vault 0.1.37 lacks countProviderSessionTaskExports (#472).
+  assert.ok(atLeast(contracts.version, '0.1.19'), `contracts ${contracts.version} is published without the session-message helpers`);
+  assert.ok(atLeast(runner.version, '0.1.44'), `task-runner ${runner.version} is published without the command environment exports`);
+  assert.ok(atLeast(vault.version, '0.1.38'), `local-vault ${vault.version} is published without countProviderSessionTaskExports`);
+  assert.equal(cli.dependencies[contracts.name], contracts.version);
+  assert.equal(cli.dependencies[runner.name], runner.version);
+  assert.equal(cli.dependencies[vault.name], vault.version);
+});

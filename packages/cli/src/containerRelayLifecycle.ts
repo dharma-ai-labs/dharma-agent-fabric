@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { pinnedRollbackControllerMatches } from './containerRelayRecovery.js';
 import { watchOwnedChild, type OwnedChildLifecycle } from './ownedChildLifecycle.js';
 import { currentBootstrapHostScope } from './bootstrapHostScope.js';
+import { relayChildEnvironment } from './credentialEnvironment.js';
 
 export interface ContainerProcessIdentity { pid: number; uid: number; startTicks: string; argv: string[]; parentPid?: number; processGroupId?: number; sessionId?: number }
 export interface ContainerChildIdentity { pid: number; uid: number; parentPid: number; startTicks: string }
@@ -516,7 +517,7 @@ export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOpt
   const restartDelayMs = options.restartDelayMs ?? 5000;
   const spawnRelay = options.spawnRelay || ((registration: ContainerRelayRegistration) => spawn(process.execPath,
     [bin, 'relay', 'supervise', '--policy', registration.policy], { cwd: registration.workspace, stdio: 'ignore',
-      env: { ...process.env, DHARMA_HOME: options.home } }));
+      env: { ...relayChildEnvironment(), DHARMA_HOME: options.home } }));
   try {
     await writePrivateJson(options, 'container-entrypoint.json', marker);
     while (!options.signal.aborted) {

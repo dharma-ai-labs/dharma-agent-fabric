@@ -9,6 +9,10 @@ const CONTROL_AGENT_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-ag
 const CONTROL_AGENT_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/control-agent\/(sessions(?:\?sessionId=[0-9a-f-]{36})?|sessions\/[0-9a-f-]{36}\/events(?:\?afterSequence=\d+)?)$/i;
 const AGENT_FABRIC_CANDIDATE_RECOVERY_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/repository-agents\/[0-9a-f-]{36}\/package-candidates\?workspaceId=[0-9a-f-]{36}&operationId=sha256%3A[a-f0-9]{64}$/i;
 const AGENT_FABRIC_CANDIDATE_FENCE_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/repository-agents\/[0-9a-f-]{36}\/package-candidates\/fence$/i;
+// Session messaging (named sessions and messages between them). Exact paths only, no query strings;
+// the platform checks the device signature, the organization flag and the member allowlist.
+const SESSION_MESSAGING_POST_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/(session-names\/attach|session-messages|session-messages\/poll|session-messages\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(?:delivered|ack|reply))$/i;
+const SESSION_MESSAGING_GET_ROUTE = /^\/api\/v1\/orgs\/org_[A-Za-z0-9]+\/agent-fabric\/(session-names|session-messages\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/delivery)$/i;
 const FORWARDED_HEADERS = new Set([
   'content-type', 'idempotency-key', 'x-dharma-correlation-id', 'x-dharma-device-id', 'x-dharma-session-id',
   'x-dharma-message-id', 'x-dharma-timestamp', 'x-dharma-nonce', 'x-dharma-sequence', 'x-dharma-signature',
@@ -31,9 +35,10 @@ export function parseRelayRequest(value: unknown): RelayRequest {
   if (method !== 'GET' && method !== 'POST') throw new Error('route_not_allowed');
   const methodAllowed = method === 'POST'
     ? AGENT_FABRIC_POST_ROUTE.test(input.pathname) || CONTROL_AGENT_POST_ROUTE.test(input.pathname)
-      || AGENT_FABRIC_CANDIDATE_FENCE_POST_ROUTE.test(input.pathname)
+      || AGENT_FABRIC_CANDIDATE_FENCE_POST_ROUTE.test(input.pathname) || SESSION_MESSAGING_POST_ROUTE.test(input.pathname)
     : AGENT_FABRIC_GET_ROUTE.test(input.pathname) || AGENT_FABRIC_SOURCE_GET_ROUTE.test(input.pathname)
-      || AGENT_FABRIC_CANDIDATE_RECOVERY_GET_ROUTE.test(input.pathname) || CONTROL_AGENT_GET_ROUTE.test(input.pathname);
+      || AGENT_FABRIC_CANDIDATE_RECOVERY_GET_ROUTE.test(input.pathname) || CONTROL_AGENT_GET_ROUTE.test(input.pathname)
+      || SESSION_MESSAGING_GET_ROUTE.test(input.pathname);
   if (!methodAllowed) throw new Error('route_not_allowed');
   const maximumBodyBytes = method === 'POST' && AGENT_FABRIC_CANDIDATE_FENCE_POST_ROUTE.test(input.pathname) ? 4096
     : method === 'POST' && /\/repository-agents\/[0-9a-f-]{36}\/package-candidates$/i.test(input.pathname)

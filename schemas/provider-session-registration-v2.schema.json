@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/provider-session-registration/v2",
+  "title": "Named delivery-only provider session registration request",
+  "description": "Sent on a device-signed route. The platform derives the member from the device. No provider thread or session id is ever part of this request.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "action",
+    "organizationId",
+    "deviceId",
+    "bindingId",
+    "name",
+    "provider",
+    "delivery",
+    "mode",
+    "expectedRevision"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dharma.provider-session-registration/v2"
+    },
+    "action": {
+      "enum": [
+        "attach",
+        "inspect",
+        "heartbeat",
+        "detach"
+      ]
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "deviceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "bindingId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,47}$"
+    },
+    "provider": {
+      "enum": [
+        "codex",
+        "claude"
+      ]
+    },
+    "delivery": {
+      "enum": [
+        "codex_queue",
+        "claude_hook"
+      ]
+    },
+    "mode": {
+      "const": "cooperative"
+    },
+    "expectedRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "provider",
+        "delivery"
+      ],
+      "properties": {
+        "provider": {
+          "const": "codex"
+        },
+        "delivery": {
+          "const": "codex_queue"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "provider",
+        "delivery"
+      ],
+      "properties": {
+        "provider": {
+          "const": "claude"
+        },
+        "delivery": {
+          "const": "claude_hook"
+        }
+      }
+    }
+  ]
+}

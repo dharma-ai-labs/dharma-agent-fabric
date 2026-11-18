@@ -124,9 +124,13 @@ import {observeNamedSessionStartupChild} from './namedSessionStartupChild.js';
 import {namedSessionStartupPhaseError, type NamedSessionStartupPhase} from './namedSessionStartupDiagnostic.js';
 import {verifiedCliProcessArguments} from './cliProcessIdentity.js';
 import { retainNamedSessionRepositoryState } from './namedSessionRepositoryState.js';
-import { syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
+import { codexTaskExportUpload, syncNamedSessionTaskExports } from './namedSessionTaskExportSync.js';
 import type { RepositoryPackageSnapshot } from './repositoryPackage.js';
 import { readNamedSessionPackageContent, readNamedSessionRepositoryContext, verifyNamedSessionVisibleSkill } from './namedSessionPackageGate.js';
+import { sessionNamesCommand, type SessionMessagingHost } from './sessionNames.js';
+import { readSessionMessageStdin, sessionMessageCommand } from './sessionMessageCommands.js';
+import { sessionWatchCommand } from './sessionWatch.js';
+import { claudeHookCommand, readHookStdin } from './claudeSessionHook.js';
 import { openCodexAppServerTransport } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-transport';
 import { readCodexPublicContext } from '@dharma-ai-labs/agent-fabric-provider-adapters/experimental/codex-session';
 import { createNamedSessionTrust, isNamedSessionOwnerReceipt, isNamedSessionReconnectReceipt, renewNamedSessionLifetime } from './namedSessionTrust.js';
@@ -164,8 +168,10 @@ import {writeBootstrapHostJson, writeBootstrapHostText} from './bootstrapHostFil
 export { openCooperativeInboxSession, type CooperativeSessionContext } from './cooperativeInboxSession.js';
 export type {CodexBootstrapHostInput} from './bootstrapHostScope.js';
 import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTool.js';
+import {captureCredentialEnvironment, credentialVariable, relayChildEnvironment} from './credentialEnvironment.js';
+import {smokeCommandPolicy} from './smokeCommandEnvironment.js';
 
-const VERSION = '0.2.224';
+const VERSION = '0.2.225';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -264,6 +270,7 @@ function print(value: Output): void {
 }
 
 export function formatCommandOutput(value:unknown):string{
+  if(value==='')return '';
   if(typeof value==='string')return value+'\n';
   const streaming=value&&typeof value==='object'&&!Array.isArray(value)
     &&(value as Record<string,unknown>).schema==='dharma.device-signing-maintenance-controller-progress/v1';
@@ -328,9 +335,12 @@ async function openBootstrapVault(options: {root: string; rawLocalDays?: number}
     | import('@dharma-ai-labs/agent-fabric-local-vault').ScopedLocalVault | undefined;
   try {
     await scope?.assert();
-    const {LocalVault, loadOrCreateVaultMasterKey} = scope
+    const {LocalVault, loadExplicitTestKey, loadOrCreateVaultMasterKey} = scope
       ? await scope.step(() => loadVaultModule()) : await loadVaultModule();
-    key = await loadOrCreateVaultMasterKey(undefined, scope);
+    // The explicit key pair is read from memory: start-up capture removed it from process.env.
+    key = !scope && credentialVariable('DHARMA_ALLOW_ENV_KEY') === '1'
+      ? loadExplicitTestKey({DHARMA_ALLOW_ENV_KEY: '1', DHARMA_VAULT_KEY: credentialVariable('DHARMA_VAULT_KEY')})
+      : await loadOrCreateVaultMasterKey(undefined, scope);
     await scope?.assert();
     vault = scope ? await LocalVault.open({...snapshot, masterKey: key}, scope)
       : await LocalVault.open({...snapshot, masterKey: key});
@@ -1901,7 +1911,7 @@ async function organizationApi(flags: Map<string, string | boolean>) {
   try { enrolled = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig; } catch {}
   const organizationId = String(flags.get('organization-id') || enrolled?.organizationId || '').trim();
   if (!organizationId) throw new Error('Organization command requires --organization-id or an enrolled device.');
-  const token = (hostScope ? '' : String(process.env.DHARMA_ORG_API_TOKEN || '').trim())
+  const token = (hostScope ? '' : String(credentialVariable('DHARMA_ORG_API_TOKEN') || '').trim())
     || await loadOrganizationApiToken({
       hqUrl: enrolled?.hqUrl || portalUrl(flags),
       organizationId,
@@ -2417,7 +2427,7 @@ async function startRelayDaemon(policyPath: string) {
     } else {
       await step(async () => {
         const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
-          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: process.env,
+          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: relayChildEnvironment(),
         });
         if (hostScope) captureBootstrapHostChild(hostScope, child);
         else child.unref();
@@ -2530,7 +2540,7 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
       start: () => spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
         cwd: dirname(dirname(policyPath)),
         stdio: 'ignore',
-        env: process.env,
+        env: relayChildEnvironment(),
       }),
       onExit: async exit => {
         const path = relayChildFailurePath();
@@ -3754,7 +3764,7 @@ async function bootstrap(flags: Map<string, string | boolean>, hostScope?: Boots
       hqUrl, organizationId, installationId: config.installationId,
       hostScope: currentBootstrapHostScope(),
     })));
-    if (!organizationApiTokenStored && (currentBootstrapHostScope() || !String(process.env.DHARMA_ORG_API_TOKEN || '').trim())) {
+    if (!organizationApiTokenStored && (currentBootstrapHostScope() || !String(credentialVariable('DHARMA_ORG_API_TOKEN') || '').trim())) {
       credentialFailure = 'organization_api_credentials_required';
     }
   } catch {
@@ -5466,6 +5476,20 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
   const hostScope = currentBootstrapHostScope();
   const setupSessionScope = currentAcceptedSetupSessionScope();
   const supervisorOwner = currentNamedSessionChildOwner();
+  if (action === 'attach' || action === 'list') {
+    // Delivery-only bindings carry messages only, so the Linux sandbox and workspace gates below do not
+    // apply; the platform refuses to route any execution to a codex_queue or claude_hook binding.
+    if (hostScope || setupSessionScope || supervisorOwner) throw new Error('session_names_scope_invalid');
+    return sessionNamesCommand(action, flags, sessionMessagingHost());
+  }
+  if (action === 'watch') {
+    if (hostScope || setupSessionScope || supervisorOwner) throw new Error('session_names_scope_invalid');
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once('SIGINT', stop); process.once('SIGTERM', stop);
+    try { return await sessionWatchCommand(flags, sessionMessagingHost(), undefined, controller.signal); }
+    finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
+  }
   if(action==='reconcile-stopped-lock'&&(hostScope||setupSessionScope||supervisorOwner
     ||[...flags.keys()].some(k=>!['name','workspace-id','registration-sha256','lock-sha256','apply','dry-run','json'].includes(k))
     ||['apply','dry-run','json'].some(k=>flags.has(k)&&flags.get(k)!==true)
@@ -5651,7 +5675,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     await step(async () => {
       const start = () => {
         const child = spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner,
-          stdio: setupSessionScope ? ['ignore', 'ignore', 'pipe', 'ipc'] : ['ignore', 'ignore', 'pipe'], env: process.env });
+          stdio: setupSessionScope ? ['ignore', 'ignore', 'pipe', 'ipc'] : ['ignore', 'ignore', 'pipe'], env: relayChildEnvironment() });
         startupChild = observeNamedSessionStartupChild(child);
         return child;
       };
@@ -5849,7 +5873,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
       syncTaskExports: () => syncNamedSessionTaskExports({ vault, bindingId: registration!.bindingId,
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
-        send: body => fabric.signedPost('/agent-fabric/codex-task-exports', body) }),
+        send: codexTaskExportUpload(fabric) }),
       withActivationBoundary: (operation, work) => withClientSigningControl({config:fabric.config},()=>withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
@@ -6180,6 +6204,20 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
       disclosureReady: false, note: 'No local source or trajectory history was read.' },
     nativeSkills: nativeSkills.installed, nativeSkillFailures: nativeSkills.failures,
     workspaceSync: synchronized, relay };
+}
+
+/** Process-backed host for `sessions attach|list` and `msg`: the device and signed client are read
+ * only after a command has checked its options and consent. */
+function sessionMessagingHost(): SessionMessagingHost {
+  return { home: dharmaHome(), cwd: process.cwd(), env: process.env, now: () => new Date(),
+    device: async () => {
+      const config = await readDeviceConfig();
+      if (!config) throw new Error('session_messaging_device_not_enrolled');
+      const identity = await enrolledDeviceIdentity(config);
+      return { organizationId: config.organizationId, deviceId: config.deviceId,
+        privateKey: createPrivateKey({ key: identity.privateJwk, format: 'jwk' }) };
+    },
+    transport: () => client(), stdin: () => readSessionMessageStdin(process.stdin) };
 }
 
 async function readDeviceConfig(): Promise<DeviceConfig | null> {
@@ -8853,6 +8891,7 @@ async function activatePreparedSkillUpdate(input: {
   const { workspace, policy, config, destination, fabric, rollout, bundle, sourceRoot, repositoryDelivery } = prepared;
   try {
     const organizationApprovalId = typeof flags.get('approval-id') === 'string' ? String(flags.get('approval-id')) : undefined;
+    const smokeCommandId = typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined;
     if ((bundle.riskClass === 'R3' || bundle.riskClass === 'R4') && !organizationApprovalId) {
       throw new SkillActivationError('approval_required',
         `${bundle.riskClass} skill bundles require organization approval; run dharma skills sync with --approval-id.`);
@@ -8878,14 +8917,15 @@ async function activatePreparedSkillUpdate(input: {
       bundle,
       sourceDirectory: sourceRoot,
       nativeSkillDirectory: destination,
-      policy,
+      // A smoke check runs through a launcher that gives it the explicit command environment.
+      policy: smokeCommandId ? smokeCommandPolicy(policy, smokeCommandId) : policy,
       serverPublicKey: createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: config.serverPublicKeyEd25519 }, format: 'jwk' }),
       devicePrivateKey: createPrivateKey({ key: identity.privateJwk, format: 'jwk' }),
       deviceId: config.deviceId,
       organizationAgentId: String(workspace.repositoryAgentId || ''),
       workspaceId,
       provider,
-      smokeCommandId: typeof flags.get('smoke-command') === 'string' ? String(flags.get('smoke-command')) : undefined,
+      smokeCommandId,
       organizationApprovalId,
       ...(provider === 'agy' ? {
         providerActivationCheck: () => attestAgySkillBundleActivation({
@@ -9849,6 +9889,14 @@ export async function run(argv: string[]): Promise<Output> {
   }
   if (command === 'bootstrap') return bootstrap(flags);
   if (command === 'sessions') return namedSessionCommand(String(subcommand), flags);
+  if (command === 'msg') return sessionMessageCommand(String(subcommand), flags, sessionMessagingHost());
+  if (command === 'hook') {
+    // Run by the Claude plugin 1.0.7-preview hooks; an empty result prints nothing.
+    if (subcommand !== 'claude' || !['session-start', 'inbox'].includes(String(positional[2])) || positional.length !== 3
+      || [...flags].some(([key, value]) => key !== 'dry-run' || value !== true)) throw new Error('claude_hook_command_invalid');
+    return claudeHookCommand(String(positional[2]), { host: sessionMessagingHost(), stdin: () => readHookStdin(process.stdin),
+      dryRun: flags.get('dry-run') === true });
+  }
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
   if (command === 'providers' && subcommand === 'list') return {
@@ -10067,10 +10115,13 @@ export async function run(argv: string[]): Promise<Output> {
 }
 
 if (isDirectExecution(process.argv[1], import.meta.url)) {
+  captureCredentialEnvironment();
   const argv = process.argv.slice(2);
   run(argv).then((value) => {
     print(value);
     process.exitCode = commandExitCode(argv, value);
+    // A hook ends once its output is written: a pending relay socket (up to 90 s) must not keep it alive.
+    if (argv[0] === 'hook') process.stdout.write('', () => process.exit());
   }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${message}\n`);
