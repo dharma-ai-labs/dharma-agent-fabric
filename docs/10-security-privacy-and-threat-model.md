@@ -81,6 +81,46 @@ A task modifies the active developer workspace or external path.
 
 **Controls:** canonical path containment, OS sandbox where possible, worktree root enforcement, write interception, command policy, post-task diff audit.
 
+### T11. Provider-written code runs as the relay user
+
+A registered command (an acceptance command or the external-effect receipt
+command) runs code the provider may have written into the task worktree. Run
+as the relay's operating-system user, it could read that user's credential
+files, the Dharma home, other processes and the network.
+
+**Boundary:** registered commands run only inside a bubblewrap sandbox on Linux
+and WSL2. Each command gets new user, process, IPC, host-name, cgroup and
+network namespaces; no capabilities; an empty read-only root with system
+folders and the relay's Node installation; private `/proc`, `/dev`, `/tmp` and
+home; and the task worktree as the only writable folder, with its `.git`
+pointer read-only. A live probe checks this policy, not only the presence of
+bubblewrap, before every task that names registered commands. Tasks that name
+registered commands are refused before the provider starts when the host has no
+usable sandbox (macOS, native Windows, WSL1, containers, hosts without
+bubblewrap or user namespaces) or when the task's network authority is not
+`deny`. There is no opt-out. A sandbox that fails to start fails the task; the
+command is never re-run on the host. The provider gets no command tools for
+these tasks, so the same commands cannot run unsandboxed during the provider's
+turn. The relay's own Git checks after a command use repository paths pinned
+before the provider ran, check the pointer bytes, and turn off external diff
+and text-conversion drivers.
+
+**Residuals:**
+
+- The provider process is a trusted component, not a sandboxed one. The Codex
+  provider runs under its own sandbox setting; other providers' own tools are
+  outside this boundary.
+- Kernel flaws in namespaces or bubblewrap are out of scope.
+- No seccomp filter yet. On bubblewrap below 0.8.0 (for example Ubuntu 22.04),
+  nested user namespaces are not blocked.
+- Git filters an operator configured outside the repository (for example large
+  file storage) still run during the relay's own Git checks.
+- Skill smoke checks are operator commands and are outside this boundary.
+- Behaviour on real WSL2 hosts, including the Windows interop cut, is checked
+  by the probe on each host but not yet by a recorded qualification.
+- Tasks with registered commands and a network grant are refused; there is no
+  command-level network deny for them yet.
+
 ## Data classification
 
 | Class | Examples | Default handling |
