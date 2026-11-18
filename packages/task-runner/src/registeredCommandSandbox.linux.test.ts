@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, copyFile, cp, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type AddressInfo } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
@@ -187,6 +187,48 @@ if (!expectation) {
     const receipt = await executeTask({ task, policy, workspace: fixture.workspace, relayStateDirectory: fixture.relayStateDirectory,
       serverPublicKey: publicKey, receiptStore: new FileTaskReceiptStore(resolve(fixture.root, 'receipts')),
       registeredCommandSandbox: sandbox, providerExecutor: async () => providerResult });
+    assert.equal(receipt.status, 'completed', JSON.stringify(receipt.commandResults.map(({ commandId, stderr }) => ({ commandId, stderr }))));
+    assert.equal(await readFile(resolve(fixture.relayStateDirectory, 'worktrees', task.taskId, 'reports', 'npm.txt'), 'utf8'), 'npm ran');
+  });
+
+  test('a relay Node installed in a general folder under the home shows only node and npm', async (t) => {
+    // A copy of the relay Node laid out like a tarball unpacked into a per-user folder that also
+    // holds share/ and state/ folders with a synthetic credential canary.
+    const nonce = randomUUID();
+    const prefix = resolve(homedir(), `.dharma-sandbox-it-prefix-${nonce}`);
+    t.after(() => rm(prefix, { recursive: true, force: true }));
+    const hostPrefix = dirname(dirname(await realpath(process.execPath)));
+    await mkdir(resolve(prefix, 'bin'), { recursive: true });
+    await copyFile(process.execPath, resolve(prefix, 'bin', 'node'));
+    await chmod(resolve(prefix, 'bin', 'node'), 0o755);
+    await cp(resolve(hostPrefix, 'lib', 'node_modules', 'npm'), resolve(prefix, 'lib', 'node_modules', 'npm'), { recursive: true });
+    await symlink('../lib/node_modules/npm/bin/npm-cli.js', resolve(prefix, 'bin', 'npm'));
+    await mkdir(resolve(prefix, 'share', 'tool'), { recursive: true });
+    await mkdir(resolve(prefix, 'state'), { recursive: true });
+    const shareCanary = resolve(prefix, 'share', 'tool', 'auth.json');
+    const stateCanary = resolve(prefix, 'state', 'history');
+    await writeFile(shareCanary, 'synthetic credential canary');
+    await writeFile(stateCanary, 'synthetic history canary');
+    const fixture = await repository(t);
+    const sandbox = await detectRegisteredCommandSandbox({ relayStateDirectory: fixture.relayStateDirectory,
+      execPath: resolve(prefix, 'bin', 'node') });
+    if (!sandbox.usable) assert.fail(`sandbox unusable: ${sandbox.reason}: ${sandbox.detail}`);
+    const script = `const fs = require('node:fs'); const a = JSON.parse(process.argv[1]);
+      const readable = p => { try { fs.readFileSync(p); return true; } catch { return false; } };
+      process.stdout.write(JSON.stringify({ share: readable(a.shareCanary), state: readable(a.stateCanary),
+        listing: (() => { try { return fs.readdirSync(a.prefix).sort(); } catch { return []; } })() }));`;
+    const { task, publicKey } = signedTask(['prefix', 'npm.probe']);
+    const policy = policyWith({
+      prefix: { argv: [resolve(prefix, 'bin', 'node'), '-e', oneLine(script), JSON.stringify({ shareCanary, stateCanary, prefix })], timeoutSeconds: 30 },
+      'npm.probe': { argv: ['npm', 'run', 'probe'], timeoutSeconds: 60 },
+    });
+    const receipt = await executeTask({ task, policy, workspace: fixture.workspace, relayStateDirectory: fixture.relayStateDirectory,
+      serverPublicKey: publicKey, receiptStore: new FileTaskReceiptStore(resolve(fixture.root, 'receipts')),
+      registeredCommandSandbox: sandbox, providerExecutor: async () => providerResult });
+    const result = receipt.commandResults.find(({ commandId }) => commandId === 'prefix');
+    assert.ok(result, JSON.stringify(receipt.commandResults.map(({ commandId, stderr }) => ({ commandId, stderr }))));
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { share: false, state: false, listing: ['bin', 'lib'] });
     assert.equal(receipt.status, 'completed', JSON.stringify(receipt.commandResults.map(({ commandId, stderr }) => ({ commandId, stderr }))));
     assert.equal(await readFile(resolve(fixture.relayStateDirectory, 'worktrees', task.taskId, 'reports', 'npm.txt'), 'utf8'), 'npm ran');
   });
