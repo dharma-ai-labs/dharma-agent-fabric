@@ -32,8 +32,10 @@ import {
 export {
   acceptanceCommandEnvironment,
   acceptanceCommandEnvironmentPolicy,
+  registeredCommandEnvironment,
   type AcceptanceCommandEnvironmentInput,
   type AcceptanceCommandEnvironmentPolicy,
+  type RegisteredCommandEnvironmentInput,
 } from './acceptanceEnvironment.js';
 
 type TaskKnowledgeToolScope = { directory: string; manifestSha256: string; catalogSha256: string };

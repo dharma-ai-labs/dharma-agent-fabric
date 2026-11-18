@@ -239,7 +239,8 @@ test(`actual accepted session caller sends public handoff IDs only to its fresh 
     currentBootstrapHostScope: () => undefined, currentAcceptedSetupSessionScope, assertBootstrapHostSource,
     namedSessionPaths: () => ({root: resolve(f.root, 'sessions')}), sendCodexSetupChildStart,
     required: (flags: Map<string, unknown>, name: string) => flags.get(name),
-    process: {platform: 'linux', execPath: process.execPath, env: {}}, fileURLToPath: () => '/synthetic/index.js',
+    process: {platform: 'linux', execPath: process.execPath, env: {}}, relayChildEnvironment: () => ({}),
+    fileURLToPath: () => '/synthetic/index.js',
     verifyAgentFabricSkillInstallation: async () => ({}), repositorySharedReady: async () => true,
     verifyNamedSessionVisibleSkill: async () => {}, setTimeout, waitForNamedSessionStartup, observeNamedSessionStartupChild,
     spawn: (_command: string, argv: string[], options: Record<string, unknown>) => {
