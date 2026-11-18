@@ -16,6 +16,7 @@ interface UploadReceipt {
   receipt: { id: string; status: 'retained' | 'duplicate'; exportHash: string; contentExpiresAt: string;
     acceptedLearningObservation: false };
 }
+export interface TaskExportUploadBody { schema: 'dharma.codex-task-export-upload/v1'; exportBytes: string; exportHash: string }
 export interface NamedSessionTaskExportSyncResult {
   state: 'idle' | 'delivered' | 'pending' | 'blocked'; pending: number | null; delivered: number;
   code?: string; lastReceipt?: UploadReceipt; acceptedLearningObservation: false;
@@ -65,10 +66,50 @@ export async function stageNamedSessionTaskExport(vault: LocalVault | ScopedLoca
   return { exported, outbox: { state: 'pending' as const, workKey, descriptorHash, acceptedLearningObservation: false as const } };
 }
 
+/**
+ * Issue #464: no server accepts POST /agent-fabric/codex-task-exports yet. The relay gateway answers
+ * 400 route_not_allowed and the platform has no such route. While this switch is off the client sends
+ * nothing: staged exports stay encrypted in the local vault and the sync reports
+ * pending / task_export_upload_not_available. Turn it on in the change that adds the server route and
+ * the gateway allowlist entry; the request is then exactly the one sent before.
+ */
+export const CODEX_TASK_EXPORT_UPLOAD_ENABLED: boolean = false;
+
+/** The `send` for `syncNamedSessionTaskExports`, or undefined while the upload is switched off (#464). */
+export function codexTaskExportUpload(fabric: { signedPost(route: string, body: unknown): Promise<unknown> },
+  enabled = CODEX_TASK_EXPORT_UPLOAD_ENABLED): ((body: TaskExportUploadBody) => Promise<unknown>) | undefined {
+  return enabled ? body => fabric.signedPost('/agent-fabric/codex-task-exports', body) : undefined;
+}
+
+type HeldExport = { descriptor: Descriptor; capture: CodexLocalWorkCapture; contextBytes: Buffer; retained: string };
+
+/** Local checks only (no policy refresh, no network): the descriptor and the retained capture, context and export. */
+async function readHeldExport(vault: LocalVault | ScopedLocalVault, bindingId: string, identity: LocalProviderSessionIdentity,
+  row: { workKey: string; descriptorHash: string }): Promise<HeldExport | { code: string }> {
+  try {
+    const bytes = await vault.getBlob(row.descriptorHash);
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    const descriptor: Descriptor = JSON.parse(text);
+    const valid = await validateContract(schemas, 'https://schemas.dharma-ai.io/named-session-task-export-outbox/v1', descriptor);
+    if (!valid.ok || canonicalize(descriptor) !== text || descriptor.bindingId !== bindingId
+      || descriptor.workKey !== row.workKey || identityKeys.some(key => descriptor[key] !== identity[key])) {
+      return { code: 'task_export_descriptor_invalid' };
+    }
+    const capture: CodexLocalWorkCapture = JSON.parse((await vault.getBlob(descriptor.captureHash)).toString('utf8'));
+    const contextBytes = await vault.getBlob(descriptor.contextHash);
+    const retained = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await vault.getBlob(descriptor.exportHash));
+    if (capture.workId !== descriptor.workId || sha256(JSON.stringify(capture)) !== descriptor.captureHash) {
+      return { code: 'task_export_capture_invalid' };
+    }
+    return { descriptor, capture, contextBytes, retained };
+  } catch { return { code: 'task_export_retained_content_unavailable' }; }
+}
+
 export async function syncNamedSessionTaskExports(input: {
   vault: LocalVault | ScopedLocalVault; bindingId: string; identity: LocalProviderSessionIdentity;
   loadPolicy(): Promise<OrganizationPolicy>;
-  send(body: { schema: 'dharma.codex-task-export-upload/v1'; exportBytes: string; exportHash: string }): Promise<unknown>;
+  /** Absent while no server route accepts task exports (#464): staged rows are held, nothing is sent. */
+  send?: ((body: TaskExportUploadBody) => Promise<unknown>) | undefined;
 }): Promise<NamedSessionTaskExportSyncResult> {
   let delivered = 0, pending = 0, pendingKnown = false;
   let lastReceipt: UploadReceipt | undefined;
@@ -95,24 +136,19 @@ export async function syncNamedSessionTaskExports(input: {
     }
   } catch { return result('blocked', 'task_export_saved_receipt_unavailable'); }
   if (!pending) return result('idle');
+  const send = input.send;
+  if (!send) {
+    // Held, not sent (#464). Still report held content that local raw retention has removed.
+    for (const row of rows) {
+      const held = await readHeldExport(input.vault, input.bindingId, input.identity, row);
+      if ('code' in held) return result('blocked', held.code);
+    }
+    return result('pending', 'task_export_upload_not_available');
+  }
   for (const row of rows.slice(0, 5)) {
-    let descriptor: Descriptor, capture: CodexLocalWorkCapture, contextBytes: Buffer, retained: string;
-    try {
-      const bytes = await input.vault.getBlob(row.descriptorHash);
-      const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-      descriptor = JSON.parse(text);
-      const valid = await validateContract(schemas, 'https://schemas.dharma-ai.io/named-session-task-export-outbox/v1', descriptor);
-      if (!valid.ok || canonicalize(descriptor) !== text || descriptor.bindingId !== input.bindingId
-        || descriptor.workKey !== row.workKey || identityKeys.some(key => descriptor[key] !== input.identity[key])) {
-        return result('blocked', 'task_export_descriptor_invalid');
-      }
-      capture = JSON.parse((await input.vault.getBlob(descriptor.captureHash)).toString('utf8'));
-      contextBytes = await input.vault.getBlob(descriptor.contextHash);
-      retained = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await input.vault.getBlob(descriptor.exportHash));
-      if (capture.workId !== descriptor.workId || sha256(JSON.stringify(capture)) !== descriptor.captureHash) {
-        return result('blocked', 'task_export_capture_invalid');
-      }
-    } catch { return result('blocked', 'task_export_retained_content_unavailable'); }
+    const held = await readHeldExport(input.vault, input.bindingId, input.identity, row);
+    if ('code' in held) return result('blocked', held.code);
+    const { descriptor, capture, contextBytes, retained } = held;
     let policy: OrganizationPolicy;
     try { policy = await input.loadPolicy(); }
     catch { return result('pending', 'task_export_policy_refresh_pending'); }
@@ -136,7 +172,7 @@ export async function syncNamedSessionTaskExports(input: {
       assertPolicy(policy);
     } catch { return result('blocked', 'task_export_current_authority_unavailable'); }
     let response: unknown;
-    try { response = await input.send({ schema: 'dharma.codex-task-export-upload/v1', exportBytes: retained, exportHash: descriptor.exportHash }); }
+    try { response = await send({ schema: 'dharma.codex-task-export-upload/v1', exportBytes: retained, exportHash: descriptor.exportHash }); }
     catch (error) {
       if (error instanceof AgentFabricRequestError && error.definitive) {
         const code = error.message.split(':', 1)[0]!;
