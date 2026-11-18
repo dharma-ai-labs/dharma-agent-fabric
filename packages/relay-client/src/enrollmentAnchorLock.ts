@@ -14,13 +14,26 @@ export interface EnrollmentAnchorLockRelease {
 // is preserved for explicit recovery. Automatically reclaiming that mutex would
 // introduce another check-then-replace race.
 // Owner contents are flushed before publication, so a live owner's file always
-// holds its PID. Contents that cannot be a PID have no owner and count as dead.
-// That flush happens once, before the mutex: a flush under the mutex could commit
+// holds its PID. Contents that cannot be a PID have no owner and count as dead,
+// so they are quarantined under the mutex like any dead owner (#417), including
+// the empty or NUL lock a host crash can leave (#484).
+// That candidate flush happens once, before the mutex: a flush under the mutex could commit
 // the mutex link without its later unlink, and a hard reset would then leave an
 // abandoned mutex. Nothing is flushed while the mutex exists: only link, unlink,
 // rename, lstat, readFile and process.kill run under it. For the same reason a
 // waiter keeps the mutex untouched while the lock has a live owner: every mutex
-// that exists is one a hard reset can leave behind.
+// that exists is one a hard reset can leave behind. A failed flush, of the
+// candidate or of the lock folder, is connection_anchor_lock_flush_failed, and an
+// unflushed candidate is never published.
+//
+// Folder flush after publication, per OS. None of this is a crash-safety claim:
+// it narrows the window in which a published link can be lost, nothing more.
+// - Linux: fsync on the folder commits the new directory entry (ext4, xfs, btrfs).
+// - macOS: fsync on the folder is accepted, but without F_FULLFSYNC the drive may
+//   still hold the entry in its cache.
+// - Windows: Node cannot open a folder handle to flush, so nothing is flushed;
+//   NTFS records the metadata change in its own journal.
+// The folder is flushed only after the recovery mutex is gone, for the reason above.
 export async function acquireEnrollmentAnchorLock(
   lockPath: string, scope?: HostOperationFence, timeoutMs = 10_000,
 ): Promise<EnrollmentAnchorLockRelease> {
@@ -66,10 +79,13 @@ export async function acquireEnrollmentAnchorLock(
     await step(async () => {
       await assertNamespace();
       const file = await open(candidate, 'wx', 0o600);
-      try {await file.writeFile(`${process.pid}\n`); await file.sync();}
-      finally {await file.close();}
-      owned.set(candidate, null);
-      owned.set(candidate, await metadata(candidate));
+      try {
+        // Owned before any byte is written, so a failed write or flush removes it.
+        owned.set(candidate, null);
+        owned.set(candidate, await metadata(candidate));
+        await file.writeFile(`${process.pid}\n`);
+        try {await file.sync();} catch (cause) {throw Error('connection_anchor_lock_flush_failed', {cause});}
+      } finally {await file.close();}
     });
     return candidate;
   };
@@ -108,6 +124,13 @@ export async function acquireEnrollmentAnchorLock(
     }
   };
   const pause = () => step(() => new Promise<void>(accept => setTimeout(accept, 25)));
+  const flushFolder = () => step(async () => {
+    if (process.platform === 'win32') return;
+    try {
+      const folder = await open(directory, 'r');
+      try {await folder.sync();} finally {await folder.close();}
+    } catch (cause) {throw Error('connection_anchor_lock_flush_failed', {cause});}
+  });
   try {
     await step(() => mkdir(directory, {recursive: true, mode: 0o700}));
     await step(assertNamespace);
@@ -132,21 +155,16 @@ export async function acquireEnrollmentAnchorLock(
         if (current && !current.alive) throw Error('connection_anchor_recovery_required');
       }
       if (recovering) {
+        let published = false;
         try {
           try {
             await publish(candidate, lockPath);
             await cleanup(candidate);
-            let released: Promise<void> | undefined;
-            return Object.assign(() => released ??= cleanup(lockPath), {assertHeld: async () => {
-              if (released) throw Error('connection_anchor_lock_invalid');
-              await step(assertNamespace);
-              const expected = owned.get(lockPath), actual = await step(() => metadata(lockPath));
-              if (!expected || actual.dev !== expected.dev || actual.ino !== expected.ino) throw Error('connection_anchor_lock_invalid');
-            }});
+            published = true;
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
           }
-          const current = await inspect(lockPath);
+          const current = published ? undefined : await inspect(lockPath);
           if (current && !current.alive) {
             const quarantine = `${lockPath}.dead.${randomUUID()}`;
             try {
@@ -160,6 +178,16 @@ export async function acquireEnrollmentAnchorLock(
             }
           }
         } finally {await cleanup(recovery);}
+        if (published) {
+          await flushFolder();
+          let released: Promise<void> | undefined;
+          return Object.assign(() => released ??= cleanup(lockPath), {assertHeld: async () => {
+            if (released) throw Error('connection_anchor_lock_invalid');
+            await step(assertNamespace);
+            const expected = owned.get(lockPath), actual = await step(() => metadata(lockPath));
+            if (!expected || actual.dev !== expected.dev || actual.ino !== expected.ino) throw Error('connection_anchor_lock_invalid');
+          }});
+        }
       }
       await pause();
     }
@@ -170,7 +198,7 @@ export async function acquireEnrollmentAnchorLock(
     if (!scope) throw error;
     await scope.assert();
     if (error instanceof Error && ['connection_anchor_busy', 'connection_anchor_recovery_required',
-      'connection_anchor_lock_invalid'].includes(error.message)) throw error;
+      'connection_anchor_lock_invalid', 'connection_anchor_lock_flush_failed'].includes(error.message)) throw error;
     throw Error('connection_anchor_lock_unavailable');
   }
 }
