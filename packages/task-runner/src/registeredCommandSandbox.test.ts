@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import {
@@ -264,6 +264,25 @@ test('a sandbox that never reports its child is user_namespaces_unavailable with
   assert.match(result.detail, /apparmor_restrict_unprivileged_userns=1/);
   assert.match(result.detail, /max_user_namespaces=63429/);
   assert.match(result.detail, /unprivileged_userns_clone=absent/);
+});
+
+test('a bubblewrap setup error after the child is reported is also user_namespaces_unavailable', async () => {
+  const result = await withState(directory => probeRegisteredCommandSandbox(probeDeps([], { relayStateDirectory: directory,
+    runSandboxed: async () => ({ started: true, exitCode: 1, timedOut: false, stdout: '',
+      stderr: 'bwrap: setting up uid map: Permission denied\n' }) })));
+  assert.equal(result.usable ? 'usable' : result.reason, 'user_namespaces_unavailable');
+  assert.match(result.usable ? '' : result.detail, /^bwrap: setting up uid map: Permission denied; apparmor_restrict_unprivileged_userns=1/);
+});
+
+test('a write the probe made outside the worktree that reaches the host fails outside_write_denied', async () => {
+  const result = await withState(directory => probeRegisteredCommandSandbox(probeDeps([], { relayStateDirectory: directory,
+    runSandboxed: async (_sandbox, input) => {
+      const { outsideWrite } = JSON.parse(input.argv.at(-1)!) as { outsideWrite: string };
+      await writeFile(outsideWrite, 'arrived on the host');
+      return { started: true, exitCode: 0, timedOut: false, stderr: '',
+        stdout: `${JSON.stringify({ checks: Object.fromEntries([...PROBE_CHECKS.base, ...PROBE_CHECKS.disableUserns].map(name => [name, true])) })}\n` };
+    } })));
+  assert.equal(result.usable ? 'usable' : result.detail, 'failed checks: outside_write_denied');
 });
 
 test('a failed policy check is sandbox_probe_failed and names only the check', async () => {
