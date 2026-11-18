@@ -135,3 +135,16 @@ test('a task that names no registered commands runs exactly as before', async (t
   assert.deepEqual(receipt.commandResults.map(({ commandId }) => commandId), ['provider.codex']);
   assert.equal(await exists(f.marker), false);
 });
+
+test('the relay and the runner share one exported predicate for tasks that name registered commands', () => {
+  const names = Reflect.get(taskRunner, 'taskNamesRegisteredCommands') as
+    ((task: Pick<TaskEnvelope, 'authority' | 'acceptance'>) => boolean) | undefined;
+  assert.equal(typeof names, 'function', 'task-runner exports taskNamesRegisteredCommands');
+  const task = (commands: string[], acceptance: string[]) => ({
+    authority: { commands }, acceptance: { commands: acceptance },
+  }) as unknown as Pick<TaskEnvelope, 'authority' | 'acceptance'>;
+  assert.equal(names!(task([], [])), false);
+  assert.equal(names!(task(['npm.test'], [])), true);
+  assert.equal(names!(task([], ['npm.test'])), true);
+  assert.equal(names!(task(['npm.test'], ['npm.test'])), true);
+});
