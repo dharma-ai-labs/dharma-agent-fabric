@@ -212,6 +212,40 @@ test('one turn larger than a capsule is split only between complete tool exchang
   assert.equal(committed.reduce((total, capsule) => total + capsule.localAnalysis!.recordCount, 0), base.records);
 });
 
+test('an idle tail whose last tool call has no result yet is held instead of splitting the call from its result', async () => {
+  const later = () => new Date(Date.now() + 3_600_000);
+  const assertClosed = (capsules: TrajectoryCapsule[]) => {
+    for (const capsule of capsules) {
+      assert.equal(capsule.localAnalysis!.toolDiscipline.unmatchedCalls, 0);
+      assert.equal(capsule.localAnalysis!.toolDiscipline.orphanResults, 0);
+    }
+  };
+
+  // A permission prompt or a long subagent leaves the file idle with a call waiting.
+  const base = await fixture('dharma-segments-open-call-', 20, { outputBytes: 2_000 });
+  const open = claudeTurn(base.workspace, 20, { outputBytes: 2_100 });
+  await appendFile(base.source, jsonl(open.slice(0, 2)));
+  const small = fakeStore();
+  const waiting = await captureSessionSegments(input(base, { store: small.store, now: later }));
+  assert.equal(waiting.sessions[0]!.held, true);
+  await appendFile(base.source, jsonl(open.slice(2)));
+  await captureSessionSegments(input(base, { store: small.store, now: later }));
+  assertClosed(small.committed);
+  assert.equal(small.committed.reduce((total, capsule) => total + capsule.localAnalysis!.recordCount, 0), base.records + open.length);
+
+  // The same inside a turn too large for one capsule.
+  const giant = await fixture('dharma-segments-open-call-giant-', 0);
+  const records = claudeTurn(giant.workspace, 0, { tools: 400, outputBytes: 100 });
+  await writeFile(giant.source, jsonl(records.slice(0, -2)));
+  const split = fakeStore();
+  const held = await captureSessionSegments(input(giant, { store: split.store, now: later, policy: policy(40_000) }));
+  assert.equal(held.sessions[0]!.held, true);
+  await appendFile(giant.source, jsonl(records.slice(-2)));
+  await captureSessionSegments(input(giant, { store: split.store, now: later, policy: policy(40_000) }));
+  assertClosed(split.committed);
+  assert.equal(split.committed.reduce((total, capsule) => total + capsule.localAnalysis!.recordCount, 0), records.length);
+});
+
 test('plan mode writes nothing and reports the same segments a sync run commits', async () => {
   const base = await fixture('dharma-segments-plan-', 30, { outputBytes: 2_000 });
   const later = () => new Date(Date.now() + 3_600_000);
