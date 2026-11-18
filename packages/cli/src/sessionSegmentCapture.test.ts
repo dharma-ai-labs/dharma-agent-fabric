@@ -263,6 +263,11 @@ test('a failed upload keeps the committed segment queued and is not committed tw
   assert.equal(new Set(offline.committed.map((capsule) => capsule.trajectoryId)).size, offline.committed.length);
 });
 
+test('the relay capture timer is refused while HQ would count every segment toward its automatic window', () => {
+  assert.throws(() => relaySessionCaptureSettings(new Map([['capture-sessions', true]])), /session_segment_upload_unavailable/);
+  assert.deepEqual(relaySessionCaptureSettings(new Map()), { enabled: false });
+});
+
 test('relay session capture is off unless explicitly enabled and its timer is bounded', () => {
   assert.deepEqual(relaySessionCaptureSettings(new Map()), { enabled: false });
   const enabled = relaySessionCaptureSettings(new Map([['capture-sessions', true]]));
