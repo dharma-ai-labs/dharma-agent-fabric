@@ -20,6 +20,34 @@ in relay-owned Git worktrees using registered command IDs and canonical
 arguments under explicit path, network, Git, budget, and Skill-pin authority.
 It is not a general remote shell.
 
+## Tasks that name registered commands are refused
+
+Registered commands, meaning acceptance commands and, for Claude tasks, the same
+commands offered to the provider as Bash tools, would run as the relay's
+operating-system user without a sandbox. Code written during the task could then
+read that user's credential files. Until command isolation exists, `executeTask()`
+refuses every task with a non-empty `authority.commands` or
+`acceptance.commands`.
+
+The refusal happens after signature, expiry and organization checks and before
+any worktree, provider process or command starts. `executeTask()` throws
+`RegisteredCommandsRefusedError`, whose `code` is
+`registered_commands_refused` (exported as `REGISTERED_COMMANDS_REFUSED`). No
+task receipt is written, so nothing claims the task ran. A task that was already
+completed and has a stored receipt still returns that receipt. Network-authorized
+receipt-required tasks need an external-effect receipt command, so they are
+refused too.
+
+There is no opt-in. The only local policy file, `.dharma/approved-policy.json`,
+lives in the workspace directory, so a repository change could carry a switch
+there and turn the commands back on without the operator.
+
+Tasks that name no registered commands run exactly as before. The provider gets
+no command tools.
+
+The sections below describe the command path that the isolation work will
+re-enable.
+
 ## Receipt-required tasks
 
 A signed task opts into action-time authorization with

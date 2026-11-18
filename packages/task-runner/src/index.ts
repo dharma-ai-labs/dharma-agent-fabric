@@ -223,6 +223,25 @@ export class ActionDecisionDeniedError extends Error {
   }
 }
 
+/** Refusal code for a task that names registered commands. */
+export const REGISTERED_COMMANDS_REFUSED = 'registered_commands_refused';
+
+/**
+ * Registered commands (acceptance commands, and for Claude tasks the same commands
+ * offered as Bash tools) would run as the relay's operating-system user without a
+ * sandbox. Until command isolation exists, the runner refuses every task that names
+ * one, before any worktree, provider process or command starts. There is no opt-in.
+ */
+export class RegisteredCommandsRefusedError extends Error {
+  readonly code = REGISTERED_COMMANDS_REFUSED;
+
+  constructor() {
+    super('Task names registered commands, which this relay refuses to run until command isolation exists. '
+      + 'Remove authority.commands and acceptance.commands from the task.');
+    this.name = 'RegisteredCommandsRefusedError';
+  }
+}
+
 function normalizePolicyPath(value: string) {
   return value.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
 }
@@ -1089,6 +1108,9 @@ export async function executeTask(input: {
   if (input.task.organizationId !== input.policy.organizationId) throw new Error('Task organization does not match policy.');
   const previous = await input.receiptStore.get(input.task.taskId);
   if (previous) return previous;
+  if (input.task.authority.commands.length > 0 || input.task.acceptance.commands.length > 0) {
+    throw new RegisteredCommandsRefusedError();
+  }
   if (input.task.execution.isolation !== 'git_worktree') throw new Error('Only Git worktree isolation is supported.');
   if (input.task.authority.git !== 'task_branch') throw new Error('Pilot tasks require task_branch Git authority.');
   assertTaskWithinLocalPolicy(input.task, input.policy);
