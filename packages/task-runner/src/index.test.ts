@@ -1423,8 +1423,11 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
         stdoutSha256: `sha256:${'2'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
       };
     },
-  }), /registered external-effect receipt verifier/);
+  }), (error: unknown) => error instanceof taskRunner.RegisteredCommandsRefusedError && error.reason === 'network_not_denied');
   assert.equal(networkExecutions, 0);
+  // Tasks with registered commands and a network grant are refused before anything runs: their
+  // commands would need the host network. The external-effect receipt path below is refused the
+  // same way until a command-level network deny exists for network-granted tasks.
 
   const effectScript = [
     'const receipt = {',
@@ -1458,20 +1461,22 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
   const receiptDecision = embedDecision(receiptBase, 'release', decisionKeys.privateKey, new Date());
   const receiptUnsigned = { ...receiptBase, actionDecision: receiptDecision };
   const receiptTask = { ...receiptUnsigned, signature: signCanonicalObject(receiptUnsigned, taskKeys.privateKey) } as TaskEnvelope;
-  const effectResult = await executeTask({ registeredCommandSandbox: STAND_IN_SANDBOX,
+  let effectExecutions = 0;
+  await assert.rejects(executeTask({ registeredCommandSandbox: STAND_IN_SANDBOX,
     task: receiptTask, policy: receiptPolicy, workspace,
     relayStateDirectory: resolve(root, 'effect-state'), serverPublicKey: taskKeys.publicKey,
     receiptStore: new FileTaskReceiptStore(resolve(root, 'effect-receipts')),
     actionDecisions: { resolvePublicKey: () => decisionKeys.publicKey },
-    providerExecutor: async () => ({
-      provider: 'codex', exitCode: 0, signal: null, timedOut: false,
-      stdout: 'provider requested the remote change', stderr: '',
-      stdoutSha256: `sha256:${'3'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
-    }),
-  });
-  assert.equal(effectResult.status, 'completed');
-  assert.equal(effectResult.actionAcknowledgement?.disposition, 'executed');
-  assert.equal(effectResult.externalEffectReceipt?.providerReference, 'remote-change-42');
+    providerExecutor: async () => {
+      effectExecutions += 1;
+      return {
+        provider: 'codex', exitCode: 0, signal: null, timedOut: false,
+        stdout: 'provider requested the remote change', stderr: '',
+        stdoutSha256: `sha256:${'3'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`,
+      };
+    },
+  }), (error: unknown) => error instanceof taskRunner.RegisteredCommandsRefusedError && error.reason === 'network_not_denied');
+  assert.equal(effectExecutions, 0);
 });
 
 test('one-use receipt replay guard rejects a second consumption atomically', async () => {
@@ -1989,7 +1994,7 @@ test('a sandbox that never reports its child fails the task once and never runs 
   fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e',
     `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`], timeoutSeconds: 10 };
   const spawns = recordSpawns(t, ({ command, options }) => command === STAND_IN_SANDBOX.bwrapPath
-    ? hostSpawn(process.execPath, ['-e', 'process.stderr.write("bwrap: setting up uid map: Permission denied\\n"); process.exit(1)'], options)
+    ? hostSpawn(process.execPath, ['-e', 'process.stderr.write("bwrap: setting up uid map: Permission denied\\n"); process.exit(1)'], options as childProcess.SpawnOptions)
     : undefined);
   const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
   assert.equal(receipt.status, 'failed');

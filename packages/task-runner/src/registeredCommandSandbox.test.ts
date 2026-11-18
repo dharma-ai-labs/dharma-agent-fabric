@@ -154,7 +154,8 @@ test('environment transform rewrites home and temporary folders and adds nothing
     assert.deepEqual(source.HOME, '/home/relay', 'the input is not changed');
     const args = sandboxCommandLine(usable(), { worktree: W, cwd: W, argv: ['true'] });
     for (const value of Object.values(plain)) {
-      if (value === W) continue;
+      // These three are mount points, so they are on the list as paths, not as environment values.
+      if ([W, SANDBOX_HOME, '/tmp'].includes(value)) continue;
       assert.equal(args.includes(value), false, `environment value ${value} is not on the argument list`);
     }
   } finally { process.env = before; }
