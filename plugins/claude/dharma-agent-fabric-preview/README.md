@@ -1,6 +1,6 @@
 # Dharma Agent Fabric session messages (preview add-on)
 
-`dharma-agent-fabric-preview` 1.0.7-preview is a **prototype**. It works only for the two allowlisted HQ members and only with a Dharma CLI build that has session messaging (`dharma sessions attach`, `dharma msg`, `dharma hook claude`). It is a separate marketplace entry: install it beside `dharma-agent-fabric` 1.0.6, which stays unchanged and gets no hooks.
+`dharma-agent-fabric-preview` 1.0.7-preview is a **prototype**. It works only for the two allowlisted HQ members and only with a Dharma CLI build that has session messaging (`dharma sessions attach`, `dharma msg`, `dharma hook claude`). It is a separate marketplace entry: install it beside `dharma-agent-fabric` 1.0.6 or later, which gets no hooks.
 
 ## What's included
 

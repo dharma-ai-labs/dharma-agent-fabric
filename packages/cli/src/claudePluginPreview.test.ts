@@ -20,14 +20,14 @@ const read = (path: string) => readFileSync(join(root, path), 'utf8');
 const json = (path: string) => JSON.parse(read(path)) as Record<string, unknown>;
 const PREVIEW = 'plugins/claude/dharma-agent-fabric-preview';
 
-test('1.0.7-preview is a separate marketplace entry and the 1.0.6 entry is unchanged', () => {
+test('1.0.7-preview is a separate marketplace entry beside the stable 1.0.8 entry', () => {
   const plugins = json('.claude-plugin/marketplace.json').plugins as Array<Record<string, unknown>>;
   assert.equal(plugins.length, 2);
   const stable = plugins.find(item => item.name === 'dharma-agent-fabric')!;
-  assert.equal(stable.version, '1.0.6');
+  assert.equal(stable.version, '1.0.8');
   assert.equal(stable.source, './plugins/claude/dharma-agent-fabric');
-  assert.equal(json('plugins/claude/dharma-agent-fabric/.claude-plugin/plugin.json').version, '1.0.6');
-  assert.equal(existsSync(join(root, 'plugins/claude/dharma-agent-fabric/hooks')), false, '1.0.6 gets no hooks');
+  assert.equal(json('plugins/claude/dharma-agent-fabric/.claude-plugin/plugin.json').version, '1.0.8');
+  assert.equal(existsSync(join(root, 'plugins/claude/dharma-agent-fabric/hooks')), false, 'the stable plugin gets no hooks');
   const preview = plugins.find(item => item.name === 'dharma-agent-fabric-preview')!;
   assert.equal(preview.version, '1.0.7-preview');
   assert.equal(preview.source, `./${PREVIEW}`);
@@ -36,7 +36,9 @@ test('1.0.7-preview is a separate marketplace entry and the 1.0.6 entry is uncha
   const manifest = json(`${PREVIEW}/.claude-plugin/plugin.json`);
   assert.equal(manifest.name, 'dharma-agent-fabric-preview');
   assert.equal(manifest.version, '1.0.7-preview');
-  assert.equal(existsSync(join(root, PREVIEW, '.mcp.json')), false, 'the add-on does not duplicate the 1.0.6 MCP server');
+  assert.match(String(manifest.description), /dharma-agent-fabric 1\.0\.6 or later/);
+  assert.match(read(`${PREVIEW}/README.md`), /`dharma-agent-fabric` 1\.0\.6 or later/);
+  assert.equal(existsSync(join(root, PREVIEW, '.mcp.json')), false, 'the add-on does not duplicate the stable MCP server');
 });
 
 test('the preview has exactly SessionStart and UserPromptSubmit hooks, guarded to exit 0 silently; no Stop hook', () => {
