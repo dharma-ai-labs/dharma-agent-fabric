@@ -47,8 +47,32 @@ jobs:
           DHARMA_PUBLIC_CONTENT_DENYLIST: ${{ secrets.DHARMA_PUBLIC_CONTENT_DENYLIST }}
         run: npm run public:content:check
 
+      # Registered commands run inside bubblewrap on Linux. Ubuntu 24.04 restricts unprivileged
+      # user namespaces through AppArmor by default; this throwaway runner turns that off so the
+      # real-sandbox tests run. Customer hosts get a fix line instead, never an automatic change.
+      - name: Prepare command sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          /usr/bin/bwrap --version
+          echo "apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+
       - name: Run package validation
+        env:
+          DHARMA_SANDBOX_EXPECT: ${{ runner.os == 'Linux' && 'usable' || '' }}
         run: npm run check
+
+      # The same host with the restriction back on must refuse, and no command may run.
+      - name: Prove sandbox refusal on a restricted host
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          DHARMA_SANDBOX_EXPECT=refused node --test packages/task-runner/dist/registeredCommandSandbox.linux.test.js
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Verify CI budget and coverage
         run: node --test scripts/ci-budget.test.mjs
