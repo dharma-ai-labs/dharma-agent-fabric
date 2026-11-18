@@ -390,6 +390,7 @@ export function assertSessionSegmentUploadAvailable(available = SESSION_SEGMENT_
 
 export type RelaySessionCaptureSettings = { enabled: false } | {
   enabled: true; intervalMs: number; lookbackHours: number; idleMinutes: number; providers: Array<'claude' | 'codex'>;
+  sessionIdsFile?: string | null;
 };
 
 function boundedSetting(flags: Map<string, string | boolean>, key: string, fallback: number, minimum: number, maximum: number) {
@@ -398,6 +399,10 @@ function boundedSetting(flags: Map<string, string | boolean>, key: string, fallb
   const value = typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error('relay_session_capture_setting_invalid');
   return value;
+}
+
+export function relaySessionCaptureBlocked(_settings: RelaySessionCaptureSettings, _policy: OrganizationPolicy): string | null {
+  return null;
 }
 
 /** Relay session capture is opt-in: `--capture-sessions` turns on its timer. */

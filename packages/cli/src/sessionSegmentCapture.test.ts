@@ -9,6 +9,7 @@ import type { TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-re
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import {
   captureSessionSegments,
+  relaySessionCaptureBlocked,
   relaySessionCaptureSettings,
   type SessionSegmentCaptureInput,
 } from './sessionSegmentCapture.js';
@@ -266,6 +267,23 @@ test('a failed upload keeps the committed segment queued and is not committed tw
 test('the relay capture timer is refused while HQ would count every segment toward its automatic window', () => {
   assert.throws(() => relaySessionCaptureSettings(new Map([['capture-sessions', true]])), /session_segment_upload_unavailable/);
   assert.deepEqual(relaySessionCaptureSettings(new Map()), { enabled: false });
+});
+
+test('in content mode the relay timer captures only sessions a person listed after a preview', () => {
+  const available = { uploadAvailable: true };
+  const local = policy(60_000);
+  const content: OrganizationPolicy = { ...local, evidence: { ...local.evidence,
+    automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent_test' } } };
+  const unlisted = relaySessionCaptureSettings(new Map([['capture-sessions', true]]), available);
+  assert.equal(relaySessionCaptureBlocked(unlisted, content), 'session_capture_requires_session_allowlist');
+  assert.equal(relaySessionCaptureBlocked(unlisted, local), null);
+  const listed = relaySessionCaptureSettings(new Map<string, string | boolean>([
+    ['capture-sessions', true], ['capture-session-ids-file', 'previewed-sessions.json'],
+  ]), available);
+  assert.equal(listed.enabled && listed.sessionIdsFile, resolve('previewed-sessions.json'));
+  assert.equal(relaySessionCaptureBlocked(listed, content), null);
+  assert.throws(() => relaySessionCaptureSettings(new Map([['capture-session-ids-file', 'previewed-sessions.json']]), available),
+    /relay_session_capture_setting_invalid/, 'the allowlist without the opt-in flag is refused');
 });
 
 test('relay session capture is off unless explicitly enabled and its timer is bounded', () => {
