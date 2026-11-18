@@ -169,9 +169,11 @@ disabled. A Git configuration change made by the provider or a command
 therefore does not start a monitor hook, and helper programs that Git starts do
 not receive other relay variables.
 
-The provider launch environment is unchanged. Skill smoke checks that run a
-registered command still inherit the relay environment and do not apply
-`environment.inherit`.
+The provider launch environment is unchanged. Skill smoke checks run only from
+`dharma skills sync --smoke-command`, never from the relay itself. They use the
+explicit command environment: operating-system essentials and the names the
+command's policy entry lists under `environment.inherit`, built by
+`registeredCommandEnvironment`. They get no runner-owned names.
 
 - [Task execution boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/06-task-execution-and-a2a.md)
 - [Bidirectional protocol](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/05-bidirectional-protocol.md)
