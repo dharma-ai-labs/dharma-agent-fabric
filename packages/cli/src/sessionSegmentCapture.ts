@@ -1,5 +1,5 @@
 import type { Stats } from 'node:fs';
-import { mkdir, open, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { canonicalize, sha256 } from '@dharma-ai-labs/agent-fabric-contracts';
 import {
@@ -143,6 +143,13 @@ async function anchorAt(path: string, offset: number): Promise<string | null> {
   }
 }
 
+// One session file has one segment identity however its path is spelled: dot
+// segments, links, slashes, or letter case on Windows.
+async function canonicalSessionPath(path: string): Promise<string> {
+  const real = await realpath(path);
+  return process.platform === 'win32' ? real.toLowerCase() : real;
+}
+
 function recordTimeRange(records: SourceRecord[], previousEnd: string | null, fallback: Date) {
   let earliest = Number.POSITIVE_INFINITY;
   let latest = Number.NEGATIVE_INFINITY;
@@ -218,7 +225,8 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
 
   for (const sourcePath of input.sources) {
     if (report.stoppedReason) break;
-    const localSessionId = providerSessionId(input.provider, sourcePath);
+    // A missing file keeps its given spelling here and is reported by the stat below.
+    const localSessionId = providerSessionId(input.provider, await canonicalSessionPath(sourcePath).catch(() => sourcePath));
     const path = ledgerPath(input.ledgerRoot, input.workspaceId, input.provider, localSessionId);
     const summary = { sessionId: localSessionId, segmentsCommitted: 0, segmentsSkipped: 0,
       segmentsPlanned: 0, held: false, stoppedReason: null as string | null, failure: null as string | null };
