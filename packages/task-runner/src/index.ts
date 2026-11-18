@@ -23,6 +23,18 @@ import {
   type ProviderExecutionResult,
   type ProviderFailureCategory,
 } from '@dharma-ai-labs/agent-fabric-provider-adapters';
+import {
+  acceptanceCommandEnvironment,
+  acceptanceCommandEnvironmentPolicy,
+  relayGitEnvironment,
+} from './acceptanceEnvironment.js';
+
+export {
+  acceptanceCommandEnvironment,
+  acceptanceCommandEnvironmentPolicy,
+  type AcceptanceCommandEnvironmentInput,
+  type AcceptanceCommandEnvironmentPolicy,
+} from './acceptanceEnvironment.js';
 
 type TaskKnowledgeToolScope = { directory: string; manifestSha256: string; catalogSha256: string };
 
@@ -355,12 +367,13 @@ async function runProcess(command: string, argv: string[], options: {
   signal?: AbortSignal;
   maximumOutputBytes?: number;
   requireCompleteOutput?: boolean;
-  environment?: Record<string, string>;
+  /** The complete child environment. When omitted, the child inherits the relay environment. */
+  childEnvironment?: Record<string, string>;
 }): Promise<Omit<CommandResult, 'commandId'>> {
   return new Promise((accept, reject) => {
     const child = spawn(command, argv, {
       cwd: options.cwd,
-      env: { ...process.env, DHARMA_TASK_WORKTREE: options.cwd, ...(options.environment || {}) },
+      env: options.childEnvironment ?? { ...process.env, DHARMA_TASK_WORKTREE: options.cwd },
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -412,13 +425,24 @@ async function runProcess(command: string, argv: string[], options: {
   });
 }
 
+// Relay-internal Git runs with operating-system essentials only and with the file-system monitor
+// hook disabled, because a provider or acceptance command can change the repository configuration.
+function relayGit(repository: string, argv: string[], requireCompleteOutput?: boolean) {
+  return runProcess('git', ['-c', 'core.fsmonitor=false', ...argv], {
+    cwd: repository,
+    timeoutMs: 30_000,
+    childEnvironment: relayGitEnvironment(process.env, process.platform),
+    ...(requireCompleteOutput ? { requireCompleteOutput } : {}),
+  });
+}
+
 async function git(repository: string, argv: string[]): Promise<void> {
-  const result = await runProcess('git', argv, { cwd: repository, timeoutMs: 30_000 });
+  const result = await relayGit(repository, argv);
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
 }
 
 async function gitOutput(repository: string, argv: string[]) {
-  const result = await runProcess('git', argv, { cwd: repository, timeoutMs: 30_000, requireCompleteOutput: true });
+  const result = await relayGit(repository, argv, true);
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
   return result.stdout;
 }
@@ -1159,6 +1183,9 @@ export async function executeTask(input: {
     const readOnlyFingerprints = await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, { paths: readOnlyPaths });
     const artifactIntegrity = { paths: readOnlyPaths, expected: readOnlyFingerprints };
     const allowedCommands = input.task.authority.commands.map(({ commandId }) => resolveRegisteredCommand(input.policy, commandId).argv);
+    for (const { commandId } of input.task.acceptance.commands) {
+      acceptanceCommandEnvironmentPolicy(resolveRegisteredCommand(input.policy, commandId), commandId);
+    }
     const formattedTask = formatProviderInstructionsForTask(input.task);
     const artifactContext = formattedTask.artifactMetadataLength
       ? formattedTask.instructions.slice(-formattedTask.artifactMetadataLength) : '';
@@ -1257,12 +1284,19 @@ export async function executeTask(input: {
           acceptanceTimeBudgetMs,
         ),
         signal: input.signal,
-        ...(decisionReceipt ? {
-          environment: {
-            DHARMA_EXTERNAL_IDEMPOTENCY_KEY: decisionReceipt.decisionId,
-            DHARMA_ACTION_DIGEST: decisionReceipt.actionDigest,
-          },
-        } : {}),
+        childEnvironment: acceptanceCommandEnvironment({
+          source: process.env,
+          platform: process.platform,
+          cwd,
+          command,
+          commandId,
+          ...(decisionReceipt ? {
+            actionDecision: {
+              externalIdempotencyKey: decisionReceipt.decisionId,
+              actionDigest: decisionReceipt.actionDigest,
+            },
+          } : {}),
+        }),
       });
       if (remainingTaskMs() <= 0) throw new Error('Task expired during acceptance verification.');
       commandResults.push({ commandId, ...result });

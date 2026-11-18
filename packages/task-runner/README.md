@@ -79,6 +79,79 @@ snapshot, quality grader or proof of external effects. The integrity checks do n
 concurrent filesystem mutation; native containment and independent acceptance
 remain separate requirements.
 
+## Acceptance command environment
+
+Registered acceptance commands run with an explicit environment built for each
+command, not the whole relay process environment. It is built in three steps:
+
+1. Operating-system essentials are copied from the relay environment when present.
+   - Windows: `PATH` (one key, matched case-insensitively and kept in its
+     original casing, usually `Path`), `PATHEXT`, `SystemRoot`, `windir`,
+     `ComSpec`, `SystemDrive`, `TEMP`, `TMP`, `USERPROFILE`, `APPDATA`,
+     `LOCALAPPDATA`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramW6432`,
+     `ProgramData`, `CommonProgramFiles`, `NUMBER_OF_PROCESSORS`,
+     `PROCESSOR_ARCHITECTURE` and `OS`.
+   - Linux, WSL and macOS: `PATH`, `HOME`, `TMPDIR`, `LANG`, `LANGUAGE`,
+     `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `LC_COLLATE`, `LC_NUMERIC`,
+     `LC_TIME`, `LC_MONETARY`, `TZ`, `USER`, `LOGNAME`, `XDG_CONFIG_HOME` and
+     `XDG_CACHE_HOME`.
+2. Names listed in the command's approved policy entry are copied for that
+   command only (see below).
+3. Runner-owned names are set last: `DHARMA_TASK_WORKTREE` is the command's
+   working directory. `DHARMA_EXTERNAL_IDEMPOTENCY_KEY` and
+   `DHARMA_ACTION_DIGEST` come only from a verified action-decision receipt and
+   are absent without one, even when the relay environment has them.
+
+Anything else in the relay environment is not passed. That includes provider
+and cloud credentials, relay configuration, `npm_*` variables, agent and session
+sockets (`SSH_AUTH_SOCK`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`), provider
+profile directories, `SHELL`, `TERM` and, on Windows, `HOMEDRIVE`, `HOMEPATH`,
+`USERNAME`, `USERDOMAIN`, `COMPUTERNAME` and `PSModulePath`. A signed task cannot
+add environment values. The task envelope schema has no such field.
+
+A registered command that needs another variable, such as `HTTPS_PROXY`,
+`NO_PROXY`, `NODE_EXTRA_CA_CERTS`, `NODE_OPTIONS`, `CI` or a credential its
+verifier uses, must name it in its policy entry:
+
+```yaml
+tasks:
+  allowedCommands:
+    test:
+      argv: [npm, test]
+      timeoutSeconds: 1200
+      environment:
+        inherit: [HTTPS_PROXY, NODE_EXTRA_CA_CERTS]
+```
+
+The value is read from the relay environment when the command runs. Before
+provider execution, the task runner checks the `environment` entry of every
+signed acceptance command. The task fails if an entry has keys other than
+`inherit`, lists more than 32 names, lists a name that is not
+`[A-Za-z_][A-Za-z0-9_]{0,127}` or lists the same name twice (compared
+case-insensitively). It also fails for any name starting with `DHARMA_` in any
+letter case, which covers the runner-owned names.
+
+`HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` and `XDG_CONFIG_HOME` are not
+harmless. They locate per-user tool configuration and credential files, and are
+passed only because npm and Git need them.
+
+The allowlist removes relay variables from the command's own environment, so
+they do not reach its output or the task receipt by accident. It is not an
+isolation boundary. The command still runs as the relay user without an
+operating-system sandbox, so it can read the relay user's files and can read
+the relay process environment through the operating system's process
+inspection interfaces.
+
+Relay-internal Git calls, including the write-scope checks after each command,
+run with the same operating-system essentials and with `core.fsmonitor`
+disabled. A Git configuration change made by the provider or a command
+therefore does not start a monitor hook, and helper programs that Git starts do
+not receive other relay variables.
+
+The provider launch environment is unchanged. Skill smoke checks that run a
+registered command still inherit the relay environment and do not apply
+`environment.inherit`.
+
 - [Task execution boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/06-task-execution-and-a2a.md)
 - [Bidirectional protocol](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/05-bidirectional-protocol.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/task-runner)
