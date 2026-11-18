@@ -83,9 +83,11 @@ lookup) with:
   `--new-session`, `--cap-drop ALL`;
 - an empty root with read-only `/usr`, the `/bin`-style folders, a few `/etc`
   files (dynamic linker, time zone, name-service, `passwd`, `group`, `hosts`)
-  and, when it is outside `/usr`, the relay's Node installation; that
-  installation's `etc` folder is hidden, because a global npm configuration
-  there can hold tokens;
+  and, when it is outside `/usr`, only the relay's Node binary, its
+  `lib/node_modules/npm` package and the `bin/npm` and `bin/npx` links into
+  that package. The rest of that installation folder is not visible: it can be
+  a general per-user folder such as `~/.local` that holds other tools' data,
+  and its `etc` folder can hold a global npm configuration with tokens;
 - private `/proc`, `/dev` and `/tmp`, and an empty home at `/dharma-sandbox/home`;
 - the task worktree as the only writable folder, with its `.git` pointer file
   read-only; the root is remounted read-only after all mounts.

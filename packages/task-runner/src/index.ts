@@ -62,6 +62,7 @@ export {
   taskNamesRegisteredCommands,
   type HostLayout,
   type HostLayoutEntry,
+  type NodeMount,
   type ProbeDependencies,
   type RefusedSandbox,
   type RegisteredCommandSandbox,
