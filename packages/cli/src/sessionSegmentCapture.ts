@@ -39,6 +39,7 @@ export interface SessionSegmentCaptureInput {
   idleMinutes?: number;
   maximumUploadBytes?: number;
   maximumRecordBytes?: number;
+  deadline?: number;
   now?: () => Date;
   /** Absent: plan only. Nothing is written, uploaded or recorded in the ledger. */
   store?: SessionSegmentStore;

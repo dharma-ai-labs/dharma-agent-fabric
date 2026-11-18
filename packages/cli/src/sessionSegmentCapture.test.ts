@@ -187,6 +187,25 @@ test('a per-run upload budget stops cleanly and the next run continues without d
   assert.deepEqual(committed.map((capsule) => capsule.capsuleHash), reference.committed.map((capsule) => capsule.capsuleHash));
 });
 
+test('a time budget stops a run after a whole segment and the next run continues from the ledger', async () => {
+  const base = await fixture('dharma-segments-deadline-', 40, { outputBytes: 2_000 });
+  const later = new Date(Date.now() + 3_600_000);
+  const reference = fakeStore();
+  await captureSessionSegments(input(base, {
+    store: reference.store, now: () => later, policy: policy(25_000), ledgerRoot: join(base.root, 'reference'),
+  }));
+  assert.ok(reference.committed.length >= 3);
+
+  // The deadline has already passed, yet every run still adds one whole segment.
+  const { store, committed } = fakeStore();
+  const run = () => captureSessionSegments(input(base, { store, now: () => later, policy: policy(25_000), deadline: later.getTime() - 1 }));
+  const first = await run();
+  assert.equal(first.stoppedReason, 'time_budget_exhausted');
+  assert.equal(committed.length, 1);
+  for (let attempt = 0; attempt < 20 && committed.length < reference.committed.length; attempt += 1) await run();
+  assert.deepEqual(committed.map((capsule) => capsule.capsuleHash), reference.committed.map((capsule) => capsule.capsuleHash));
+});
+
 test('the per-run budget never exceeds the policy daily upload limit', async () => {
   const base = await fixture('dharma-segments-daily-', 60, { outputBytes: 2_000 });
   const { store, committed } = fakeStore();
