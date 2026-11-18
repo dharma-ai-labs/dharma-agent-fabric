@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type AddressInfo } from 'node:net';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { TaskEnvelope } from './index.js';
@@ -221,8 +221,10 @@ const checks = {};
 checks.outside_canary_hidden = !exists(a.outsideCanary);
 checks.home_hidden = !exists(a.home) || onlyPathsTo(a.home);
 checks.relay_process_hidden = !exists('/proc/' + a.relayPid) && !environHas(a.sentinel);
-checks.outside_write_denied = ['/', '/usr', '/etc', path.dirname(a.worktree)]
-  .every(dir => !writable(path.join(dir, '.dharma-probe-' + process.pid)));
+// The worktree's parent may sit inside the sandbox's private /tmp, so a write there is tried and
+// the host checks afterwards that it did not arrive.
+try { fs.writeFileSync(a.outsideWrite, 'probe'); } catch {}
+checks.outside_write_denied = ['/', '/usr', '/etc'].every(dir => !writable(path.join(dir, '.dharma-probe-' + process.pid)));
 checks.worktree_writable = writable(path.join(a.worktree, '.dharma-probe-' + process.pid));
 checks.git_pointer_readonly = (() => {
   const pointer = path.join(a.worktree, '.git');
@@ -391,6 +393,7 @@ async function runProbe(deps: ProbeDependencies, sandbox: UsableSandbox, node: s
   const probeRoot = resolve(deps.relayStateDirectory, 'sandbox-probe', randomUUID());
   const worktree = resolve(probeRoot, 'worktree');
   const outsideCanary = resolve(probeRoot, 'outside-canary');
+  const outsideWrite = resolve(probeRoot, 'outside-write');
   const server = createServer(socket => socket.destroy());
   try {
     await mkdir(worktree, { recursive: true, mode: 0o700 });
@@ -400,15 +403,19 @@ async function runProbe(deps: ProbeDependencies, sandbox: UsableSandbox, node: s
     const sentinel = randomUUID();
     const checks = [...PROBE_CHECKS.base, ...(sandbox.disableUserns ? PROBE_CHECKS.disableUserns : []),
       ...(sandbox.host === 'wsl2' ? PROBE_CHECKS.wsl : [])];
-    const args = { outsideCanary, home: deps.homedir(), relayPid: deps.relayPid, sentinel, worktree,
+    const args = { outsideCanary, outsideWrite, home: deps.homedir(), relayPid: deps.relayPid, sentinel, worktree,
       nodePrefix: sandbox.bindNodePrefix ? sandbox.nodePrefix : null, port: (server.address() as AddressInfo).port, checks };
     const source = { ...process.env, SANDBOX_PROBE_SENTINEL: sentinel };
     const env = deps.commandEnvironment ? deps.commandEnvironment(source, worktree)
       : { PATH: process.env.PATH ?? '/usr/bin:/bin', DHARMA_TASK_WORKTREE: worktree };
     const run = await deps.runSandboxed(sandbox, { worktree, cwd: worktree,
       argv: [node, '-e', PROBE_SCRIPT, JSON.stringify(args)], env, timeoutMs: 10_000 });
-    if (!run.started) {
-      const firstLine = run.stderr.split('\n').find(line => line.trim()) ?? '';
+    const firstLine = run.stderr.split('\n').find(line => line.trim()) ?? '';
+    // bubblewrap reports its child as soon as it is cloned. A host that lets the user namespace be
+    // created but then denies setting it up (for example an AppArmor restriction) fails after
+    // that, with bubblewrap's own message and no probe output.
+    const setupFailed = run.started && run.exitCode !== 0 && !run.stdout.trim() && firstLine.startsWith('bwrap:');
+    if (!run.started || setupFailed) {
       return refused('user_namespaces_unavailable',
         `${firstLine.slice(0, 200)}${firstLine ? '; ' : ''}${await hostSettings(deps)}`);
     }
@@ -420,6 +427,8 @@ async function runProbe(deps: ProbeDependencies, sandbox: UsableSandbox, node: s
       const parsed = JSON.parse(line) as { checks?: unknown };
       if (parsed.checks && typeof parsed.checks === 'object') reported = parsed.checks as Record<string, unknown>;
     } catch { return refused('sandbox_probe_failed', 'probe output unreadable'); }
+    const leaked = await stat(outsideWrite).then(() => true, () => false);
+    if (leaked) reported.outside_write_denied = false;
     const failed = checks.filter(name => reported[name] !== true);
     if (failed.length) return refused('sandbox_probe_failed', `failed checks: ${failed.join(', ')}`);
     return sandbox;
