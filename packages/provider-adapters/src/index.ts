@@ -903,6 +903,33 @@ async function parseSessionFile(
   };
 }
 
+export interface SessionTurn {
+  records: SourceRecord[];
+  coverage: EvidenceState;
+  startOffset: number;
+  endOffset: number;
+  atEndOfFile: boolean;
+}
+
+export async function* readSessionTurns(_input: {
+  provider: 'claude' | 'codex'; path: string; workspace: string; startOffset?: number; maximumRecordBytes?: number;
+}): AsyncGenerator<SessionTurn> {
+  throw new Error('not_implemented');
+}
+
+export function providerSessionId(_provider: 'claude' | 'codex', _path: string): string {
+  throw new Error('not_implemented');
+}
+
+export async function listProviderSessionFiles(_provider: 'claude' | 'codex', _roots?: string[]):
+  Promise<Array<{ path: string; modifiedAt: Date; size: number }>> {
+  throw new Error('not_implemented');
+}
+
+export async function sessionWorkspaceQualified(_provider: 'claude' | 'codex', _path: string, _workspace: string): Promise<boolean> {
+  throw new Error('not_implemented');
+}
+
 function recordTurnId(record: SourceRecord): string | null {
   const payload = record.native.payload && typeof record.native.payload === 'object'
     ? record.native.payload as Record<string, unknown>

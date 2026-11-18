@@ -489,6 +489,7 @@ export function buildTrajectoryCapsule(input: {
   activeSkillBundleVerifiedAt?: string | null;
   taskId?: string | null;
   captureProvenance?: TrajectoryCapsule['captureProvenance'];
+  segment?: { index: number };
 }): TrajectoryCapsule {
   assertPolicy(input.policy);
   const captureProvenance = input.captureProvenance ?? {
@@ -693,6 +694,12 @@ export function buildTrajectoryCapsule(input: {
     throw new Error('Trajectory capsule metadata cannot fit the organization maximumCapsuleBytes policy.');
   }
   return { ...base, capsuleHash: trajectoryCapsuleHash(base as Omit<TrajectoryCapsule, 'capsuleHash'>) };
+}
+
+export const TRAJECTORY_SEGMENT_TOO_LARGE = 'trajectory_segment_exceeds_capsule_limit';
+
+export function trajectorySegmentSessionLink(_sessionId: string): { sessionId: string; index: number } | null {
+  throw new Error('not_implemented');
 }
 
 export { redactValue };
