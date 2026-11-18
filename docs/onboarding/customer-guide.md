@@ -237,7 +237,7 @@ Batch capture is deliberately bounded. Use `--maximum-sessions` after reviewing 
 
 `capture` and `capture-batch` read at most 8 MiB of a session (the first 1 MiB and the last 7 MiB) and put it in one capsule. When that capsule is larger than the policy's `maximumCapsuleBytes`, early events are dropped and the capsule is marked `partial`. Learning uses only `observed` trajectories, so a long Claude Code or Codex session sent this way does not reach learning.
 
-For long sessions, use segmented capture. It reads the whole session file and sends it as consecutive segment capsules:
+For long sessions, segmented capture reads the whole session file and plans it as consecutive segment capsules:
 
 ```bash
 # Plan only: nothing is written or sent.
@@ -246,32 +246,17 @@ dharma evidence capture-segments \
   --provider claude \
   --policy .dharma/approved-policy.json \
   --lookback-hours 24
-
-# Write to the local vault and send.
-dharma evidence capture-segments \
-  --workspace . \
-  --provider claude \
-  --policy .dharma/approved-policy.json \
-  --lookback-hours 24 \
-  --sync
 ```
 
-- A segment holds complete turns and fits under `maximumCapsuleBytes`. When one turn alone does not fit, it is split where no tool call is waiting for its result. A turn is marked `partial` only when one of its records was left out: it is outside the workspace, larger than `--maximum-record-bytes` (16 MiB by default), or not valid JSON.
+Sending segments is not available yet. `--sync` stops with `session_segment_upload_unavailable` until HQ can take segments without counting each one toward its automatic analysis window. Until then, use the plan to see how your sessions would be split.
+
+- A segment holds complete turns and fits under `maximumCapsuleBytes`. When one turn alone does not fit, it is split where no tool call is waiting for its result. A segment is marked `partial` only when one of its records was left out: it is outside the workspace, larger than `--maximum-record-bytes` (16 MiB by default), or not valid JSON.
 - Each segment has its own trajectory. Its `sessionId` is the session's pseudonym followed by `:segment:` and a six-digit index, so all segments of one session share the same prefix. Segment time ranges are in order and do not overlap.
-- The last segment of a session that is still active waits until the session file has not changed for `--idle-minutes` (30 by default).
-- A local ledger in the device home records each segment that was sent. A second run skips those segments and continues from the last one. If the session file was rewritten instead of extended, the session is skipped with `session_source_changed`.
-- `--maximum-upload-bytes` limits the bytes one run sends. It can never be higher than the policy's daily limit, and in `customer_authorized_content` mode the daily ledger also applies. A run that reaches the limit stops after a whole segment and reports `budgetExhausted`. The next run continues from there.
+- The last segment of a session that is still active waits until the session file has not changed for `--idle-minutes` (30 by default), and until its last tool call has its result.
+- A session that cannot be read is reported with `session_capture_failed` and a failure code, and the other sessions are still planned.
 - `--session-ids-file`, `--since`, `--maximum-sessions` (20 by default) and `--source-root` select sessions as in batch capture.
 
 Do not use `capture` or `capture-batch` and `capture-segments` for the same session. They create different trajectories for the same evidence.
-
-To capture new sessions without running the command each time, start the relay with `--capture-sessions`. It is off by default:
-
-```bash
-dharma relay start --policy .dharma/approved-policy.json --capture-sessions
-```
-
-On a timer (`--capture-interval-minutes`, 15 by default), the relay runs segmented capture with `--sync` for Claude Code and Codex sessions in each registered workspace that changed within `--capture-lookback-hours` (24 by default), with `--capture-idle-minutes` (30 by default) as the idle time. The first run over a long session can take a few minutes, and the relay does not poll for tasks during that run. A session is captured only when its first recorded working directory is inside the registered workspace.
 
 Use `claude`, `agy`, or `hermes` as the provider only after the capability report says the required lifecycle is available. Hermes requires project trust and an inference provider before live tasks can run. Provider evidence or skill-discovery support alone does not imply remote task execution or content-level activation support.
 
