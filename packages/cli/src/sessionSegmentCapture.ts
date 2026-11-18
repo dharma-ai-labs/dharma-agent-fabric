@@ -373,6 +373,21 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
   return report;
 }
 
+/**
+ * HQ opens an automatic organization-wide analysis window (with paid semantic
+ * review) once 100 observed trajectories wait, and each segment is one
+ * trajectory. Until HQ keeps segments out of that count, segments are only
+ * planned locally: `capture-segments --sync` and the relay timer are refused.
+ */
+export const SESSION_SEGMENT_UPLOAD_AVAILABLE: boolean = false;
+
+export function assertSessionSegmentUploadAvailable(available = SESSION_SEGMENT_UPLOAD_AVAILABLE) {
+  if (!available) {
+    throw new Error('session_segment_upload_unavailable: HQ does not yet keep session segments out of its automatic '
+      + 'analysis window. Run capture-segments without --sync to plan segments locally.');
+  }
+}
+
 export type RelaySessionCaptureSettings = { enabled: false } | {
   enabled: true; intervalMs: number; lookbackHours: number; idleMinutes: number; providers: Array<'claude' | 'codex'>;
 };
@@ -386,13 +401,15 @@ function boundedSetting(flags: Map<string, string | boolean>, key: string, fallb
 }
 
 /** Relay session capture is opt-in: `--capture-sessions` turns on its timer. */
-export function relaySessionCaptureSettings(flags: Map<string, string | boolean>): RelaySessionCaptureSettings {
+export function relaySessionCaptureSettings(flags: Map<string, string | boolean>,
+  options: { uploadAvailable?: boolean } = {}): RelaySessionCaptureSettings {
   const keys = ['capture-interval-minutes', 'capture-lookback-hours', 'capture-idle-minutes'];
   if (!flags.has('capture-sessions')) {
     if (keys.some((key) => flags.has(key))) throw new Error('relay_session_capture_setting_invalid');
     return { enabled: false };
   }
   if (flags.get('capture-sessions') !== true) throw new Error('relay_session_capture_setting_invalid');
+  assertSessionSegmentUploadAvailable(options.uploadAvailable);
   return {
     enabled: true,
     intervalMs: boundedSetting(flags, 'capture-interval-minutes', 15, 5, 1_440) * 60_000,

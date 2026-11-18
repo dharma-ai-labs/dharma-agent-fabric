@@ -269,16 +269,17 @@ test('the relay capture timer is refused while HQ would count every segment towa
 });
 
 test('relay session capture is off unless explicitly enabled and its timer is bounded', () => {
-  assert.deepEqual(relaySessionCaptureSettings(new Map()), { enabled: false });
-  const enabled = relaySessionCaptureSettings(new Map([['capture-sessions', true]]));
+  const available = { uploadAvailable: true };
+  assert.deepEqual(relaySessionCaptureSettings(new Map(), available), { enabled: false });
+  const enabled = relaySessionCaptureSettings(new Map([['capture-sessions', true]]), available);
   assert.deepEqual(enabled, {
     enabled: true, intervalMs: 15 * 60_000, lookbackHours: 24, idleMinutes: 30, providers: ['claude', 'codex'],
   });
   assert.deepEqual(relaySessionCaptureSettings(new Map<string, string | boolean>([
     ['capture-sessions', true], ['capture-interval-minutes', '60'], ['capture-lookback-hours', '72'], ['capture-idle-minutes', '45'],
-  ])), { enabled: true, intervalMs: 3_600_000, lookbackHours: 72, idleMinutes: 45, providers: ['claude', 'codex'] });
+  ]), available), { enabled: true, intervalMs: 3_600_000, lookbackHours: 72, idleMinutes: 45, providers: ['claude', 'codex'] });
   for (const [key, value] of [['capture-interval-minutes', '1'], ['capture-lookback-hours', '0'], ['capture-idle-minutes', 'soon']]) {
-    assert.throws(() => relaySessionCaptureSettings(new Map<string, string | boolean>([['capture-sessions', true], [key!, value!]])),
+    assert.throws(() => relaySessionCaptureSettings(new Map<string, string | boolean>([['capture-sessions', true], [key!, value!]]), available),
       /relay_session_capture_setting_invalid/);
   }
   assert.throws(() => relaySessionCaptureSettings(new Map<string, string | boolean>([['capture-interval-minutes', '30']])),

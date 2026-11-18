@@ -16,7 +16,7 @@ import {
 import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, listProviderSessionFiles, providerAdapters, providerExecutionRecords, providerLaunch, providerProcessEnvironment, providerSessionId, sessionWorkspaceQualified, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
-import { captureSessionSegments, relaySessionCaptureSettings, type SessionSegmentCaptureReport } from './sessionSegmentCapture.js';
+import { assertSessionSegmentUploadAvailable, captureSessionSegments, relaySessionCaptureSettings, type SessionSegmentCaptureReport } from './sessionSegmentCapture.js';
 import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -4859,6 +4859,7 @@ async function captureWorkspaceSessionSegments(input: {
 }
 
 async function captureSegments(flags: Map<string, string | boolean>): Promise<Output> {
+  if (flags.has('sync')) assertSessionSegmentUploadAvailable();
   const provider = required(flags, 'provider');
   if (provider !== 'claude' && provider !== 'codex') throw new Error('Segmented capture supports the claude and codex providers.');
   const workspacePath = await realpath(required(flags, 'workspace'));
