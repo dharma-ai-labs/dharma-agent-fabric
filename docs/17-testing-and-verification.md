@@ -105,12 +105,14 @@ bubblewrap. It is controlled by `DHARMA_SANDBOX_EXPECT`:
   nested user namespaces fail; a detached process stops at the timeout; and
   the relay's Git still reports a write outside the signed paths;
 - `refused`: the probe must return `user_namespaces_unavailable` with the
-  AppArmor setting in its detail, and a task that names registered commands
-  must be refused before the provider, with no command run.
+  host's user-namespace setting in its detail, and a task that names registered
+  commands must be refused before the provider, with no command run.
 
 The Linux CI leg installs bubblewrap, allows user namespaces on the throwaway
-runner and runs validation with `usable`. It then turns the restriction back on
-and runs the file with `refused`. `scripts/ci-budget.test.mjs` pins both steps.
+runner and runs validation with `usable`. It then sets
+`user.max_user_namespaces=0` and runs the file with `refused`. (On the current
+runner image the AppArmor restriction alone does not stop bubblewrap.)
+`scripts/ci-budget.test.mjs` pins both steps.
 
 A Linux CI pass is not WSL2 proof. WSL2 hosts, including the Windows interop
 cut, still need a recorded qualification run on a real host.

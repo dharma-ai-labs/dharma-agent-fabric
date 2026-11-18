@@ -19,7 +19,7 @@ import {
 
 // Real-sandbox tests. They run only when DHARMA_SANDBOX_EXPECT is set:
 //   usable  - this Linux host must give a usable sandbox, and every case below must hold;
-//   refused - this host must refuse (CI turns the user-namespace restriction on for this run).
+//   refused - this host must refuse (CI turns user namespaces off for this run).
 // Unset, the file skips: that happens on Windows, macOS and local runs. Set on a host that is
 // not Linux, or set to `usable` on a host whose probe fails, the file fails instead of skipping.
 // Every canary is synthetic. Nothing real is read or listed.
@@ -230,7 +230,7 @@ if (!expectation) {
     assert.equal(sandbox.usable, false, 'the image let bubblewrap through on a restricted host');
     if (sandbox.usable) return;
     assert.equal(sandbox.reason, 'user_namespaces_unavailable', sandbox.detail);
-    assert.match(sandbox.detail, /apparmor_restrict_unprivileged_userns=1/);
+    assert.match(sandbox.detail, /max_user_namespaces=0/, 'the detail names the host setting that refused');
     const marker = resolve(fixture.root, 'command-ran');
     const { task, publicKey } = signedTask(['marker']);
     const policy = policyWith({ marker: { argv: [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`], timeoutSeconds: 30 } });
