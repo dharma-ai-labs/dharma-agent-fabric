@@ -11,7 +11,7 @@ import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import * as taskRunner from './index.js';
 import { executeTask, FileTaskReceiptStore, type TaskEnvelope } from './index.js';
 
-// DIA-1560 slice 1: registered commands run as the relay's operating-system user
+// registered commands run as the relay's operating-system user
 // without a sandbox, so the runner refuses every task that names one until
 // isolation exists. Tasks that name no registered command run as before.
 

@@ -27,7 +27,7 @@ commands offered to the provider as Bash tools, would run as the relay's
 operating-system user without a sandbox. Code written during the task could then
 read that user's credential files. Until command isolation exists, `executeTask()`
 refuses every task with a non-empty `authority.commands` or
-`acceptance.commands` (DIA-1560).
+`acceptance.commands`.
 
 The refusal happens after signature, expiry and organization checks and before
 any worktree, provider process or command starts. `executeTask()` throws

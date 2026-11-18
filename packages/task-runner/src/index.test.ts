@@ -30,10 +30,10 @@ import {
 } from './index.js';
 import * as taskRunner from './index.js';
 
-// DIA-1560 slice 1: the runner refuses every task that names registered commands until
+// the runner refuses every task that names registered commands until
 // command isolation exists (see registeredCommandRefusal.test.ts). These tests cover the
 // command path that the isolation work will re-enable, so they stay in place, skipped.
-const REGISTERED_COMMANDS_REFUSED_SKIP = 'DIA-1560: the runner refuses registered commands until command isolation exists';
+const REGISTERED_COMMANDS_REFUSED_SKIP = 'The runner refuses registered commands until command isolation exists';
 
 async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string[]) {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-required-artifact-'));

@@ -223,7 +223,7 @@ export class ActionDecisionDeniedError extends Error {
   }
 }
 
-/** Refusal code for a task that names registered commands (DIA-1560). */
+/** Refusal code for a task that names registered commands. */
 export const REGISTERED_COMMANDS_REFUSED = 'registered_commands_refused';
 
 /**
