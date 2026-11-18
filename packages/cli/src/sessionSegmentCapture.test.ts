@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { appendFile, mkdir, mkdtemp, realpath, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { canonicalize, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -305,6 +305,26 @@ test('one failing session does not stop the sessions after it, and its reason is
   assert.equal(report.sessions[1]!.stoppedReason, null);
   assert.equal(report.sessions[1]!.segmentsCommitted, committed.length);
   assert.ok(committed.length >= 1);
+});
+
+test('another spelling of the same session path is the same session and sends nothing again', async () => {
+  const base = await fixture('dharma-segments-path-spelling-', 30, { outputBytes: 2_000 });
+  await mkdir(join(base.root, 'nested'));
+  const spellings = [`${base.root}${sep}nested${sep}..${sep}session.jsonl`];
+  if (process.platform === 'win32') {
+    spellings.push(base.source.replaceAll('\\', '/'), join(base.root, 'SESSION.JSONL'));
+  }
+  const { store, committed } = fakeStore();
+  const later = () => new Date(Date.now() + 3_600_000);
+  const original = await captureSessionSegments(input(base, { store, now: later }));
+  const sent = committed.length;
+  assert.ok(sent >= 1);
+  for (const spelling of spellings) {
+    const again = await captureSessionSegments(input(base, { store, now: later, sources: [spelling] }));
+    assert.equal(again.sessions[0]!.sessionId, original.sessions[0]!.sessionId, spelling);
+    assert.equal(again.sessions[0]!.segmentsSkipped, sent, spelling);
+  }
+  assert.equal(committed.length, sent);
 });
 
 test('plan mode writes nothing and reports the same segments a sync run commits', async () => {
