@@ -11,7 +11,7 @@ export type RepositoryRelayFailureCategory = 'policy_boundary' | 'retention_not_
 // Exact codes only: any other error message can quote a path or a server value.
 export const REPOSITORY_RELAY_FAILURE_CODES: ReadonlySet<string> = new Set(['connection_anchor_lock_invalid', 'connection_anchor_busy',
   'connection_anchor_recovery_required', 'connection_anchor_lock_unavailable', 'connection_anchor_lock_cleanup_unconfirmed',
-  'device_signing_control_unavailable', ...RELAY_OPEN_FAILURE_CODES]);
+  'device_signing_control_unavailable', 'connection_anchor_lock_flush_failed', ...RELAY_OPEN_FAILURE_CODES]);
 const typedFailure = (value: unknown) => REPOSITORY_RELAY_FAILURE_CODES.has(value as string) ? { failureCode: value as string } : {};
 // An unreadable device identity or store needs the user, so a retry every 30 s only repeats the failure.
 // connection_identity_store_busy is transient and stays on the short relayRestartDelayMs schedule.

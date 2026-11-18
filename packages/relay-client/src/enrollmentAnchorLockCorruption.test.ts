@@ -2,17 +2,22 @@ import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import {tmpdir} from 'node:os';
+import {tmpdir, uptime} from 'node:os';
 import {dirname, resolve} from 'node:path';
 import test from 'node:test';
 import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
 import ts from 'typescript';
 import {acquireEnrollmentAnchorLock} from './enrollmentAnchorLock.js';
+import {HostOperationFence} from './hostOperationScope.js';
 
 const moduleUrl = new URL('./enrollmentAnchorLock.js', import.meta.url).href;
 // The G11 hard reset left exactly this on disk: five NUL bytes.
 const NUL_OWNER = Buffer.alloc(5);
+// #484: a Windows host crash left the full six-byte length, all NUL.
+const TORN_OWNER = Buffer.alloc(6);
+// Linux and macOS flush the lock folder once the lock is published and the mutex is gone; Windows cannot.
+const FOLDER_FLUSH = process.platform === 'win32' ? [] : ['folder flush'];
 
 async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const root = await fs.realpath(await fs.mkdtemp(resolve(tmpdir(), 'fabric-anchor-corrupt-')));
@@ -67,6 +72,27 @@ const holderScript = `import {acquireEnrollmentAnchorLock} from ${JSON.stringify
     await release.assertHeld();
   } finally {await release();}`;
 
+// Records every file change the acquire makes to the lock or its mutex, and every retry wait.
+function recordedChanges(path: string) {
+  const changes: string[] = [];
+  let waits = 0;
+  return {changes, waits: () => waits, context: {
+    link: async (candidate: string, destination: string) => {
+      if (destination === path || destination === path + '.recovery') changes.push(`link ${destination}`);
+      return fs.link(candidate, destination);
+    },
+    rename: async (from: string, to: string) => {changes.push(`rename ${from}`); return fs.rename(from, to);},
+    unlink: async (name: string) => {
+      if (name === path || name.startsWith(path + '.dead.')) changes.push(`unlink ${name}`);
+      return fs.unlink(name);
+    },
+    setTimeout: (callback: () => void, delay: number) => {
+      if (delay === 25) waits++;
+      return setTimeout(callback, delay);
+    },
+  }};
+}
+
 test('a lock whose contents cannot be an owner is quarantined and then acquired', async t => {
   const contents: Array<[string, string | Buffer]> = [['NUL', NUL_OWNER], ['empty', ''], ['text', 'corrupt-owner'],
     ['zero', '0\n'], ['negative', '-1\n'], ['pid then NUL', Buffer.from('1234\n\0\0\0')],
@@ -82,6 +108,61 @@ test('a lock whose contents cannot be an owner is quarantined and then acquired'
     } finally {await release();}
     assert.deepEqual(await fs.readdir(f.root), [], label);
   }
+});
+
+// #484: the six-byte NUL lock a Windows host crash left is quarantined like any other ownerless lock (#417),
+// whatever its timestamp, and the next owner takes the lock.
+async function assertQuarantined(t: {after(fn: () => Promise<void>): void}, label: string, mtime: Date) {
+  const f = await fixture(t), recorded = recordedChanges(f.path);
+  await fs.writeFile(f.path, TORN_OWNER);
+  await fs.utimes(f.path, mtime, mtime);
+  const release = await (await compiledAcquire(recorded.context))(f.path, undefined, 2000);
+  try {
+    await release.assertHeld();
+    assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}\n`, label);
+    assert.ok(recorded.changes.includes(`rename ${f.path}`), `${label}: the torn lock is moved aside`);
+    assert.deepEqual(await fs.readdir(f.root), ['anchor.lock'], label);
+  } finally {await release();}
+  assert.deepEqual(await fs.readdir(f.root), [], label);
+}
+
+test('#484: a six-byte NUL lock with a timestamp before this boot is quarantined and then acquired', async t => {
+  await assertQuarantined(t, 'prior boot', new Date(Date.now() - uptime() * 1000 - 3_600_000));
+});
+
+test('#484: a six-byte NUL lock with a timestamp in this boot is quarantined and then acquired', async t => {
+  await assertQuarantined(t, 'current boot', new Date());
+});
+
+test('unavailable ownership evidence leaves the lock alone', async t => {
+  // Windows: an unreadable owner may be live, so the acquire waits and then reports busy.
+  const windows = await fixture(t), denied = recordedChanges(windows.path);
+  await fs.writeFile(windows.path, TORN_OWNER);
+  const before = await fs.stat(windows.path, {bigint: true});
+  const unreadable = await compiledAcquire({...denied.context,
+    process: {platform: 'win32', pid: process.pid, kill: () => assert.fail('no liveness decision without a readable owner')},
+    readFile: async (path: string, encoding: BufferEncoding) => {
+      if (path === windows.path) throw Object.assign(Error('synthetic read denial'), {code: 'EPERM'});
+      return fs.readFile(path, encoding);
+    }});
+  await assert.rejects(unreadable(windows.path, undefined, 150), /connection_anchor_busy/);
+  assert.ok(denied.waits() > 0);
+  assert.deepEqual(denied.changes, []);
+  assert.equal((await fs.stat(windows.path, {bigint: true})).ino, before.ino);
+  assert.deepEqual(await fs.readFile(windows.path), TORN_OWNER);
+  assert.deepEqual(await fs.readdir(windows.root), ['anchor.lock']);
+  // Any platform: lock metadata that cannot be read fails at once.
+  const metadata = await fixture(t), blind = recordedChanges(metadata.path);
+  await fs.writeFile(metadata.path, TORN_OWNER);
+  const denial = Object.assign(Error('synthetic metadata denial'), {code: 'EACCES'});
+  const unlisted = await compiledAcquire({...blind.context, lstat: async (path: string, options: {bigint: true}) => {
+    if (path === metadata.path) throw denial;
+    return fs.lstat(path, options);
+  }});
+  await assert.rejects(unlisted(metadata.path, undefined, 150), error => error === denial);
+  assert.deepEqual(blind.changes, []); assert.equal(blind.waits(), 0);
+  assert.deepEqual(await fs.readFile(metadata.path), TORN_OWNER);
+  assert.deepEqual(await fs.readdir(metadata.root), ['anchor.lock']);
 });
 
 test('a live owner on a recovered lock is never evicted by a contender', async t => {
@@ -123,6 +204,58 @@ test('contending processes on one NUL lock each own it alone', async t => {
     assert.equal(lines[index + 1], lines[index]!.replace('enter:', 'leave:'));
   }
   assert.deepEqual(await fs.readdir(f.root), ['trace']);
+});
+
+test('a lock published by another process during an acquire is never displaced', async t => {
+  const f = await fixture(t), started = resolve(f.root, 'started'), ready = resolve(f.root, 'ready');
+  const finish = resolve(f.root, 'finish');
+  let holder: Promise<void> | undefined, holderPid = '', holderIno = 0n;
+  const recorded = recordedChanges(f.path);
+  // The read-only check saw no lock. Before this acquire takes the mutex, another process takes the lock.
+  const acquire = await compiledAcquire({...recorded.context, link: async (candidate: string, destination: string) => {
+    if (destination === f.path + '.recovery' && !holder) {
+      holder = child(holderScript, f.path, started, ready, finish);
+      holder.catch(() => undefined);
+      holderPid = await waitFor(ready);
+      holderIno = (await fs.stat(f.path, {bigint: true})).ino;
+    }
+    return recorded.context.link(candidate, destination);
+  }});
+  try {
+    await assert.rejects(acquire(f.path, undefined, 300), /connection_anchor_busy/);
+    assert.ok(holder, 'the replacement ran');
+    assert.equal(await fs.readFile(f.path, 'utf8'), `${holderPid}\n`);
+    assert.equal((await fs.stat(f.path, {bigint: true})).ino, holderIno);
+    assert.equal(recorded.changes.some(change => change.startsWith('rename') || change.startsWith('unlink')), false);
+    assert.equal((await fs.readdir(f.root)).some(name => name.includes('.dead.')), false);
+  } finally {await fs.writeFile(finish, 'finish');}
+  // The holder asserts at release that it still held the lock throughout.
+  await holder;
+  assert.deepEqual((await fs.readdir(f.root)).sort(), ['finish', 'ready', 'started']);
+});
+
+test('a torn lock that appears while the mutex is held is quarantined under the mutex, then acquired', async t => {
+  const f = await fixture(t), recorded = recordedChanges(f.path);
+  let replaced = false;
+  const acquire = await compiledAcquire({...recorded.context, link: async (candidate: string, destination: string) => {
+    if (destination === f.path && !replaced) {
+      replaced = true;
+      await fs.writeFile(f.path, TORN_OWNER);
+    }
+    return recorded.context.link(candidate, destination);
+  }});
+  const release = await acquire(f.path, undefined, 2000);
+  try {
+    assert.equal(replaced, true);
+    await release.assertHeld();
+    assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}\n`);
+    const quarantine = recorded.changes.find(change => change.startsWith(`unlink ${f.path}.dead.`));
+    assert.ok(quarantine, 'the torn lock was moved aside and removed');
+    assert.deepEqual(recorded.changes, [`link ${f.path}.recovery`, `link ${f.path}`, `rename ${f.path}`, quarantine,
+      `link ${f.path}.recovery`, `link ${f.path}`]);
+    assert.deepEqual(await fs.readdir(f.root), ['anchor.lock']);
+  } finally {await release();}
+  assert.deepEqual(await fs.readdir(f.root), []);
 });
 
 test('a contender cannot publish while the inspector holds the mutex over a NUL lock', async t => {
@@ -181,7 +314,7 @@ function recordedOpen(failure?: string) {
       sync: async () => {
         if (failure) throw Object.assign(new Error('synthetic flush failure'), {code: failure});
         await handle.sync();
-        assert.equal(await fs.readFile(path, 'utf8'), `${process.pid}\n`);
+        if (!(await fs.stat(path)).isDirectory()) assert.equal(await fs.readFile(path, 'utf8'), `${process.pid}\n`);
         flushed.add(path);
       },
       close: () => handle.close(),
@@ -202,23 +335,57 @@ test('owner contents reach disk before the lock or its mutex is linked into plac
   assert.deepEqual(await fs.readdir(f.root), []);
 });
 
-test('a failed flush publishes nothing', async t => {
+test('a failed candidate flush is a typed error, publishes nothing and leaves nothing behind', async t => {
   const f = await fixture(t), recorded = recordedOpen('EIO');
   const acquire = await compiledAcquire({open: recorded.open, link: async () => assert.fail('nothing may be linked')});
-  await assert.rejects(acquire(f.path, undefined, 100), {code: 'EIO'});
-  assert.deepEqual((await fs.readdir(f.root)).filter(name => !name.endsWith('.candidate')), []);
+  await assert.rejects(acquire(f.path, undefined, 100), (error: Error & {cause?: {code?: string}}) =>
+    error.message === 'connection_anchor_lock_flush_failed' && error.cause?.code === 'EIO');
+  assert.deepEqual(await fs.readdir(f.root), []);
+  // Under a host scope the code is kept, not folded into connection_anchor_lock_unavailable.
+  const scope = new HostOperationFence({signal: new AbortController().signal, current: async () => true});
+  await assert.rejects(acquire(f.path, scope, 100), /^Error: connection_anchor_lock_flush_failed$/);
+  assert.deepEqual(await fs.readdir(f.root), []);
+});
+
+test('an interrupted candidate write publishes nothing, leaves nothing behind and does not block the next acquire', async t => {
+  const f = await fixture(t);
+  const interrupted = await compiledAcquire({
+    open: async (path: string, ...rest: [string, number]) => {
+      const handle = await fs.open(path, ...rest);
+      return {
+        // Part of the owner reaches the file, then the write fails.
+        writeFile: async (data: string) => {
+          await handle.writeFile(data.slice(0, 2));
+          throw Object.assign(new Error('synthetic interrupted write'), {code: 'ENOSPC'});
+        },
+        sync: () => assert.fail('a partly written candidate is never flushed as an owner'),
+        close: () => handle.close(),
+      };
+    },
+    link: async () => assert.fail('a partly written candidate is never published'),
+  });
+  await assert.rejects(interrupted(f.path, undefined, 100), {code: 'ENOSPC'});
+  assert.deepEqual(await fs.readdir(f.root), []);
+  const release = await acquireEnrollmentAnchorLock(f.path, undefined, 1000);
+  try {assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}\n`);}
+  finally {await release();}
 });
 
 // Records every flush and every change to the recovery mutex, in the order they happen.
-function recordedLockFiles(path: string) {
-  const events: string[] = [], recovery = path + '.recovery';
+function recordedLockFiles(path: string, folderFailure?: string) {
+  const events: string[] = [], recovery = path + '.recovery', folder = dirname(path);
   let opened = 0;
   return {events, opened: () => opened, context: {
     open: async (name: string, ...rest: [string, number]) => {
       const handle = await fs.open(name, ...rest);
-      opened++;
+      if (name !== folder) opened++;
       return {writeFile: (data: string) => handle.writeFile(data), close: () => handle.close(),
-        sync: async () => {events.push('flush'); await handle.sync();}};
+        sync: async () => {
+          if (name !== folder) {events.push('flush'); return handle.sync();}
+          events.push('folder flush');
+          if (folderFailure) throw Object.assign(new Error('synthetic folder flush failure'), {code: folderFailure});
+          return handle.sync();
+        }};
     },
     link: async (candidate: string, destination: string) => {
       await fs.link(candidate, destination);
@@ -234,12 +401,36 @@ function recordedLockFiles(path: string) {
 test('nothing is flushed while the recovery mutex exists', async t => {
   const clean = await fixture(t), first = recordedLockFiles(clean.path);
   await (await (await compiledAcquire(first.context))(clean.path))();
-  assert.deepEqual(first.events, ['flush', 'mutex link', 'mutex unlink']);
+  assert.deepEqual(first.events, ['flush', 'mutex link', 'mutex unlink', ...FOLDER_FLUSH]);
   const dead = await fixture(t), retried = recordedLockFiles(dead.path);
   await fs.writeFile(dead.path, NUL_OWNER);
   await (await (await compiledAcquire(retried.context))(dead.path, undefined, 2000))();
-  assert.deepEqual(retried.events, ['flush', 'mutex link', 'mutex unlink', 'mutex link', 'mutex unlink']);
+  assert.deepEqual(retried.events, ['flush', 'mutex link', 'mutex unlink', 'mutex link', 'mutex unlink', ...FOLDER_FLUSH]);
 });
+
+const folderFlushFailed = (error: Error & {cause?: {code?: string}}) =>
+  error.message === 'connection_anchor_lock_flush_failed' && error.cause?.code === 'EIO';
+
+test('a failed lock folder flush is a typed error and gives the lock up', {skip: process.platform === 'win32'}, async t => {
+  const f = await fixture(t), recorded = recordedLockFiles(f.path, 'EIO');
+  await assert.rejects((await compiledAcquire(recorded.context))(f.path, undefined, 1000), folderFlushFailed);
+  assert.deepEqual(recorded.events, ['flush', 'mutex link', 'mutex unlink', 'folder flush']);
+  assert.deepEqual(await fs.readdir(f.root), []);
+});
+
+test('a failed folder flush after quarantine leaves no lock, mutex or dead copy, so the next acquire recovers',
+  {skip: process.platform === 'win32'}, async t => {
+    const f = await fixture(t), recorded = recordedLockFiles(f.path, 'EIO');
+    await fs.writeFile(f.path, NUL_OWNER);
+    await assert.rejects((await compiledAcquire(recorded.context))(f.path, undefined, 2000), folderFlushFailed);
+    assert.deepEqual(recorded.events, ['flush', 'mutex link', 'mutex unlink', 'mutex link', 'mutex unlink', 'folder flush']);
+    assert.deepEqual(await fs.readdir(f.root), []);
+    const release = await acquireEnrollmentAnchorLock(f.path, undefined, 1000);
+    try {await release.assertHeld(); assert.equal(await fs.readFile(f.path, 'utf8'), `${process.pid}
+`);}
+    finally {await release();}
+    assert.deepEqual(await fs.readdir(f.root), []);
+  });
 
 test('a waiter held off by a live owner never creates the recovery mutex', async t => {
   const f = await fixture(t), recorded = recordedLockFiles(f.path);
@@ -263,7 +454,7 @@ test('a waiter takes the recovery mutex once, after the live owner releases', as
   const release = await waiter;
   await release.assertHeld();
   await release();
-  assert.deepEqual(recorded.events, ['flush', 'mutex link', 'mutex unlink']);
+  assert.deepEqual(recorded.events, ['flush', 'mutex link', 'mutex unlink', ...FOLDER_FLUSH]);
   assert.deepEqual(await fs.readdir(f.root), []);
 });
 
