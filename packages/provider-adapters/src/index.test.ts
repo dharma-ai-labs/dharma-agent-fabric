@@ -160,6 +160,27 @@ test('provider subprocess environment excludes cloud and model credentials', () 
   assert.equal(env.DHARMA_AGENT_FABRIC_TASK, '1');
 });
 
+test('provider subprocess environment keeps its existing allowlist and ignores acceptance-command names', () => {
+  const source = {
+    PATH: '/usr/bin', HOME: '/home/customer', USERPROFILE: 'C:\Users\customer', LOCALAPPDATA: 'local', APPDATA: 'roaming',
+    TMP: 'tmp', TEMP: 'temp', TMPDIR: '/tmp/customer', SHELL: '/bin/sh', COMSPEC: 'cmd', SYSTEMROOT: 'root', WINDIR: 'win',
+    PATHEXT: '.COM;.EXE', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TERM: 'dumb', XDG_CONFIG_HOME: '/home/customer/.config',
+    XDG_CACHE_HOME: '/home/customer/.cache', CODEX_HOME: '/home/customer/.codex', CLAUDE_CONFIG_DIR: '/home/customer/.claude',
+    AGY_CONFIG_DIR: '/home/customer/.agy', HERMES_HOME: '/home/customer/.hermes',
+    PARENT_PROCESS_SENTINEL: 'synthetic-parent-value', LC_CTYPE: 'C.UTF-8', USER: 'customer', npm_config_userconfig: 'npmrc',
+    DHARMA_TASK_WORKTREE: '/forged', DHARMA_EXTERNAL_IDEMPOTENCY_KEY: 'forged-key', DHARMA_ACTION_DIGEST: 'forged-digest',
+  };
+  const { PARENT_PROCESS_SENTINEL: _sentinel, LC_CTYPE: _ctype, USER: _user, npm_config_userconfig: _npm,
+    DHARMA_TASK_WORKTREE: _worktree, DHARMA_EXTERNAL_IDEMPOTENCY_KEY: _key, DHARMA_ACTION_DIGEST: _digest,
+    ...allowed } = source;
+  assert.deepEqual(providerProcessEnvironment(source), {
+    ...allowed,
+    PATH: ['/usr/bin', resolve('/home/customer', '.local', 'bin')].join(delimiter),
+    NO_COLOR: '1',
+    DHARMA_AGENT_FABRIC_TASK: '1',
+  });
+});
+
 test('provider subprocess environment adds the supported per-user CLI install directory once', () => {
   const localBin = resolve('/home/customer', '.local', 'bin');
   const env = providerProcessEnvironment({
