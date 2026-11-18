@@ -66,8 +66,8 @@ test('the Linux leg prepares the command sandbox, requires it to be usable and p
   assert.match(prepare.run, /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0/);
   assert.equal(validation.env?.DHARMA_SANDBOX_EXPECT, "${{ runner.os == 'Linux' && 'usable' || '' }}");
   assert.equal(validation['continue-on-error'], undefined);
-  assert.match(refusal.run, /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=1/);
+  assert.match(refusal.run, /sysctl -w user\.max_user_namespaces=0\n/);
   assert.match(refusal.run, /DHARMA_SANDBOX_EXPECT=refused node --test packages\/task-runner\/dist\/registeredCommandSandbox\.linux\.test\.js/);
-  assert.match(refusal.run, /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0\s*$/);
+  assert.match(refusal.run, /sysctl -w user\.max_user_namespaces="\$original"\s*$/);
   assert.doesNotMatch(refusal.run, /\|\|\s*true/);
 });
