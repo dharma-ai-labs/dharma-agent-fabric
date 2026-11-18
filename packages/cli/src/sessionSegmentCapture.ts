@@ -158,20 +158,30 @@ function recordTimeRange(records: SourceRecord[], previousEnd: string | null, fa
 
 // A step ends where no tool call is waiting for its result, so a split turn
 // never separates a call from its result.
-function toolExchangeSteps(unit: Unit): Unit[] {
-  const steps: Unit[] = [];
-  let current: SourceRecord[] = [];
-  let pending = 0;
-  const blocks = (record: SourceRecord, type: string) => {
+function pendingAfter(pending: number, record: SourceRecord): number {
+  const blocks = (type: string) => {
     const message = record.native.message as { content?: unknown } | undefined;
     const content = Array.isArray(message?.content) ? message.content : [];
     const count = content.filter((block) => (block as { type?: unknown } | null)?.type === type).length;
     return count || 1;
   };
+  if (record.kind === 'tool_call') return pending + blocks('tool_use');
+  if (record.kind === 'tool_result') return Math.max(0, pending - blocks('tool_result'));
+  return pending;
+}
+
+/** Tool calls in these records that are still waiting for their result. */
+function pendingToolCalls(records: SourceRecord[]): number {
+  return records.reduce(pendingAfter, 0);
+}
+
+function toolExchangeSteps(unit: Unit): Unit[] {
+  const steps: Unit[] = [];
+  let current: SourceRecord[] = [];
+  let pending = 0;
   for (const record of unit.records) {
     current.push(record);
-    if (record.kind === 'tool_call') pending += blocks(record, 'tool_use');
-    if (record.kind === 'tool_result') pending = Math.max(0, pending - blocks(record, 'tool_result'));
+    pending = pendingAfter(pending, record);
     if (pending === 0) {
       steps.push({ records: current, coverage: unit.coverage, startOffset: current[0]!.line, endOffset: 0 });
       current = [];
@@ -329,7 +339,8 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
         piece.push(step);
       }
       if (!piece.length) return false;
-      if (atEndOfFile && !idle) return true;
+      // A call still waiting for its result keeps the piece open, even in an idle file.
+      if (atEndOfFile && (!idle || pendingToolCalls(piece.flatMap((step) => step.records)) > 0)) return true;
       await emit(piece, false);
       return false;
     };
@@ -361,8 +372,12 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
         current.push(unit);
       }
       if (current.length) {
-        if (idle) await emit(current, false);
-        else summary.held = true;
+        if (!idle) summary.held = true;
+        else if (pendingToolCalls(current.at(-1)!.records) > 0) {
+          // A call still waiting for its result keeps its turn open, even in an idle file.
+          if (current.length > 1) await emit(current.slice(0, -1), false);
+          summary.held = true;
+        } else await emit(current, false);
       }
     } catch (error) {
       if (!(error instanceof StopSession)) throw error;
