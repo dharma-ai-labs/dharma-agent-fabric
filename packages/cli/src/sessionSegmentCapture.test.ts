@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { canonicalize, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
-import type { TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
-import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { generateKeyPairSync } from 'node:crypto';
+import { canonicalize, signCanonicalObject, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
+import { containsDisallowedLocalPath, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
+import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import {
   captureSessionSegments,
   relaySessionCaptureBlocked,
@@ -29,6 +30,31 @@ const policy = (maximumCapsuleBytes: number, maximumDailyUploadBytes = 50_000_00
   skills: { automaticInstall: true, automaticPromotionMaxRisk: 'R2', canaryPercent: 10 },
   retention: {}, budgets: {},
 });
+
+// A content-disclosure policy as the CLI holds it after verifying HQ's signed authorization.
+function contentPolicy(maximumCapsuleBytes: number): OrganizationPolicy {
+  const keys = generateKeyPairSync('ed25519');
+  const disclosure = {
+    mode: 'customer_authorized_content' as const, consentReceiptId: 'consent_segments_test',
+    allowedContentClasses: ['native_provider_payload' as const],
+  };
+  const now = Date.now();
+  const unsigned = {
+    schema: 'dharma.workspace-policy-authorization/v1' as const, organizationId: ORGANIZATION, workspaceId: WORKSPACE_ID,
+    policy: { revision: 'rev_segments', evidence: {
+      automaticDisclosure: disclosure, maximumCapsuleBytes, maximumDailyUploadBytes: 50_000_000,
+      maximumExpansionBytes: 100_000, excludePaths: [], pseudonymizeIdentity: true as const,
+    } },
+    issuedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), keyVersion: 'test',
+  };
+  const base = policy(maximumCapsuleBytes);
+  return verifyServerAuthorizedPolicy({
+    policy: { ...base, schema: 'dharma.organization-policy/v2', evidence: { ...base.evidence, automaticDisclosure: disclosure },
+      serverAuthorization: { ...unsigned, signature: signCanonicalObject(unsigned, keys.privateKey) } },
+    publicKeyEd25519: keys.publicKey.export({ format: 'jwk' }).x!, organizationId: ORGANIZATION, workspaceId: WORKSPACE_ID,
+    now: new Date(now),
+  });
+}
 
 const at = (turn: number, second = 0) => new Date(Date.UTC(2026, 10, 18, 8, 0, 0) + turn * 60_000 + second * 1_000).toISOString();
 
@@ -325,6 +351,89 @@ test('another spelling of the same session path is the same session and sends no
     assert.equal(again.sessions[0]!.segmentsSkipped, sent, spelling);
   }
   assert.equal(committed.length, sent);
+});
+
+test('secrets and local paths are redacted in every segment, on both sides of each boundary', async () => {
+  const base = await fixture('dharma-segments-redaction-', 0);
+  const secret = `ghp_${'A1b2C3d4'.repeat(5)}`;
+  const outside = process.platform === 'win32' ? 'C:\\Users\\alice\\private\\notes.txt' : '/home/alice/private/notes.txt';
+  const turns = Array.from({ length: 40 }, (_, turn) => {
+    const records = claudeTurn(base.workspace, turn, { outputBytes: 2_000 + turn });
+    const block = (records[2] as { message: { content: Array<{ content: string }> } }).message.content[0]!;
+    block.content = `${secret} read ${outside} ${block.content}`;
+    return records;
+  });
+  await writeFile(base.source, jsonl(turns.flat()));
+  const local = policy(25_000);
+  const content = contentPolicy(25_000);
+  for (const evidencePolicy of [local, content]) {
+    const { store, committed } = fakeStore();
+    const report = await captureSessionSegments(input(base, {
+      store, now: () => new Date(Date.now() + 3_600_000), policy: evidencePolicy,
+      ledgerRoot: join(base.root, `ledger-${evidencePolicy === content ? 'content' : 'local'}`),
+    }));
+    assert.ok(committed.length >= 3, JSON.stringify({ mode: evidencePolicy === content, segments: committed.length,
+      sessions: report.sessions, bytes: report.segments.map((segment) => segment.bytes) }));
+    for (const capsule of committed) {
+      const encoded = JSON.stringify(capsule);
+      if (evidencePolicy === content) {
+        assert.equal(capsule.automaticDisclosureMode, 'customer_authorized_content');
+        assert.ok(encoded.includes('y'.repeat(64)), 'content mode carries the tool output');
+      }
+      assert.equal(encoded.includes(secret), false, 'no secret in any segment');
+      assert.equal(encoded.includes('alice'), false, 'no local path outside the workspace in any segment');
+      assert.equal(encoded.includes(base.workspace.replaceAll('\\', '\\\\')), false, 'no absolute workspace path');
+      assert.equal(containsDisallowedLocalPath(capsule), false);
+    }
+  }
+});
+
+test('records whose cwd spells the workspace with forward slashes or another drive-letter case are kept', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const base = await fixture('dharma-segments-windows-cwd-', 0);
+  const spellings = [base.workspace.replaceAll('\\', '/'), base.workspace[0]!.toLowerCase() + base.workspace.slice(1)];
+  const records = Array.from({ length: 20 }, (_, turn) => claudeTurn(spellings[turn % 2]!, turn, { outputBytes: 2_000 + turn })).flat();
+  await writeFile(base.source, jsonl(records));
+  const { store, committed } = fakeStore();
+  await captureSessionSegments(input(base, { store, now: () => new Date(Date.now() + 3_600_000) }));
+  assert.ok(committed.length >= 1);
+  assert.ok(committed.every((capsule) => capsule.coverage.state === 'observed'));
+  assert.equal(committed.reduce((total, capsule) => total + capsule.localAnalysis!.recordCount, 0), records.length);
+});
+
+test('a split turn resumed after its held piece continues without unmatched calls or lost records', async () => {
+  const giant = await fixture('dharma-segments-resume-split-', 0);
+  const turn = claudeTurn(giant.workspace, 0, { tools: 400, outputBytes: 100 });
+  const half = 1 + 2 * 250;
+  await writeFile(giant.source, jsonl(turn.slice(0, half)));
+  const { store, committed } = fakeStore();
+  const run = (now: () => Date) => captureSessionSegments(input(giant, { store, now, policy: policy(40_000) }));
+  const active = await run(() => new Date());
+  assert.equal(active.sessions[0]!.held, true);
+  assert.ok(committed.length >= 1, 'closed pieces of the open turn are sent');
+  await appendFile(giant.source, jsonl([...turn.slice(half), ...claudeTurn(giant.workspace, 1)]));
+  await run(() => new Date(Date.now() + 3_600_000));
+  for (const capsule of committed) {
+    assert.equal(capsule.localAnalysis!.toolDiscipline.unmatchedCalls, 0);
+    assert.equal(capsule.localAnalysis!.toolDiscipline.orphanResults, 0);
+  }
+  assert.equal(committed.reduce((total, capsule) => total + capsule.localAnalysis!.recordCount, 0), turn.length + claudeTurn(giant.workspace, 1).length);
+});
+
+test('turns with identical content are each covered once', async () => {
+  const base = await fixture('dharma-segments-identical-', 0);
+  const same = (turn: number) => claudeTurn(base.workspace, 0, { outputBytes: 2_000 }).map((record) => ({ ...record, timestamp: at(turn) }));
+  const records = Array.from({ length: 40 }, (_, turn) => same(turn)).flat();
+  await writeFile(base.source, jsonl(records));
+  const { store, committed } = fakeStore();
+  await captureSessionSegments(input(base, { store, now: () => new Date(Date.now() + 3_600_000), policy: policy(25_000) }));
+  assert.ok(committed.length >= 1);
+  assert.equal(committed.reduce((total, capsule) => total + capsule.localAnalysis!.recordCount, 0), records.length);
+  for (const capsule of committed) {
+    assert.equal(capsule.coverage.state, 'observed');
+    assert.ok(Buffer.byteLength(canonicalize(capsule)) <= 25_000);
+  }
 });
 
 test('plan mode writes nothing and reports the same segments a sync run commits', async () => {
