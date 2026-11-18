@@ -16,7 +16,7 @@ import {
 import { buildTrajectoryCapsule, containsDisallowedLocalPath, redactValue, referencesExcludedPath, trajectoryCapsuleHash, type RedactionStats, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { assertPolicy, loadOrganizationPolicy, verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import { agyAdapter, claudeAdapter, codexAdapter, hermesAdapter, listProviderSessionFiles, providerAdapters, providerExecutionRecords, providerLaunch, providerProcessEnvironment, providerSessionId, sessionWorkspaceQualified, type ProviderSession } from '@dharma-ai-labs/agent-fabric-provider-adapters';
-import { assertSessionSegmentUploadAvailable, captureSessionSegments, relaySessionCaptureSettings, type SessionSegmentCaptureReport } from './sessionSegmentCapture.js';
+import { assertSessionSegmentUploadAvailable, captureSessionSegments, relaySessionCaptureBlocked, relaySessionCaptureSettings, type SessionSegmentCaptureReport } from './sessionSegmentCapture.js';
 import {
   AgentFabricClient, beginEnrollment, loadDeviceIdentity, loadOrCreateDeviceIdentity, normalizeHqUrl, pollEnrollment,
   assertDeviceEnrollmentAnchorAbsent, deleteActiveSkillAuthorizationAnchor, loadActiveSkillAuthorizationAnchor, loadDeviceEnrollmentAnchor, saveActiveSkillAuthorizationAnchor,
@@ -9720,12 +9720,17 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
         && !stopping && Date.now() >= nextSessionCaptureAt) {
         nextSessionCaptureAt = Date.now() + sessionCapture.intervalMs;
         try {
+          const blocked = relaySessionCaptureBlocked(sessionCapture, policy);
+          if (blocked) throw new Error(blocked);
+          // Re-read on every tick, so sessions listed after a preview are picked up.
+          const sessionIds = sessionCapture.sessionIdsFile
+            ? await readSessionAllowlist(new Map([['session-ids-file', sessionCapture.sessionIdsFile]])) : null;
           await serialized(async () => {
             for (const provider of sessionCapture.providers) {
               if (stopping) return;
               const report = await captureWorkspaceSessionSegments({
                 workspace: canonicalWorkspace, organizationId: fabric.config.organizationId, deviceId: fabric.config.deviceId,
-                policy, provider, since: new Date(Date.now() - sessionCapture.lookbackHours * 3_600_000),
+                policy, provider, sessionIds, since: new Date(Date.now() - sessionCapture.lookbackHours * 3_600_000),
                 maximumSessions: 50, idleMinutes: sessionCapture.idleMinutes, sourceClass: 'provider_discovery',
                 vault, fabric: fabric as SegmentCaptureFabric,
               });

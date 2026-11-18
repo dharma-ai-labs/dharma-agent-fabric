@@ -390,7 +390,7 @@ export function assertSessionSegmentUploadAvailable(available = SESSION_SEGMENT_
 
 export type RelaySessionCaptureSettings = { enabled: false } | {
   enabled: true; intervalMs: number; lookbackHours: number; idleMinutes: number; providers: Array<'claude' | 'codex'>;
-  sessionIdsFile?: string | null;
+  sessionIdsFile: string | null;
 };
 
 function boundedSetting(flags: Map<string, string | boolean>, key: string, fallback: number, minimum: number, maximum: number) {
@@ -401,25 +401,39 @@ function boundedSetting(flags: Map<string, string | boolean>, key: string, fallb
   return value;
 }
 
-export function relaySessionCaptureBlocked(_settings: RelaySessionCaptureSettings, _policy: OrganizationPolicy): string | null {
+/**
+ * With content consent active, the unattended timer sends native payloads, so it
+ * captures only the sessions a person listed in `--capture-session-ids-file`
+ * after `dharma evidence preview`. The file is read again on every tick.
+ */
+export function relaySessionCaptureBlocked(settings: RelaySessionCaptureSettings, policy: OrganizationPolicy): string | null {
+  if (!settings.enabled) return null;
+  if (policy.evidence.automaticDisclosure?.mode === 'customer_authorized_content' && !settings.sessionIdsFile) {
+    return 'session_capture_requires_session_allowlist';
+  }
   return null;
 }
 
 /** Relay session capture is opt-in: `--capture-sessions` turns on its timer. */
 export function relaySessionCaptureSettings(flags: Map<string, string | boolean>,
   options: { uploadAvailable?: boolean } = {}): RelaySessionCaptureSettings {
-  const keys = ['capture-interval-minutes', 'capture-lookback-hours', 'capture-idle-minutes'];
+  const keys = ['capture-interval-minutes', 'capture-lookback-hours', 'capture-idle-minutes', 'capture-session-ids-file'];
   if (!flags.has('capture-sessions')) {
     if (keys.some((key) => flags.has(key))) throw new Error('relay_session_capture_setting_invalid');
     return { enabled: false };
   }
   if (flags.get('capture-sessions') !== true) throw new Error('relay_session_capture_setting_invalid');
   assertSessionSegmentUploadAvailable(options.uploadAvailable);
+  const sessionIdsFile = flags.get('capture-session-ids-file');
+  if (sessionIdsFile !== undefined && (typeof sessionIdsFile !== 'string' || !sessionIdsFile)) {
+    throw new Error('relay_session_capture_setting_invalid');
+  }
   return {
     enabled: true,
     intervalMs: boundedSetting(flags, 'capture-interval-minutes', 15, 5, 1_440) * 60_000,
     lookbackHours: boundedSetting(flags, 'capture-lookback-hours', 24, 1, 720),
     idleMinutes: boundedSetting(flags, 'capture-idle-minutes', 30, 5, 1_440),
     providers: ['claude', 'codex'],
+    sessionIdsFile: sessionIdsFile === undefined ? null : resolve(sessionIdsFile),
   };
 }
