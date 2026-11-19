@@ -14,7 +14,7 @@ import {currentBootstrapHostScope} from './bootstrapHostScope.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 import {applyServerEvidencePolicy, pathExistsOrThrow} from './index.js';
 import {withRepositoryRelayStage} from './repositoryRelaySupervisor.js';
-import {relaySessionCaptureSettings} from './sessionSegmentCapture.js';
+import {assertSessionSegmentUploadAvailable, relaySessionCaptureSettings} from './sessionSegmentCapture.js';
 import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmission.js';
 
 // Issue 397. The real sync, apply, lock, signing control and verification bodies
@@ -30,7 +30,9 @@ const COMPILED = ['materializeWorkspacePolicy', 'workspaceAuthorizationStatePath
   'evidenceLedgerForPolicyActivation', 'pathExists', 'acquirePidLock', 'withFileLock', 'writeJsonAtomic',
   'reconcileWorkspaceRegistration', 'relayStart', 'relayWorkspaceLoop'];
 
-type Turn = {issuedAt: string; revision?: string; unreachable?: boolean; signed?: () => void; respond?: Promise<void>};
+// capabilities: the serverCapabilities value HQ returns. Absent: an older HQ without the field.
+type Turn = {issuedAt: string; revision?: string; unreachable?: boolean; signed?: () => void; respond?: Promise<void>;
+  capabilities?: unknown};
 type Hooks = {rename?: (from: string, to: string) => void | Promise<void>; contended?: (lockPath: string) => void;
   probe?: () => Promise<void>; signing?: () => Promise<void>; request?: () => Promise<void>; lock?: (lockPath: string) => Promise<void>};
 type Compiled = Record<string, (...args: any[]) => Promise<any>>;
@@ -107,12 +109,14 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
     });
     await turn.respond;
     return {ok: true, organizationId: ORGANIZATION, organizationPolicyAuthorization: signed,
-      workspace: {id: WORKSPACE, status: 'active', policyRevision: 'signed-test-policy'}};
+      workspace: {id: WORKSPACE, status: 'active', policyRevision: 'signed-test-policy'},
+      ...('capabilities' in turn ? {serverCapabilities: turn.capabilities} : {})};
   }};
   const compiled = await compile({...fs, dirname, resolve, createHash, randomUUID, Buffer, Date, setTimeout, structuredClone,
     process: {platform: process.platform, pid: process.pid, kill: process.kill.bind(process), once() {}, removeListener() {},
       stderr: {write: (line: string) => logged.push(line)}},
     AbortController, performance, withRepositoryRelayStage, admitSignedRequests, relaySessionCaptureSettings,
+    assertSessionSegmentUploadAvailable,
     withClientSigningControl: async (input: Parameters<typeof withDeviceSigningControl>[0], work: () => Promise<unknown>) => {
       await hooks.signing?.();
       return signingWithContention(input, work);
@@ -154,7 +158,8 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
     };
   };
   const sync = (fabric: unknown = server) => compiled.syncWorkspacePolicy!(fabric, item, 'policy-v1', true);
-  return {hooks, policyPath, statePath, signing, sync, denyPolicyWriteAndRestore, authorization,
+  return {hooks, policyPath, statePath, signing, sync, denyPolicyWriteAndRestore, authorization, config, workspace, compiled,
+    server, pendingTurns: () => turns.length,
     openClient: () => compiled.client!(),
     namedTurn: <T>(work: () => Promise<T>) => signingWithContention({config}, work),
     refresh: () => compiled.refreshVerifiedWorkspacePolicyForTransmission!(policyPath, WORKSPACE, server),
@@ -480,4 +485,79 @@ test('a request the server refuses leaves the line open for the requests behind 
   assert.equal((await queued).ok, true);
   assert.equal((await fabric.signedPost('/agent-fabric/later', {})).ok, true);
   assert.deepEqual(served, ['sessions', 'refused', 'queued', 'later']);
+});
+
+// Platform #2066: workspace registration answers serverCapabilities.sessionSegmentUpload.
+// Segments are sent only when the answer of the refresh in this same run is exactly 'available'.
+const after = (seconds: number) => new Date(Date.parse(NEWEST) + seconds * 1_000).toISOString();
+
+test('segment upload follows the answer of each transmission refresh, and only the exact value "available" allows it', async t => {
+  const answers: Array<[string, Turn]> = [
+    ['available', {issuedAt: after(1), capabilities: {sessionSegmentUpload: 'available'}}],
+    ['no field (older HQ)', {issuedAt: after(2)}],
+    ['unavailable', {issuedAt: after(3), capabilities: {sessionSegmentUpload: 'unavailable'}}],
+    ['other case', {issuedAt: after(4), capabilities: {sessionSegmentUpload: 'Available'}}],
+    ['boolean', {issuedAt: after(5), capabilities: {sessionSegmentUpload: true}}],
+    ['bare string', {issuedAt: after(6), capabilities: 'available'}],
+    ['null', {issuedAt: after(7), capabilities: null}],
+    ['available again', {issuedAt: after(8), capabilities: {sessionSegmentUpload: 'available'}}],
+  ];
+  const f = await fixture(t, [{issuedAt: OLDER}, ...answers.map(([, turn]) => turn)]);
+  await f.sync();
+  const seen: Record<string, string> = {};
+  for (const [name, turn] of answers) {
+    seen[name] = await f.compiled.refreshWorkspacePolicyForSessionSegmentUpload!(f.policyPath, WORKSPACE, f.server).then(
+      (policy: {serverAuthorization: {issuedAt: string}}) => policy.serverAuthorization.issuedAt === turn.issuedAt
+        ? 'allowed on this refresh' : `allowed on ${policy.serverAuthorization.issuedAt}`,
+      (error: Error) => error.message.split(':')[0]!);
+  }
+  assert.deepEqual(seen, {
+    'available': 'allowed on this refresh', 'no field (older HQ)': 'session_segment_upload_unavailable',
+    'unavailable': 'session_segment_upload_unavailable', 'other case': 'session_segment_upload_unavailable',
+    'boolean': 'session_segment_upload_unavailable', 'bare string': 'session_segment_upload_unavailable',
+    'null': 'session_segment_upload_unavailable', 'available again': 'allowed on this refresh',
+  });
+  assert.equal(f.pendingTurns(), 0, 'every check asked HQ: nothing is cached between checks');
+  assert.equal((await f.observed()).policy, after(8), 'a refused check still applies the refreshed policy');
+});
+
+test('capture-segments --sync asks HQ on every run and stops before the vault when HQ says no', async t => {
+  let devicePath = '', vaultsOpened = 0;
+  const captured: string[] = [];
+  const f = await fixture(t, [{issuedAt: OLDER},
+    {issuedAt: NEWER, capabilities: {sessionSegmentUpload: 'available'}},
+    {issuedAt: NEWEST, capabilities: {sessionSegmentUpload: 'unavailable'}}], {
+    configPath: () => devicePath,
+    selectDeviceWorkspace: (rows: unknown[]) => rows[0],
+    readSessionAllowlist: async () => null,
+    boundedInteger: (_value: unknown, fallback: number) => fallback,
+    openBootstrapVault: async () => {vaultsOpened += 1; return {close: async () => undefined};},
+    syncPendingRetentionCapsules: async () => 0,
+    captureWorkspaceSessionSegments: async (input: {policy: {serverAuthorization: {issuedAt: string}}}) => {
+      captured.push(input.policy.serverAuthorization.issuedAt);
+      return {ok: true, mode: 'sync'};
+    },
+  }, ['captureSegments']);
+  devicePath = resolve(dirname(f.workspace), 'device.json');
+  await fs.writeFile(devicePath, JSON.stringify({organizationId: ORGANIZATION, deviceId: f.config.deviceId}));
+  await f.sync();
+  const run = () => f.compiled.captureSegments!(new Map<string, string | boolean>([
+    ['sync', true], ['provider', 'claude'], ['workspace', f.workspace], ['policy', f.policyPath]]));
+  assert.deepEqual(await run(), {ok: true, mode: 'sync'});
+  assert.deepEqual(captured, [NEWER], 'segments are captured under the policy of the refresh that allowed them');
+  await assert.rejects(run(), /^Error: session_segment_upload_unavailable: /);
+  assert.deepEqual({captured, vaultsOpened, pendingTurns: f.pendingTurns()}, {captured: [NEWER], vaultsOpened: 1, pendingTurns: 0},
+    'the second run asked HQ again and stopped before opening the vault');
+});
+
+test('each relay capture tick asks HQ after its own policy refresh, before any capture', async () => {
+  const source = (await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
+  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
+  const loop = ast.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === 'relayWorkspaceLoop')!.getText(ast);
+  const tick = loop.slice(loop.indexOf('if (sessionCapture.enabled'), loop.indexOf("withRepositoryRelayStage('task_poll'"));
+  const check = tick.indexOf('policy = await refreshWorkspacePolicyForSessionSegmentUpload(policyPath, canonicalWorkspace.workspaceId, fabric);');
+  assert.ok(check > tick.indexOf('try {'), 'the check runs inside the tick, so a refusal is logged and the relay keeps running');
+  assert.ok(check < tick.indexOf('captureWorkspaceSessionSegments('), 'the check runs before any segment is captured');
+  assert.doesNotMatch(loop, /uploadAvailable|SESSION_SEGMENT_UPLOAD_AVAILABLE/, 'no constant or remembered answer decides upload');
 });

@@ -9,9 +9,11 @@ import { canonicalize, signCanonicalObject, validateContract } from '@dharma-ai-
 import { containsDisallowedLocalPath, type TrajectoryCapsule } from '@dharma-ai-labs/agent-fabric-evidence-reduction';
 import { verifyServerAuthorizedPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import {
+  assertSessionSegmentUploadAvailable,
   captureSessionSegments,
   relaySessionCaptureBlocked,
   relaySessionCaptureSettings,
+  sessionFailureCode,
   type SessionSegmentCaptureInput,
 } from './sessionSegmentCapture.js';
 
@@ -488,54 +490,65 @@ test('a failed upload keeps the committed segment queued and is not committed tw
   assert.equal(new Set(offline.committed.map((capsule) => capsule.trajectoryId)).size, offline.committed.length);
 });
 
-test('the relay capture timer is refused while HQ would count every segment toward its automatic window', () => {
-  assert.throws(() => relaySessionCaptureSettings(new Map([['capture-sessions', true]])), /session_segment_upload_unavailable/);
+test('the relay timer settings do not decide upload: HQ answers on every capture tick', () => {
+  // Starting the timer is not refused. Each tick asks HQ after its policy refresh.
+  assert.deepEqual(relaySessionCaptureSettings(new Map([['capture-sessions', true]])), {
+    enabled: true, intervalMs: 15 * 60_000, lookbackHours: 24, idleMinutes: 30, providers: ['claude', 'codex'], sessionIdsFile: null,
+  });
   assert.deepEqual(relaySessionCaptureSettings(new Map()), { enabled: false });
 });
 
+test('a refused segment upload keeps its code and reports it as a stable failure code', () => {
+  assert.throws(() => assertSessionSegmentUploadAvailable(false), /^Error: session_segment_upload_unavailable: /);
+  assert.doesNotThrow(() => assertSessionSegmentUploadAvailable(true));
+  let refusal: unknown;
+  try { assertSessionSegmentUploadAvailable(false); } catch (error) { refusal = error; }
+  assert.equal(sessionFailureCode(refusal), 'session_segment_upload_unavailable', 'the relay logs the code, not "unexpected"');
+});
+
 test('in content mode the relay timer captures only sessions a person listed after a preview', () => {
-  const available = { uploadAvailable: true };
   const local = policy(60_000);
   const content: OrganizationPolicy = { ...local, evidence: { ...local.evidence,
     automaticDisclosure: { mode: 'customer_authorized_content', consentReceiptId: 'consent_test' } } };
-  const unlisted = relaySessionCaptureSettings(new Map([['capture-sessions', true]]), available);
+  const unlisted = relaySessionCaptureSettings(new Map([['capture-sessions', true]]));
   assert.equal(relaySessionCaptureBlocked(unlisted, content), 'session_capture_requires_session_allowlist');
   assert.equal(relaySessionCaptureBlocked(unlisted, local), null);
   const listed = relaySessionCaptureSettings(new Map<string, string | boolean>([
     ['capture-sessions', true], ['capture-session-ids-file', 'previewed-sessions.json'],
-  ]), available);
+  ]));
   assert.equal(listed.enabled && listed.sessionIdsFile, resolve('previewed-sessions.json'));
   assert.equal(relaySessionCaptureBlocked(listed, content), null);
-  assert.throws(() => relaySessionCaptureSettings(new Map([['capture-session-ids-file', 'previewed-sessions.json']]), available),
+  assert.throws(() => relaySessionCaptureSettings(new Map([['capture-session-ids-file', 'previewed-sessions.json']])),
     /relay_session_capture_setting_invalid/, 'the allowlist without the opt-in flag is refused');
 });
 
-test('the docs say segment upload waits for HQ and the capture timer belongs to a foreground relay start', async () => {
+test('the docs say HQ decides segment upload on each run and the capture timer belongs to a foreground relay start', async () => {
   const read = async (name: string) => (await readFile(new URL(`../../../docs/${name}`, import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
   const contract = await read('22-cli-command-contract.md');
   const guide = await read('onboarding/customer-guide.md');
   for (const [name, text] of [['contract', contract], ['guide', guide]] as const) {
     assert.match(text, /session_segment_upload_unavailable/, name);
+    assert.match(text, /serverCapabilities\.sessionSegmentUpload/, name);
+    assert.doesNotMatch(text, /refused for now|not available yet/, `${name} no longer says upload is off for everyone`);
   }
   assert.match(contract, /only to a foreground `dharma relay start`/);
   assert.match(contract, /--capture-session-ids-file/);
-  assert.doesNotMatch(guide, /relay start [^\n]*--capture-sessions/, 'the guide does not offer a timer that is refused');
+  assert.doesNotMatch(guide, /relay start [^\n]*--capture-sessions/, 'the guide does not offer the foreground-only timer');
 });
 
 test('relay session capture is off unless explicitly enabled and its timer is bounded', () => {
-  const available = { uploadAvailable: true };
-  assert.deepEqual(relaySessionCaptureSettings(new Map(), available), { enabled: false });
-  const enabled = relaySessionCaptureSettings(new Map([['capture-sessions', true]]), available);
+  assert.deepEqual(relaySessionCaptureSettings(new Map()), { enabled: false });
+  const enabled = relaySessionCaptureSettings(new Map([['capture-sessions', true]]));
   assert.deepEqual(enabled, {
     enabled: true, intervalMs: 15 * 60_000, lookbackHours: 24, idleMinutes: 30, providers: ['claude', 'codex'], sessionIdsFile: null,
   });
   assert.deepEqual(relaySessionCaptureSettings(new Map<string, string | boolean>([
     ['capture-sessions', true], ['capture-interval-minutes', '60'], ['capture-lookback-hours', '72'], ['capture-idle-minutes', '45'],
-  ]), available), {
+  ])), {
     enabled: true, intervalMs: 3_600_000, lookbackHours: 72, idleMinutes: 45, providers: ['claude', 'codex'], sessionIdsFile: null,
   });
   for (const [key, value] of [['capture-interval-minutes', '1'], ['capture-lookback-hours', '0'], ['capture-idle-minutes', 'soon']]) {
-    assert.throws(() => relaySessionCaptureSettings(new Map<string, string | boolean>([['capture-sessions', true], [key!, value!]]), available),
+    assert.throws(() => relaySessionCaptureSettings(new Map<string, string | boolean>([['capture-sessions', true], [key!, value!]])),
       /relay_session_capture_setting_invalid/);
   }
   assert.throws(() => relaySessionCaptureSettings(new Map<string, string | boolean>([['capture-interval-minutes', '30']])),

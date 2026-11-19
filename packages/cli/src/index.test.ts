@@ -1189,15 +1189,17 @@ test('batch capture requires an explicit bound before touching the workspace', a
   await assert.rejects(() => run(['evidence', 'capture-batch']), /requires --maximum-sessions or --session-ids-file/);
 });
 
-test('segment upload and the relay capture timer are refused until HQ keeps segments out of its automatic window', async () => {
+test('segment upload and the relay capture timer are not refused before HQ is asked', async () => {
+  // HQ answers in workspace registration (serverCapabilities.sessionSegmentUpload)
+  // on every run, so nothing is refused up front: these stop at their own next step.
   const home = await mkdtemp(join(tmpdir(), 'dharma-cli-segment-gate-'));
   const previous = process.env.DHARMA_HOME;
   process.env.DHARMA_HOME = home;
   try {
     await assert.rejects(() => run(['evidence', 'capture-segments', '--sync', '--provider', 'claude']),
-      /session_segment_upload_unavailable/);
+      /Missing required option --workspace\./);
     await assert.rejects(() => run(['relay', 'start', '--policy', join(home, 'policy.json'), '--capture-sessions']),
-      /session_segment_upload_unavailable/);
+      /Relay requires current enrollment\./);
   } finally {
     if (previous === undefined) delete process.env.DHARMA_HOME;
     else process.env.DHARMA_HOME = previous;
