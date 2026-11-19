@@ -745,14 +745,18 @@ test('Claude task execution exposes only bounded edit tools and registered comma
 async function claudeTaskArgv(allowWrites: boolean, allowedCommandArgv: string[][]): Promise<string[]> {
   const root = await mkdtemp(join(tmpdir(), 'dharma-claude-tools-'));
   let argv: string[] = [];
-  await executeProviderTask({
-    provider: 'claude', workspace: root, instructions: 'Change note.txt to say changed.', timeoutSeconds: 30,
-    allowedCommandArgv, allowWrites,
-    runner: async (input) => {
-      argv = input.argv;
-      return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
-    },
-  });
+  try {
+    await executeProviderTask({
+      provider: 'claude', workspace: root, instructions: 'Change note.txt to say changed.', timeoutSeconds: 30,
+      allowedCommandArgv, allowWrites,
+      runner: async (input) => {
+        argv = input.argv;
+        return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
   return argv;
 }
 
@@ -763,9 +767,11 @@ function singleFlagValue(argv: string[], flag: string): string {
 
 const claudeEditingTools = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit'];
 
-test('Claude read-only tasks get only the Read tool and no auto-approved edits', async () => {
+test('Claude read-only tasks get only read and search tools and no auto-approved edits', async () => {
   const argv = await claudeTaskArgv(false, []);
-  assert.equal(singleFlagValue(argv, '--tools'), 'Read');
+  // Glob and Grep only read and need no approval inside the worktree; keeping
+  // them avoids a search regression for every task.
+  assert.equal(singleFlagValue(argv, '--tools'), 'Read,Glob,Grep');
   assert.equal(singleFlagValue(argv, '--allowedTools'), 'Read');
   assert.equal(singleFlagValue(argv, '--disallowedTools'), 'WebFetch,WebSearch');
   for (const tool of singleFlagValue(argv, '--tools').split(',')) {
@@ -777,9 +783,9 @@ test('Claude read-only tasks get only the Read tool and no auto-approved edits',
   assert.equal(argv.includes('acceptEdits'), false);
 });
 
-test('Claude write tasks get Read, Edit and Write and keep acceptEdits', async () => {
+test('Claude write tasks get read and search tools plus Edit and Write and keep acceptEdits', async () => {
   const argv = await claudeTaskArgv(true, []);
-  assert.equal(singleFlagValue(argv, '--tools'), 'Read,Edit,Write');
+  assert.equal(singleFlagValue(argv, '--tools'), 'Read,Glob,Grep,Edit,Write');
   assert.equal(singleFlagValue(argv, '--allowedTools'), 'Read,Edit,Write');
   assert.equal(singleFlagValue(argv, '--disallowedTools'), 'WebFetch,WebSearch');
   assert.equal(singleFlagValue(argv, '--permission-mode'), 'acceptEdits');
@@ -787,14 +793,14 @@ test('Claude write tasks get Read, Edit and Write and keep acceptEdits', async (
 
 test('Claude registered commands add Bash to the tool list only when commands exist', async () => {
   const readOnly = await claudeTaskArgv(false, [['npm', 'test']]);
-  assert.equal(singleFlagValue(readOnly, '--tools'), 'Read,Bash');
+  assert.equal(singleFlagValue(readOnly, '--tools'), 'Read,Glob,Grep,Bash');
   assert.equal(singleFlagValue(readOnly, '--allowedTools'), 'Read,Bash(npm test)');
   assert.equal(singleFlagValue(readOnly, '--permission-mode'), 'dontAsk');
   for (const tool of singleFlagValue(readOnly, '--tools').split(',')) {
     assert.equal(claudeEditingTools.includes(tool), false, `${tool} must not be available to a read-only task`);
   }
   const write = await claudeTaskArgv(true, [['npm', 'test'], ['npm', 'run', 'lint']]);
-  assert.equal(singleFlagValue(write, '--tools'), 'Read,Edit,Write,Bash');
+  assert.equal(singleFlagValue(write, '--tools'), 'Read,Glob,Grep,Edit,Write,Bash');
   assert.equal(singleFlagValue(write, '--allowedTools'), 'Read,Edit,Write,Bash(npm test),Bash(npm run lint)');
   assert.equal(singleFlagValue(write, '--permission-mode'), 'acceptEdits');
   for (const argv of [await claudeTaskArgv(false, []), await claudeTaskArgv(true, [])]) {
@@ -839,7 +845,7 @@ test('Claude read-only task reaches the CLI with the restricted tool list throug
   }
   assert.equal(result.exitCode, 0, result.stderr);
   const recorded = (JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)!) as { argv: string[] }).argv;
-  assert.equal(singleFlagValue(recorded, '--tools'), 'Read');
+  assert.equal(singleFlagValue(recorded, '--tools'), 'Read,Glob,Grep');
   assert.equal(singleFlagValue(recorded, '--allowedTools'), 'Read');
   assert.equal(singleFlagValue(recorded, '--permission-mode'), 'dontAsk');
   assert.equal(recorded.some(argument => /\b(?:Edit|Write|NotebookEdit)\b/.test(argument)), false);
