@@ -642,6 +642,26 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
   workspaceId: string,
   fabric: AgentFabricClient,
 ) {
+  return (await refreshVerifiedWorkspacePolicyWithServerCapabilities(policyPath, workspaceId, fabric)).policy;
+}
+
+// Segment upload is HQ's answer in the registration of this same refresh. It is
+// never remembered: a rollback of the server change turns it back to unavailable.
+async function refreshWorkspacePolicyForSessionSegmentUpload(
+  policyPath: string,
+  workspaceId: string,
+  fabric: AgentFabricClient,
+) {
+  const { policy, serverCapabilities } = await refreshVerifiedWorkspacePolicyWithServerCapabilities(policyPath, workspaceId, fabric);
+  assertSessionSegmentUploadAvailable(serverCapabilities?.sessionSegmentUpload === 'available');
+  return policy;
+}
+
+async function refreshVerifiedWorkspacePolicyWithServerCapabilities(
+  policyPath: string,
+  workspaceId: string,
+  fabric: AgentFabricClient,
+) {
   const providers = await providerCapabilitiesForWorkspacePolicy(null);
   return withWorkspacePolicySyncOrder(fabric, workspaceId, async () => {
     const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
@@ -658,8 +678,11 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
     if (current.organizationId !== item.organizationId) {
       throw new Error('Workspace policy organization does not match registration.');
     }
-    await syncWorkspacePolicyHoldingRefreshLock(fabric, item, current.revision, true, providers);
-    return loadVerifiedWorkspacePolicy(policyPath, workspaceId);
+    const response: Record<string, unknown> = await syncWorkspacePolicyHoldingRefreshLock(
+      fabric, item, current.revision, true, providers);
+    const serverCapabilities = response.serverCapabilities && typeof response.serverCapabilities === 'object'
+      ? response.serverCapabilities as { sessionSegmentUpload?: unknown } : null;
+    return { policy: await loadVerifiedWorkspacePolicy(policyPath, workspaceId), serverCapabilities };
   });
 }
 
@@ -4860,7 +4883,6 @@ async function captureWorkspaceSessionSegments(input: {
 }
 
 async function captureSegments(flags: Map<string, string | boolean>): Promise<Output> {
-  if (flags.has('sync')) assertSessionSegmentUploadAvailable();
   const provider = required(flags, 'provider');
   if (provider !== 'claude' && provider !== 'codex') throw new Error('Segmented capture supports the claude and codex providers.');
   const workspacePath = await realpath(required(flags, 'workspace'));
@@ -4879,7 +4901,8 @@ async function captureSegments(flags: Map<string, string | boolean>): Promise<Ou
   if (fabric && (fabric.config.organizationId !== device.organizationId || fabric.config.deviceId !== device.deviceId)) {
     throw new Error('The enrolled device changed during evidence capture. Retry from the current device home.');
   }
-  if (fabric) policy = await refreshVerifiedWorkspacePolicyForTransmission(policyPath, registered.workspaceId, fabric);
+  // HQ answers on every --sync run; a refusal stops before the vault or any upload.
+  if (fabric) policy = await refreshWorkspacePolicyForSessionSegmentUpload(policyPath, registered.workspaceId, fabric);
   const vault = fabric ? await openBootstrapVault({ root: resolve(dharmaHome(), 'vault'), rawLocalDays: rawLocalRetentionDays(policy) }) : null;
   try {
     if (vault && fabric) await syncPendingRetentionCapsules(vault, fabric, policy, registered.workspaceId);
@@ -9721,6 +9744,8 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
         && !stopping && Date.now() >= nextSessionCaptureAt) {
         nextSessionCaptureAt = Date.now() + sessionCapture.intervalMs;
         try {
+          // HQ answers in this tick's own refresh; a refusal is logged and the relay keeps running.
+          policy = await refreshWorkspacePolicyForSessionSegmentUpload(policyPath, canonicalWorkspace.workspaceId, fabric);
           const blocked = relaySessionCaptureBlocked(sessionCapture, policy);
           if (blocked) throw new Error(blocked);
           // Re-read on every tick, so sessions listed after a preview are picked up.

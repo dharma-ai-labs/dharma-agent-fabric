@@ -248,7 +248,7 @@ dharma evidence capture-segments \
   --lookback-hours 24
 ```
 
-Sending segments is not available yet. `--sync` stops with `session_segment_upload_unavailable` until HQ can take segments without counting each one toward its automatic analysis window. Until then, use the plan to see how your sessions would be split.
+To send segments, add `--sync`. Each run first asks HQ, through workspace registration, whether it counts a segmented session once toward its automatic analysis window. The run continues only when HQ answers `serverCapabilities.sessionSegmentUpload` with `available`. Otherwise it stops with `session_segment_upload_unavailable` before anything is written or sent, and the plan still shows how your sessions would be split.
 
 - A segment holds complete turns and fits under `maximumCapsuleBytes`. When one turn alone does not fit, it is split where no tool call is waiting for its result. A segment is marked `partial` only when one of its records was left out: it is outside the workspace, larger than `--maximum-record-bytes` (16 MiB by default), or not valid JSON.
 - Each segment has its own trajectory. Its `sessionId` is the session's pseudonym followed by `:segment:` and a six-digit index, so all segments of one session share the same prefix. Segment time ranges are in order and do not overlap.

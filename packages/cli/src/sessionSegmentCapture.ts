@@ -427,6 +427,7 @@ export async function captureSessionSegments(input: SessionSegmentCaptureInput):
 export function sessionFailureCode(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
   if (message === 'session_segment_ledger_invalid' || message.startsWith('session_capture_requires_')) return message;
+  if (message.startsWith('session_segment_upload_unavailable:')) return 'session_segment_upload_unavailable';
   if (message.includes('revision hash conflict')) return 'vault_revision_conflict';
   if (message.startsWith('Trajectory capsule failed schema validation')) return 'capsule_schema_invalid';
   const code = (error as NodeJS.ErrnoException | null)?.code;
@@ -435,16 +436,15 @@ export function sessionFailureCode(error: unknown): string {
 
 /**
  * HQ opens an automatic organization-wide analysis window (with paid semantic
- * review) once 100 observed trajectories wait, and each segment is one
- * trajectory. Until HQ keeps segments out of that count, segments are only
- * planned locally: `capture-segments --sync` and the relay timer are refused.
+ * review) once enough observed trajectories wait. An HQ that counts a segmented
+ * session once answers `serverCapabilities.sessionSegmentUpload: 'available'` in
+ * workspace registration. `available` is that answer from the refresh in the
+ * same run; anything else refuses `capture-segments --sync` and the relay tick.
  */
-export const SESSION_SEGMENT_UPLOAD_AVAILABLE: boolean = false;
-
-export function assertSessionSegmentUploadAvailable(available = SESSION_SEGMENT_UPLOAD_AVAILABLE) {
+export function assertSessionSegmentUploadAvailable(available: boolean) {
   if (!available) {
-    throw new Error('session_segment_upload_unavailable: HQ does not yet keep session segments out of its automatic '
-      + 'analysis window. Run capture-segments without --sync to plan segments locally.');
+    throw new Error('session_segment_upload_unavailable: HQ does not report that it counts a segmented session once '
+      + 'for its automatic analysis window. Run capture-segments without --sync to plan segments locally.');
   }
 }
 
@@ -477,16 +477,17 @@ export function relaySessionCaptureBlocked(settings: RelaySessionCaptureSettings
   return null;
 }
 
-/** Relay session capture is opt-in: `--capture-sessions` turns on its timer. */
-export function relaySessionCaptureSettings(flags: Map<string, string | boolean>,
-  options: { uploadAvailable?: boolean } = {}): RelaySessionCaptureSettings {
+/**
+ * Relay session capture is opt-in: `--capture-sessions` turns on its timer.
+ * Whether segments may be sent is HQ's answer, checked on every tick.
+ */
+export function relaySessionCaptureSettings(flags: Map<string, string | boolean>): RelaySessionCaptureSettings {
   const keys = ['capture-interval-minutes', 'capture-lookback-hours', 'capture-idle-minutes', 'capture-session-ids-file'];
   if (!flags.has('capture-sessions')) {
     if (keys.some((key) => flags.has(key))) throw new Error('relay_session_capture_setting_invalid');
     return { enabled: false };
   }
   if (flags.get('capture-sessions') !== true) throw new Error('relay_session_capture_setting_invalid');
-  assertSessionSegmentUploadAvailable(options.uploadAvailable);
   const sessionIdsFile = flags.get('capture-session-ids-file');
   if (sessionIdsFile !== undefined && (typeof sessionIdsFile !== 'string' || !sessionIdsFile)) {
     throw new Error('relay_session_capture_setting_invalid');
