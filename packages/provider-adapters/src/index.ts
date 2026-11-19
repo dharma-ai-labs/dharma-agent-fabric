@@ -345,11 +345,13 @@ export async function executeProviderTask(input: {
     const bashTools = input.allowedCommandArgv.map((parts) => `Bash(${parts.join(' ')})`);
     const allowedTools = input.allowWrites ? ['Read', 'Edit', 'Write', ...bashTools] : ['Read', ...bashTools];
     // --allowedTools only pre-approves tools; --tools removes every other built-in
-    // tool, so Edit and Write do not exist for a read-only task. acceptEdits also
+    // tool, so Edit and Write do not exist for a read-only task. Glob and Grep
+    // only read and need no approval inside the worktree. acceptEdits also
     // auto-approves edits and filesystem shell commands such as touch, so a
     // read-only task uses dontAsk: only the pre-approved tools above can run.
     const availableTools = [
-      ...(input.allowWrites ? ['Read', 'Edit', 'Write'] : ['Read']),
+      'Read', 'Glob', 'Grep',
+      ...(input.allowWrites ? ['Edit', 'Write'] : []),
       ...(bashTools.length > 0 ? ['Bash'] : []),
     ];
     argv = [
