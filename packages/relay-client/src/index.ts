@@ -84,6 +84,10 @@ interface OutboxEntry {
   /** The definite answer that client got, so the owner returns it to a retry of the same call instead of signing the
    * call again. The owner's next write of its entry clears it. */
   adoptedOutcome?: AdoptedOutcome;
+  /** Completions the server accepted whose receipts found no room in the recovered completion list when the owner
+   * wrote them. Any client moves them to the list once it has room. Until then the entry stays like one with a kept
+   * request, so a later write, a restart or another process never loses them. */
+  keptCompletions?: RecoveredTaskCompletion[];
 }
 
 interface AdoptedOutcome {
@@ -185,7 +189,9 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
     && (entry.pending === null || isPendingRequest(entry.pending))
     && Number.isSafeInteger(entry.ownerPid) && Number(entry.ownerPid) >= 0
     && isInstant(entry.updatedAt) && (entry.adoptedAt === undefined || isInstant(entry.adoptedAt))
-    && (entry.adoptedOutcome === undefined || (entry.adoptedAt !== undefined && isAdoptedOutcome(entry.adoptedOutcome)));
+    && (entry.adoptedOutcome === undefined || (entry.adoptedAt !== undefined && isAdoptedOutcome(entry.adoptedOutcome)))
+    && (entry.keptCompletions === undefined || (Array.isArray(entry.keptCompletions)
+      && entry.keptCompletions.length <= RECOVERED_TASK_COMPLETIONS_MAX && entry.keptCompletions.every(isRecoveredTaskCompletion)));
 }
 
 function assertProtocolState(value: unknown): asserts value is ProtocolState {
@@ -1350,6 +1356,10 @@ export class AgentFabricClient {
   /** Completions this client recorded that no state write has stored yet, such as when the write after the server's
    * answer failed. A reload of the file keeps them until a write succeeds. */
   #unwrittenCompletions = new Map<string, RecoveredTaskCompletion>();
+  /** The completions in this client's own entry that wait for room in the queue, as of the last read or write. */
+  #keptCompletions: RecoveredTaskCompletion[] = [];
+  /** Whether this client's kept request is in its own entry in the file, as of the last read or write. */
+  #keptOnDisk: boolean;
   /** Opened with an owner key, as a workspace loop is: it also sends due orphans after its own requests. */
   readonly #longLived: boolean;
   #serial: Promise<unknown> = Promise.resolve();
@@ -1357,7 +1367,7 @@ export class AgentFabricClient {
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
     state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean; isolatedSession?: boolean;
-    ownerKey: string; longLived: boolean; otherOutboxes: Record<string, OutboxEntry>;
+    ownerKey: string; longLived: boolean; otherOutboxes: Record<string, OutboxEntry>; keptOnDisk: boolean;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -1374,6 +1384,7 @@ export class AgentFabricClient {
     this.#ownerKey = input.ownerKey;
     this.#longLived = input.longLived;
     this.#otherOutboxes = input.otherOutboxes;
+    this.#keptOnDisk = input.keptOnDisk;
   }
 
   #binding() {
@@ -1432,12 +1443,14 @@ export class AgentFabricClient {
       recoveredTaskCompletions: [],
     };
     let otherOutboxes: Record<string, OutboxEntry> = {};
+    let keptOnDisk = false;
     if (!readOnly && !isolatedSession) try {
       const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
       const parsed = JSON.parse(bytes) as unknown;
       assertProtocolState(parsed);
       const {[ownerKey]: own, ...others} = outboxesOf(parsed);
       otherOutboxes = others;
+      keptOnDisk = !!own?.pending;
       state = {
         schema: 'dharma.protocol-state/v1', sessionId: own?.sessionId ?? null, nextSequence: own?.nextSequence ?? 1,
         pending: own?.pending ?? null, recoveredTaskCompletions: parsed.recoveredTaskCompletions ?? [],
@@ -1453,7 +1466,7 @@ export class AgentFabricClient {
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
       statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession, ownerKey,
-      longLived: input.ownerKey !== undefined, otherOutboxes,
+      longLived: input.ownerKey !== undefined, otherOutboxes, keptOnDisk,
     });
   }
 
@@ -1656,9 +1669,10 @@ export class AgentFabricClient {
   }
 
   /** The file wins for every other client's entry and for the recovered completion queue, except for a completion this
-   * client recorded and no write has stored yet, which it keeps. Such a completion joins the queue only while the queue
-   * stays within what a reader accepts; otherwise it waits in memory for room. This client's own entry is written only
-   * by this client, so it is never reloaded. */
+   * client recorded and no write has stored yet, which it keeps. A completion waiting in any entry, or one this client
+   * has not written yet, joins the queue only while the queue stays within what a reader accepts; otherwise it waits
+   * for room, in its entry or, until the next write puts it in this client's entry, in memory. This client's own
+   * session, sequence and kept request are written only by this client, so they are never reloaded. */
   async #reloadSharedState(): Promise<void> {
     let disk: ProtocolState | null = null;
     try {
@@ -1677,13 +1691,30 @@ export class AgentFabricClient {
     const own = others[this.#ownerKey];
     delete others[this.#ownerKey];
     this.#otherOutboxes = others;
-    const stored = disk?.recoveredTaskCompletions ?? [];
-    const merged = [...stored];
-    for (const item of this.#unwrittenCompletions.values()) {
-      if (merged.length >= RECOVERED_TASK_COMPLETIONS_MAX) break;
-      if (!stored.some(other => other.taskId === item.taskId)) merged.push(item);
+    const merged = [...disk?.recoveredTaskCompletions ?? []];
+    /** Whether the completion is in the queue, adding it while there is room. */
+    const listed = (item: RecoveredTaskCompletion) => {
+      if (merged.some(other => other.taskId === item.taskId)) return true;
+      if (merged.length >= RECOVERED_TASK_COMPLETIONS_MAX) return false;
+      merged.push(item);
+      return true;
+    };
+    this.#keptCompletions = (own?.keptCompletions ?? []).filter(item => !listed(item));
+    for (const item of this.#unwrittenCompletions.values()) listed(item);
+    for (const entry of Object.values(others)) {
+      const waiting = entry.keptCompletions?.filter(item => !listed(item));
+      if (waiting?.length) entry.keptCompletions = waiting; else delete entry.keptCompletions;
     }
     this.#state.recoveredTaskCompletions = merged;
+    // This client's kept request left the file, although no write drops one: another client sent it and got a definite
+    // answer, and the entry was removed before this client read it again (by the idle cap, or the file was replaced).
+    // The sequences that client signed in this session are then unknown, so this session signs nothing more: the
+    // request is settled, and the next call needs a new session.
+    if (this.#state.pending && this.#keptOnDisk && !own) {
+      this.#state.pending = null;
+      this.#state.sessionId = null;
+      this.#adoptedOutcome = null;
+    }
     // Another client sent this client's kept request after it stood unchanged (see orphanDue). The file then holds
     // its outcome: no kept request once it was answered, with the answer, or the request as last sent. When the
     // answer is not there (never kept, or removed after ORPHAN_RETRY_INTERVAL_MS), this client keeps its signed
@@ -1836,14 +1867,8 @@ export class AgentFabricClient {
     await this.#assertHostScope();
     const pending = slot.pending;
     if (!pending) throw new Error('No pending protocol request.');
-    try {
-      this.#assertRecoveredTaskCompletionCapacity(pending);
-    } catch (error) {
-      slot.nextSequence += 1;
-      slot.pending = null;
-      await this.#persist();
-      throw error;
-    }
+    // A kept completion is sent again even when the queue is full: the server may already have accepted it, and its
+    // receipt then waits in this client's entry for room (see #recordRecoveredTaskCompletion).
     if (/\/agent-fabric\/decisions\/[^/]+\/enforcements$/.test(pending.pathname)) {
       let acknowledgement: ActionDecisionAcknowledgement;
       try {
@@ -1997,16 +2022,17 @@ export class AgentFabricClient {
       throw new Error('Task completion acknowledgement is missing a valid durable receipt.');
     }
     const current = this.#state.recoveredTaskCompletions || [];
-    const existing = current.find((item) => item.taskId === taskId);
+    const existing = [...current, ...this.#keptCompletions, ...this.#unwrittenCompletions.values()]
+      .find((item) => item.taskId === taskId);
     if (existing) {
       if (existing.receiptHash !== receiptHash || existing.trajectoryCapsuleHash !== trajectoryCapsuleHash) {
         throw new Error('Recovered task completion conflicts with its durable receipt.');
       }
       return;
     }
-    if (current.length >= RECOVERED_TASK_COMPLETIONS_MAX) throw new Error('Recovered task completion queue is full.');
     const completion = { taskId, trajectoryCapsuleHash, receiptHash, recoveredAt: new Date().toISOString() };
-    this.#state.recoveredTaskCompletions = [...current, completion];
+    // An accepted completion is never dropped: without room in the queue it waits in this client's entry (see #persist).
+    if (current.length < RECOVERED_TASK_COMPLETIONS_MAX) this.#state.recoveredTaskCompletions = [...current, completion];
     this.#unwrittenCompletions.set(taskId, completion);
   }
 
@@ -2108,7 +2134,7 @@ export class AgentFabricClient {
         const {adoptedOutcome: _answer, ...rest} = entry;
         entry = rest;
       }
-      if (entry.pending) outboxes[owner] = entry;
+      if (entry.pending || entry.keptCompletions) outboxes[owner] = entry;
       else if (ownerProcessAlive(entry.ownerPid) || recentlyAdopted(entry, now)) idle.push([owner, entry]);
     }
     // A file never holds more entries than a reader accepts. Only a new kept request an earlier version left at the
@@ -2120,10 +2146,16 @@ export class AgentFabricClient {
       delete outboxes[migrated];
     }
     const {sessionId, nextSequence, pending} = this.#state;
+    // A completion this client recorded that the queue has no room for waits in its own entry, which is then kept.
+    const listed = this.#state.recoveredTaskCompletions ?? [];
+    const waiting = [...this.#keptCompletions, ...[...this.#unwrittenCompletions.values()].filter(item =>
+      !listed.some(other => other.taskId === item.taskId) && !this.#keptCompletions.some(other => other.taskId === item.taskId))];
     const own = durableOutboxEntry({sessionId, nextSequence, pending, ownerPid: process.pid,
-      updatedAt: new Date().toISOString()});
+      updatedAt: new Date().toISOString(), ...(waiting.length ? {keptCompletions: waiting} : {})});
     let room = OUTBOX_ENTRIES_MAX - Object.keys(outboxes).length;
-    if (own.pending && room < 1 && !isSessionOpen(own.pending)) throw new Error('relay_protocol_state_outbox_full');
+    if (room < 1 && (waiting.length || (own.pending && !isSessionOpen(own.pending)))) {
+      throw new Error('relay_protocol_state_outbox_full');
+    }
     if (room > 0) { outboxes[this.#ownerKey] = own; room -= 1; }
     idle.sort(([, a], [, b]) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     for (const [owner, entry] of idle.slice(0, Math.min(IDLE_OUTBOX_ENTRIES_MAX, room))) outboxes[owner] = entry;
@@ -2138,8 +2170,10 @@ export class AgentFabricClient {
       schema: 'dharma.protocol-state/v1', sessionId: copy?.sessionId ?? null, nextSequence: copy?.nextSequence ?? 1,
       pending: copy?.pending ?? null, recoveredTaskCompletions: this.#state.recoveredTaskCompletions ?? [], outboxes,
     } satisfies ProtocolState, this.#hostFence);
-    // A kept completion that found no room in the queue stays for a later write.
-    for (const item of this.#state.recoveredTaskCompletions ?? []) this.#unwrittenCompletions.delete(item.taskId);
+    // Every completion this client recorded is now in the queue or in its own entry.
+    this.#unwrittenCompletions.clear();
+    this.#keptCompletions = waiting;
+    this.#keptOnDisk = !!outboxes[this.#ownerKey]?.pending;
   }
 }
 

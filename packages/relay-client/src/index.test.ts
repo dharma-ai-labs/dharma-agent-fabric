@@ -3474,7 +3474,7 @@ test('a task completion the server accepted survives a failed state write and re
 });
 
 // Convergence review round 1 (third loop): a kept completion never pushes the stored list past what a reader accepts.
-test('a completion kept after a failed state write waits in memory while other clients have filled the stored list (shared protocol state)', async () => {
+test('a completion kept after a failed state write waits for room while other clients have filled the stored list (shared protocol state)', async () => {
   const hex = (seed: string) => `sha256:${createHash('sha256').update(seed).digest('hex')}`;
   const taskA = randomUUID(), receiptA = hex('receipt-a');
   let blockTask = '', saved = '';

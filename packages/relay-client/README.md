@@ -114,10 +114,13 @@ An earlier version reads only one kept request, at the top level of the file.
 Every write of this version copies the oldest kept request there, exactly as
 signed (a session open, poll or read is never copied); this version never sends
 that copy on its own. After a rollback to an earlier version, the first
-session open of that version sends the copied request again, with the same
-message id, and then writes a file without the per-client entries. Every other
-kept request is then discarded, and whether the server received it stays
-unknown.
+session open of that version sends the copied request again and then writes a
+file without the per-client entries. It sends it with the same message id,
+except an action acknowledgement older than 8 minutes, which v0.2.225 and
+earlier sign again with a new message id and the same idempotency key. Every
+other kept request is then discarded, and whether the server received it stays
+unknown. The completion receipts that wait in an entry (see below) are
+discarded too.
 
 Each client keeps its own outbox entry in the protocol-state file: its
 session, its next sequence and at most one kept request. A relay workspace
@@ -170,7 +173,19 @@ request as the earlier version re-signed it (same session, path and
 idempotency key), which then replaces the entry's request. Entries without a kept request are removed once
 their owner process has exited, except that an entry whose request another
 client answered stays for 10 minutes, so an owner that read the entry before
-still finds the answer.
+still finds the answer. At most 32 entries without a kept request stay, the
+newest first, in the room the kept requests leave. When the entry of an owner
+that still runs is removed after another client answered its request, the
+owner no longer knows which sequences that client signed in its session. It
+then treats the request as settled and signs nothing more in that session: its
+next call fails with `Relay session is not open.` until it opens a new session.
+
+The file holds at most 1,000 recovered task completions. A new completion is
+refused while that list is full, but a kept completion is still sent again,
+since the server may already have accepted it. A completion the server accepted
+is never dropped: when the list has no room for it, its receipt waits in its
+client's entry, which stays like an entry with a kept request, and the next
+write by any client that finds room moves it to the list.
 
 The file holds at most 256 kept requests. A client without a kept request
 still opens its session in a full file; that session open is not kept in the
