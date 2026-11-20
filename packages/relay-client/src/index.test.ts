@@ -1963,6 +1963,50 @@ test('retrying a request that hit the connect limit sends the original signed re
   assert.equal(await storedPending(f.statePath), null);
 });
 
+test('a kept request already sent before a connect timeout is sent again unchanged on retry', async (t) => {
+  const limit = relayConnectTimeoutMs();
+  const f = await relayConnectFixture('fabric-relay-connect-resend-');
+  const relay = scriptedRelay({
+    onCreate: (socket, index) => { if (index === 1) t.mock.timers.tick(limit); else socket.open(); },
+    onSend: socket => {
+      if (socket === relay.sockets[0]) t.mock.timers.tick(RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS);
+      else socket.answer(201, { ok: true });
+    },
+  });
+  await withRelaySocket(relay.Socket, async () => {
+    const client = await AgentFabricClient.open({ configPath: f.configPath, statePath: f.statePath, store: f.store });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await assert.rejects(client.openSession(), (error: Error & { code?: unknown }) => error.code === 'relay_response_timeout');
+    } finally { t.mock.timers.reset(); }
+    const pending = (await storedPending(f.statePath))!;
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await assert.rejects(client.signedPost('/agent-fabric/sessions', JSON.parse(pending.body)), isConnectTimeout);
+    } finally { t.mock.timers.reset(); }
+    assert.deepEqual(await client.signedPost('/agent-fabric/sessions', JSON.parse(pending.body)), { ok: true });
+    const sends = relay.sockets.flatMap(socket => socket.sent)
+      .map(serialized => JSON.parse(serialized) as { headers: Record<string, string> });
+    assert.equal(relay.sockets[1]!.sent.length, 0, 'the connect-timeout attempt sent nothing');
+    assert.equal(sends.length, 2, 'the retry is the second send of a request first sent before the response timeout');
+    for (const header of ['x-dharma-message-id', 'x-dharma-nonce', 'x-dharma-signature']) {
+      assert.equal(sends[1]!.headers[header], sends[0]!.headers[header], header);
+    }
+  });
+  assert.equal(await storedPending(f.statePath), null);
+});
+
+test('the README describes only the signing-control guarantees the client provides (#512 review)', async () => {
+  const readme = (await readFile(new URL('../README.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  const start = readme.indexOf('## How long one signed relay request holds device signing control');
+  assert.ok(start >= 0, 'the #512 README section exists');
+  const end = readme.indexOf(' ## ', start + 1);
+  const section = readme.slice(start, end === -1 ? undefined : end);
+  assert.doesNotMatch(section, /never in flight twice/, 'a kept request can be sent again after relay_response_timeout');
+  assert.doesNotMatch(section, /first send/, 'a kept request may already have been sent by an earlier attempt');
+  assert.match(section, /may be sent again/, 'the README says a kept signed request may be sent again');
+});
+
 test('missing-anchor restoration preserves current, legacy, corrupt, cached and unavailable protected state', async () => {
   const config = {schema: 'dharma.device-config/v1' as const, hqUrl: 'https://hq.example', organizationId: 'org_fixture',
     deviceId: '22222222-2222-4222-8222-222222222222', deviceName: 'Synthetic', platform: 'linux' as const,
