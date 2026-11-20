@@ -48,7 +48,9 @@ import { superviseRelay } from './relaySupervisor.js';
 import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureReceipt } from './relayChildFailure.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
-  repositoryRelayFailureReceipt, repositoryRelayTimestampMs, retrySigningControlBusy, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+  repositoryRelayFailureReceipt, repositoryRelayTimestampMs, retrySigningControlBusy, withRepositoryRelayStage,
+  appendRepositoryRelayFailureHistory, currentRepositoryRelayFailureHistory, recentRepositoryRelayFailure,
+  type RepositoryRelayFailureHistory, type RepositoryRelayObservation } from './repositoryRelaySupervisor.js';
 import { relayOpenFailureRemedyForHost } from './relayOpenFailure.js';
 import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, startupPreflightFailure, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
@@ -9219,6 +9221,38 @@ async function currentSessionOpenFailure() {
     at: failure.at, stage: failure.stage, category: failure.category, ...(remedy ? { remedy } : {}) };
 }
 
+// Each failed loop of the running relay, per workspace, from the bounded failure-history.json (#514).
+async function currentRepositoryRelayFailureHistories() {
+  const read = (path: string) => readFile(path, 'utf8').then(value => JSON.parse(value) as unknown).catch(() => null);
+  const relay = resolve(dharmaHome(), 'relay');
+  const config = await read(configPath()) as Record<string, unknown> | null;
+  const pid = await readFile(resolve(relay, 'relay.pid'), 'utf8').then(value => Number(value.trim())).catch(() => 0);
+  const pidState = await stat(resolve(relay, 'relay.pid')).catch(() => null);
+  const histories = new Map<string, RepositoryRelayFailureHistory>();
+  for (const workspaceId of await readdir(resolve(relay, 'repositories')).catch(() => [] as string[])) {
+    if (!UUID_PATTERN.test(workspaceId)) continue;
+    const history = currentRepositoryRelayFailureHistory({
+      record: await read(resolve(relay, 'repositories', workspaceId, 'failure-history.json')),
+      organizationId: String(config?.organizationId), deviceId: String(config?.deviceId), workspaceId, pid,
+      relayPidMtimeMs: pidState?.mtimeMs ?? null, relayPidCtimeMs: pidState?.ctimeMs ?? null });
+    if (history) histories.set(workspaceId, history);
+  }
+  return histories;
+}
+
+// One failed loop leaves the latest-failure receipt and adds the failure to the bounded workspace history.
+async function recordRepositoryRelayFailure(event: RepositoryRelayObservation, binding: { organizationId: string;
+  deviceId: string; pid: number; relayPidMtimeMs: number; relayPidCtimeMs: number }) {
+  const workspaceId = event.workspaceId!;
+  const repository = resolve(dharmaHome(), 'relay', 'repositories', workspaceId);
+  // The receipt keeps the time of the stage line it records.
+  await writeJsonAtomic(resolve(repository, 'last-failure.json'), repositoryRelayFailureReceipt(event, binding, event.at));
+  const previous = await readFile(resolve(repository, 'failure-history.json'), 'utf8')
+    .then(value => JSON.parse(value) as unknown).catch(() => null);
+  const history = appendRepositoryRelayFailureHistory(previous, event, { ...binding, workspaceId });
+  if (history) await writeJsonAtomic(resolve(repository, 'failure-history.json'), history);
+}
+
 async function relayStart(flags: Map<string, string | boolean>,
   startup: { workspaceId: string | null; leased: boolean } = { workspaceId: null, leased: false }): Promise<Output> {
   const anchor = resolve(required(flags, 'policy'));
@@ -9264,16 +9298,13 @@ async function relayStart(flags: Map<string, string | boolean>,
       if (event.code === 'repository_relay_failed' && event.workspaceId && UUID_PATTERN.test(event.workspaceId)) {
         const pidState = await relayPidState;
         if (!pidState) return;
-        // The receipt keeps the time of the stage line it records.
-        const failure = repositoryRelayFailureReceipt(event, { organizationId: config.organizationId,
-          deviceId: config.deviceId, pid: process.pid, ...pidState }, event.at);
         let writer = diagnosticWriters.get(event.workspaceId);
         if (!writer) {
           writer = serializeRelayWork();
           diagnosticWriters.set(event.workspaceId, writer);
         }
-        await writer(() => writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', event.workspaceId!,
-          'last-failure.json'), failure));
+        await writer(() => recordRepositoryRelayFailure(event, { organizationId: config.organizationId,
+          deviceId: config.deviceId, pid: process.pid, ...pidState }));
       }
     } });
     return { ok: true, stopped: true };
@@ -10067,6 +10098,13 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
     const lastFailure = sessionOpenFailure ?? (relay !== 'running' && supervisor === 'running'
       ? currentRelayChildFailure(await readFile(relayChildFailurePath(), 'utf8')
         .then(value => JSON.parse(value) as unknown).catch(() => null), supervisorPid) : null);
+    // #514: a later success hides lastFailure, so name each workspace that failed in the last 24 hours.
+    const failureHistories = relay === 'running' ? await currentRepositoryRelayFailureHistories()
+      : new Map<string, RepositoryRelayFailureHistory>();
+    const recentRelayFailures = [...failureHistories].flatMap(([workspaceId, history]) => {
+      const recent = recentRepositoryRelayFailure(history);
+      return recent ? [{ workspaceId, ...recent }] : [];
+    }).sort((a, b) => Date.parse(b.latest.at) - Date.parse(a.latest.at) || a.workspaceId.localeCompare(b.workspaceId));
     const reconnect = {
       state: relay !== 'running' ? (supervisor === 'running' ? (lastFailure ? 'failing' : 'restarting') : 'stopped')
         : sessionOpenFailure ? 'failing'
@@ -10077,7 +10115,8 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
     };
     try {
       const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-      const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay, supervisor, autostart, reconnect };
+      const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay, supervisor, autostart, reconnect,
+        ...(recentRelayFailures.length ? { recentRelayFailures } : {}) };
       if (flags.has('verbose') || flags.has('diagnostic')) {
         const relayPid = await readFile(resolve(dharmaHome(), 'relay', 'relay.pid'), 'utf8')
           .then(value => Number(value.trim())).catch(() => 0);
@@ -10107,6 +10146,7 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
                 organizationId: config.organizationId, deviceId: config.deviceId,
                 workspaceId: row.workspaceId, pid: relayPid, relayPidMtimeMs: relayPidState?.relayPidMtimeMs ?? null,
                 relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt: lastSuccess });
+              const failureHistory = failureHistories.get(row.workspaceId);
               const skillActivation = await readRelaySkillActivationState(dharmaHome(), row.workspaceId);
               // The record keeps only codes; name the PATH entry the relay refuses, and the fix, from this host.
               const providerPathRemedies: Record<string, { path: string; remedy: string }> = {};
@@ -10120,6 +10160,8 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
                 lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}),
+                ...(failureHistory ? { failureHistory: { count: failureHistory.count, since: failureHistory.since,
+                  recent: [...failureHistory.entries].reverse() } } : {}),
                 skillActivation, ...(Object.keys(providerPathRemedies).length ? { providerPathRemedies } : {}) });
             }
             status.repositoryRelays = { state: 'observed', repositories: observations };

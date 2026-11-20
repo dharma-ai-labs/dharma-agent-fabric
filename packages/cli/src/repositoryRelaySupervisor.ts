@@ -120,6 +120,81 @@ export function currentRepositoryRelayFailure(input: { receipt: unknown; organiz
     ...typedFailure(value.failureCode) };
 }
 
+// #514: the latest-failure receipt is hidden by the next success, so each workspace also keeps a running count
+// and its last failures for the current relay process. Entries hold the time, stage and stable codes only.
+export const REPOSITORY_RELAY_FAILURE_HISTORY_SCHEMA = 'dharma.local-repository-relay-failure-history/v1';
+export const REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT = 20;
+export const REPOSITORY_RELAY_RECENT_FAILURE_MS = 24 * 60 * 60_000;
+export interface RepositoryRelayFailureHistoryEntry { at: string; stage: RepositoryRelayStage; failureCode?: string;
+  httpStatus?: number; errorCode?: string }
+export interface RepositoryRelayFailureHistory { count: number; since: string; entries: RepositoryRelayFailureHistoryEntry[] }
+interface RepositoryRelayProcessBinding { organizationId: string; deviceId: string; workspaceId: string; pid: number;
+  relayPidMtimeMs: number; relayPidCtimeMs: number }
+const HISTORY_ENTRY_KEYS: ReadonlySet<string> = new Set(['at', 'stage', 'failureCode', 'httpStatus', 'errorCode']);
+const HISTORY_KEYS: ReadonlySet<string> = new Set(['schema', 'organizationId', 'deviceId', 'workspaceId', 'pid',
+  'relayPidMtimeMs', 'relayPidCtimeMs', 'count', 'since', 'entries']);
+const safeHttpStatus = (value: unknown) => typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599;
+const safeErrorCode = (value: unknown) => typeof value === 'string' && (SAFE_SYSTEM_CODE.test(value) || SAFE_LOWER_CODE.test(value));
+
+// Builds an entry from a failure event, dropping any field that is not a stable value.
+function historyEntryFromEvent(event: Partial<RepositoryRelayObservation>): RepositoryRelayFailureHistoryEntry | null {
+  if (event.code !== 'repository_relay_failed' || repositoryRelayTimestampMs(event.at) === null
+    || !(REPOSITORY_RELAY_STAGES as readonly unknown[]).includes(event.stage)) return null;
+  return { at: event.at!, stage: event.stage!, ...typedFailure(event.failureCode),
+    ...(safeHttpStatus(event.httpStatus) ? { httpStatus: event.httpStatus } : {}),
+    ...(safeErrorCode(event.errorCode) ? { errorCode: event.errorCode } : {}) };
+}
+
+// A stored entry is read only in the exact form the relay writes.
+function storedHistoryEntry(value: unknown, now?: number): RepositoryRelayFailureHistoryEntry | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entry = value as Record<string, unknown>;
+  if (Object.keys(entry).some(key => !HISTORY_ENTRY_KEYS.has(key)) || repositoryRelayTimestampMs(entry.at, now) === null
+    || !(REPOSITORY_RELAY_STAGES as readonly unknown[]).includes(entry.stage)
+    || ('failureCode' in entry && !REPOSITORY_RELAY_FAILURE_CODES.has(entry.failureCode as string))
+    || ('httpStatus' in entry && !safeHttpStatus(entry.httpStatus))
+    || ('errorCode' in entry && !safeErrorCode(entry.errorCode))) return null;
+  return entry as unknown as RepositoryRelayFailureHistoryEntry;
+}
+
+export function currentRepositoryRelayFailureHistory(input: { record: unknown; organizationId: string; deviceId: string;
+  workspaceId: string; pid: number; relayPidMtimeMs: number | null; relayPidCtimeMs: number | null; now?: number;
+}): RepositoryRelayFailureHistory | null {
+  const value = input.record as Record<string, unknown> | null;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !HISTORY_KEYS.has(key))
+    || value.schema !== REPOSITORY_RELAY_FAILURE_HISTORY_SCHEMA
+    || value.organizationId !== input.organizationId || value.deviceId !== input.deviceId
+    || value.workspaceId !== input.workspaceId || !Number.isSafeInteger(input.pid) || input.pid <= 0 || value.pid !== input.pid
+    || !Number.isFinite(input.relayPidMtimeMs) || !Number.isFinite(input.relayPidCtimeMs)
+    || value.relayPidMtimeMs !== input.relayPidMtimeMs || value.relayPidCtimeMs !== input.relayPidCtimeMs
+    || repositoryRelayTimestampMs(value.since, input.now) === null || !Array.isArray(value.entries)
+    || value.entries.length < 1 || value.entries.length > REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT
+    || !Number.isSafeInteger(value.count) || (value.count as number) < value.entries.length) return null;
+  const entries = value.entries.map(entry => storedHistoryEntry(entry, input.now));
+  if (entries.some(entry => entry === null)) return null;
+  return { count: value.count as number, since: value.since as string, entries: entries as RepositoryRelayFailureHistoryEntry[] };
+}
+
+/** The history after one more failure. A history from another relay process, or in any other form, starts again. */
+export function appendRepositoryRelayFailureHistory(previous: unknown, event: Partial<RepositoryRelayObservation>,
+  binding: RepositoryRelayProcessBinding) {
+  const entry = historyEntryFromEvent(event);
+  if (!entry) return null;
+  const prior = currentRepositoryRelayFailureHistory({ record: previous, ...binding });
+  return { schema: REPOSITORY_RELAY_FAILURE_HISTORY_SCHEMA, organizationId: binding.organizationId,
+    deviceId: binding.deviceId, workspaceId: binding.workspaceId, pid: binding.pid,
+    relayPidMtimeMs: binding.relayPidMtimeMs, relayPidCtimeMs: binding.relayPidCtimeMs,
+    count: Math.min((prior?.count ?? 0) + 1, Number.MAX_SAFE_INTEGER), since: prior?.since ?? entry.at,
+    entries: [...(prior?.entries ?? []), entry].slice(-REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT) };
+}
+
+/** The one-line default status summary, only when the latest failure is from the last 24 hours. */
+export function recentRepositoryRelayFailure(history: RepositoryRelayFailureHistory | null, now = Date.now()) {
+  const latest = history?.entries.at(-1);
+  if (!history || !latest || now - Date.parse(latest.at) > REPOSITORY_RELAY_RECENT_FAILURE_MS) return null;
+  return { count: history.count, since: history.since, latest };
+}
+
 export async function selectRepositoryRelayRegistrations<T extends OnboardingWorkspaceRecord & { routeHash: string }>(
   records: readonly T[], enrollment: { organizationId: string; deviceId: string },
   readPolicy: (path: string) => Promise<{ organizationId: string; serverAuthorization?: { workspaceId: string } }>,
