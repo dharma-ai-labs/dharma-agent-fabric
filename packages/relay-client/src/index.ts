@@ -77,9 +77,21 @@ interface OutboxEntry {
   pending: PendingRequest | null;
   ownerPid: number;
   updatedAt: string;
-  /** When another client last sent this entry's kept request. With a kept request left, it got no definite answer;
-   * without one, the owner, if it still runs, takes the outcome from the file instead of sending the request again. */
+  /** When another client last took this entry's kept request to send it, written before the send. With a kept request
+   * left, it got no definite answer (or its sender stopped); without one, the owner, if it still runs, takes the outcome
+   * from the file instead of sending the request again. */
   adoptedAt?: string;
+  /** The definite answer that client got, so the owner returns it to a retry of the same call instead of signing the
+   * call again. The owner's next write of its entry clears it. */
+  adoptedOutcome?: AdoptedOutcome;
+}
+
+interface AdoptedOutcome {
+  /** The message id the owner signed the request with. */
+  messageId: string;
+  /** 2xx when accepted, or a definitive 4xx refusal (see #sendPendingWithSigningControl). */
+  status: number;
+  response: Record<string, unknown>;
 }
 
 interface ProtocolState {
@@ -145,6 +157,15 @@ function isPendingRequest(value: unknown): value is PendingRequest {
 
 const isInstant = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value));
 
+function isAdoptedOutcome(value: unknown): value is AdoptedOutcome {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const outcome = value as Record<string, unknown>;
+  const status = Number(outcome.status);
+  return typeof outcome.messageId === 'string' && outcome.messageId.length > 0 && Number.isSafeInteger(outcome.status)
+    && ((status >= 200 && status < 300) || (status >= 400 && status < 500 && status !== 408 && status !== 429))
+    && !!outcome.response && typeof outcome.response === 'object' && !Array.isArray(outcome.response);
+}
+
 function isOutboxEntry(value: unknown): value is OutboxEntry {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const entry = value as Record<string, unknown>;
@@ -152,7 +173,8 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
     && Number.isSafeInteger(entry.nextSequence) && Number(entry.nextSequence) >= 1
     && (entry.pending === null || isPendingRequest(entry.pending))
     && Number.isSafeInteger(entry.ownerPid) && Number(entry.ownerPid) >= 0
-    && isInstant(entry.updatedAt) && (entry.adoptedAt === undefined || isInstant(entry.adoptedAt));
+    && isInstant(entry.updatedAt) && (entry.adoptedAt === undefined || isInstant(entry.adoptedAt))
+    && (entry.adoptedOutcome === undefined || (entry.adoptedAt !== undefined && isAdoptedOutcome(entry.adoptedOutcome)));
 }
 
 function assertProtocolState(value: unknown): asserts value is ProtocolState {
@@ -215,10 +237,14 @@ function isSessionOpen(pending: PendingRequest): boolean {
  * workspace loop's entry waits that long even after its process exited, so a loop that restarts promptly replays its
  * own request first. An orphan sent without a definite answer is due again after the same interval. */
 function orphanDue(owner: string, entry: OutboxEntry, now: number): boolean {
-  if (!entry.pending) return false;
-  if (entry.adoptedAt && now - Date.parse(entry.adoptedAt) < ORPHAN_RETRY_INTERVAL_MS) return false;
+  if (!entry.pending || recentlyAdopted(entry, now)) return false;
   return now - Date.parse(entry.updatedAt) >= ORPHAN_RETRY_INTERVAL_MS
     || (!owner.startsWith('relay:') && !ownerProcessAlive(entry.ownerPid));
+}
+
+/** Whether another client took the entry's kept request less than ORPHAN_RETRY_INTERVAL_MS ago. */
+function recentlyAdopted(entry: OutboxEntry, now: number): boolean {
+  return entry.adoptedAt !== undefined && now - Date.parse(entry.adoptedAt) < ORPHAN_RETRY_INTERVAL_MS;
 }
 
 export interface EnrollmentResult {
@@ -1285,6 +1311,9 @@ export class AgentFabricClient {
   readonly #ownerKey: string;
   /** The other clients' entries as of this client's last read of the file. */
   #otherOutboxes: Record<string, OutboxEntry>;
+  /** The definite answer another client got for this client's kept request, with the request as this client signed
+   * it. Only the next call can take it, and only when it is the same call. */
+  #adoptedOutcome: (Pick<PendingRequest, 'method' | 'pathname' | 'body'> & Pick<AdoptedOutcome, 'status' | 'response'>) | null = null;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
@@ -1575,10 +1604,16 @@ export class AgentFabricClient {
     this.#otherOutboxes = others;
     this.#state.recoveredTaskCompletions = disk?.recoveredTaskCompletions ?? [];
     // Another client sent this client's kept request after it stood unchanged (see orphanDue). The file then holds
-    // its outcome: no kept request once it was answered, or the request as last sent.
+    // its outcome: no kept request once it was answered, with the answer, or the request as last sent.
     if (own?.adoptedAt && this.#state.pending) {
+      const signed = this.#state.pending;
+      const outcome = own.adoptedOutcome;
       this.#state.pending = own.pending;
       this.#state.nextSequence = Math.max(this.#state.nextSequence, own.nextSequence);
+      this.#adoptedOutcome = !own.pending && outcome && outcome.messageId === signed.headers['x-dharma-message-id']
+        ? {method: signed.method, pathname: signed.pathname, body: signed.body, status: outcome.status,
+          response: outcome.response}
+        : null;
     }
   }
 
@@ -1586,10 +1621,11 @@ export class AgentFabricClient {
   #orphansDueAt = 0;
 
   /** Sends the kept requests of orphaned entries (see orphanDue): at most ORPHAN_SENDS_PER_SECTION, and none after
-   * one without a definite answer. Their outcome is never this caller's and is never thrown. An answered entry keeps
-   * no request and is marked, so a live owner takes the outcome from the file. A request without a definite answer
-   * stays and is due again after ORPHAN_RETRY_INTERVAL_MS. A re-signed request keeps its owner's session. While more
-   * are due, this client's next request sends the next ones. */
+   * one without a definite answer. Their outcome is never this caller's and is never thrown. Each entry is marked in
+   * the file before its send, so when this client stops during the send, the next one waits ORPHAN_RETRY_INTERVAL_MS
+   * too. An answered entry keeps no request and holds the answer, so a live owner takes the outcome from the file. A
+   * request without a definite answer stays and is due again after ORPHAN_RETRY_INTERVAL_MS. A re-signed request keeps
+   * its owner's session. While more are due, this client's next request sends the next ones. */
   async #adoptOrphans(): Promise<void> {
     const now = Date.now();
     this.#orphansDueAt = now + ORPHAN_RETRY_INTERVAL_MS;
@@ -1608,12 +1644,19 @@ export class AgentFabricClient {
       if (!entry.pending) continue;
       if (sent === ORPHAN_SENDS_PER_SECTION) { this.#orphansDueAt = now; break; }
       sent += 1;
-      try { await this.#sendPendingWithSigningControl(entry); }
-      catch { await this.#assertHostScope(); }
+      const messageId = entry.pending.headers['x-dharma-message-id'] ?? '';
+      entry.adoptedAt = new Date().toISOString();
+      delete entry.adoptedOutcome;
+      await this.#persist();
+      unwritten = false;
+      try {
+        await this.#sendPendingWithSigningControl(entry, (status, response) => {
+          if (messageId) entry.adoptedOutcome = {messageId, status, response};
+        });
+      } catch { await this.#assertHostScope(); }
       entry.adoptedAt = new Date().toISOString();
       if (!entry.pending) entry.updatedAt = entry.adoptedAt;
       await this.#persist();
-      unwritten = false;
       if (entry.pending) break;
     }
     if (unwritten) await this.#persist();
@@ -1633,6 +1676,14 @@ export class AgentFabricClient {
     }
     const pathname = `/api/v1/orgs/${encodeURIComponent(this.config.organizationId)}${route}`;
     const serialized = method === 'GET' ? '' : canonicalize(body);
+    const adopted = this.#adoptedOutcome;
+    this.#adoptedOutcome = null;
+    if (adopted && !this.#state.pending && adopted.method === method && adopted.pathname === pathname
+      && adopted.body === serialized) {
+      // Another client delivered this call's kept request: the retry gets that answer, as a recovery of its own would.
+      if (adopted.status >= 200 && adopted.status < 300) return adopted.response;
+      throw new AgentFabricRequestError(adopted.response, adopted.status, true);
+    }
     if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
       // An ambiguous content delivery is never replayed implicitly. The next
       // explicit caller must rebuild the capsule after rechecking disclosure
@@ -1688,8 +1739,10 @@ export class AgentFabricClient {
     return this.#sendPendingWithSigningControl(this.#state);
   }
 
-  /** Sends the kept request of one outbox entry: this client's own, or an orphan in #adoptOrphans. */
-  async #sendPendingWithSigningControl(slot: Pick<OutboxEntry, 'nextSequence' | 'pending'>): Promise<Record<string, unknown>> {
+  /** Sends the kept request of one outbox entry: this client's own, or an orphan in #adoptOrphans. answered sees a
+   * definite answer before the entry is written without its request. */
+  async #sendPendingWithSigningControl(slot: Pick<OutboxEntry, 'nextSequence' | 'pending'>,
+    answered?: (status: number, response: Record<string, unknown>) => void): Promise<Record<string, unknown>> {
     await this.#assertHostScope();
     const pending = slot.pending;
     if (!pending) throw new Error('No pending protocol request.');
@@ -1812,6 +1865,7 @@ export class AgentFabricClient {
       // signed request, as do upstream failures whose commit state is unknown.
       const definitive = status >= 400 && status < 500 && status !== 408 && status !== 429;
       if (definitive) {
+        answered?.(status, body);
         slot.nextSequence += 1;
         slot.pending = null;
         await this.#persist();
@@ -1819,6 +1873,7 @@ export class AgentFabricClient {
       throw new AgentFabricRequestError(body, status, definitive);
     }
     this.#recordRecoveredTaskCompletion(pending, body);
+    answered?.(status, body);
     slot.nextSequence += 1;
     slot.pending = null;
     await this.#persist();
@@ -1946,17 +2001,20 @@ export class AgentFabricClient {
     // from their governed source. Do not retain them as an automatic replay
     // that can outlive consent or the workspace registration they depend on.
     // Each other client's entry is written back as read; an idle entry of an
-    // owner process that has exited is dropped, and the newest idle entries
-    // are kept up to IDLE_OUTBOX_ENTRIES_MAX. A kept request is never dropped.
+    // owner process that has exited is dropped once no other client took its
+    // request in the last ORPHAN_RETRY_INTERVAL_MS (an owner that read the
+    // entry earlier still finds the answer), and the newest idle entries are
+    // kept up to IDLE_OUTBOX_ENTRIES_MAX. A kept request is never dropped.
     // The entry limit counts kept requests only: a write is refused only when
     // it would add one to a full file, and idle entries, this client's own
     // included, take only the room that is left.
     const outboxes: Record<string, OutboxEntry> = {};
     const idle: Array<[string, OutboxEntry]> = [];
+    const now = Date.now();
     for (const [owner, read] of Object.entries(this.#otherOutboxes)) {
       const entry = durableOutboxEntry(read);
       if (entry.pending) outboxes[owner] = entry;
-      else if (ownerProcessAlive(entry.ownerPid)) idle.push([owner, entry]);
+      else if (ownerProcessAlive(entry.ownerPid) || recentlyAdopted(entry, now)) idle.push([owner, entry]);
     }
     const {sessionId, nextSequence, pending} = this.#state;
     const own = durableOutboxEntry({sessionId, nextSequence, pending, ownerPid: process.pid,

@@ -127,16 +127,22 @@ have been reused or belong to another account) or when it belongs to a
 workspace loop that never ran again; a workspace loop that restarts sooner
 replays its own request first. The outcome never answers the client that sent
 it and is never raised to its caller. An accepted or refused request leaves
-the file, and an owner that still runs takes that outcome from the file
-instead of sending the request again. A request without a definite answer
-stays in the file and is sent again after at least 10 minutes. One client
+the file and its answer stays in the owner's entry. An owner that still runs
+takes that outcome from the file instead of sending the request again: when
+its caller retries the same call, it returns that answer or raises that
+refusal without signing the call again. The client records each such send in
+the file before it starts, so a request without a definite answer, including
+one whose sender stopped during the send, stays in the file and is sent again
+after at least 10 minutes. One client
 sends at most 4 such requests in one signing-control section and stops at the
 first without a definite answer; while more are due, its next request sends
 the next ones. A kept session open matters only to its owner: another client
 removes an orphaned one without sending it. A kept request in a file written
 by an earlier version is moved to such an entry
 when the file is first read. Entries without a kept request are removed once
-their owner process has exited.
+their owner process has exited, except that an entry whose request another
+client answered stays for 10 minutes, so an owner that read the entry before
+still finds the answer.
 
 The file holds at most 256 kept requests. A client without a kept request
 still opens its session in a full file; that session open is not kept in the
