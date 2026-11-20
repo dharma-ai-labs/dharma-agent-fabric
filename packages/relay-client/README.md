@@ -147,7 +147,9 @@ its caller retries the same call, it returns that answer or raises that
 refusal without signing the call again. Only an answer whose body is a JSON
 object is kept. When no answer is there (any other answer, or one removed
 after its 10 minutes), the owner sends the request it signed again, with the
-same message id and idempotency key; it never signs that call again. The
+same message id and idempotency key; it never signs that call again. Only an
+action acknowledgement older than 8 minutes is signed again, with a new message
+id, at a sequence above every one already used in its session. The
 client records each such send in
 the file before it starts, so a request without a definite answer, including
 one whose sender stopped during the send, stays in the file and is sent again

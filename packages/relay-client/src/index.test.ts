@@ -2509,6 +2509,36 @@ test('a stale action acknowledgement is re-signed only by its owner, in its own 
   assert.ok(next.sequence > resigned.sequence, 'the owner signs its next request above the re-signed one');
 });
 
+test('a running owner never signs a sequence again after another client re-signed its acknowledgement and the answer left the file (shared protocol state)', async () => {
+  const f = await sharedMonotonicFixture('fabric-shared-resign-adopted-');
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  await b.openSession();
+  const acknowledgement = sharedAcknowledgement();
+  f.failNext();
+  await assert.rejects(a.postActionEnforcement('33333333-3333-4333-8333-333333333333', acknowledgement),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  // The entry stood unchanged long enough: another client's session open sends it, re-signed in the owner's session.
+  await sharedLater(11, async () => { const c = await f.open(); await c.openSession(); });
+  const adopted = f.calls.filter(call => call.path === kept.path);
+  assert.equal(adopted.length, 2);
+  assert.equal(adopted[1]!.sessionId, kept.sessionId);
+  assert.ok(adopted[1]!.sequence > kept.sequence);
+  // Later, another client's write drops the kept answer.
+  await sharedLater(22, () => b.pollTask());
+  assert.ok(!Object.values((await f.read()).outboxes ?? {}).some(entry => entry.adoptedOutcome));
+  const retry = await sharedLater(22, () => a.postActionEnforcement('33333333-3333-4333-8333-333333333333', acknowledgement))
+    .then(() => 'accepted', (error: unknown) => error instanceof AgentFabricRequestError ? error.status : error);
+  const signed = new Map<number, string>();
+  for (const call of f.calls.filter(item => item.sessionId === kept.sessionId)) {
+    assert.ok(!signed.has(call.sequence) || signed.get(call.sequence) === call.messageId,
+      `sequence ${call.sequence} is signed again with another message id in the owner's session`);
+    signed.set(call.sequence, call.messageId);
+  }
+  assert.equal(retry, 'accepted', 'the owner gets no out-of-order refusal');
+});
+
 const sharedIdleEntry = (ownerPid: number, minute = 0) => ({ sessionId: randomUUID(), nextSequence: 2, pending: null, ownerPid,
   updatedAt: new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString() });
 

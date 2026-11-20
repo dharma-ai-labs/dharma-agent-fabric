@@ -1667,14 +1667,13 @@ export class AgentFabricClient {
     // its outcome: no kept request once it was answered, with the answer, or the request as last sent. When the
     // answer is not there (never kept, or removed after ORPHAN_RETRY_INTERVAL_MS), this client keeps its signed
     // request, so a retry sends it again with the same message id and idempotency key instead of signing the call again.
+    // The file's next sequence counts any sequence the other client signed in this session, so none is signed again.
     if (own?.adoptedAt && this.#state.pending) {
       const signed = this.#state.pending;
       const outcome = own.adoptedOutcome;
       const answered = !own.pending && !!outcome && outcome.messageId === signed.headers['x-dharma-message-id'];
-      if (own.pending || answered) {
-        this.#state.pending = own.pending;
-        this.#state.nextSequence = Math.max(this.#state.nextSequence, own.nextSequence);
-      }
+      this.#state.nextSequence = Math.max(this.#state.nextSequence, own.nextSequence);
+      if (own.pending || answered) this.#state.pending = own.pending;
       this.#adoptedOutcome = answered
         ? {method: signed.method, pathname: signed.pathname, body: signed.body, status: outcome!.status,
           response: outcome!.response}
@@ -1846,7 +1845,8 @@ export class AgentFabricClient {
         || Date.now() - acknowledgedAt > 8 * 60_000
         || acknowledgedAt > Date.now() + 5 * 60_000) {
         const refreshed = refreshActionDecisionAcknowledgement(acknowledgement);
-        const sequence = Number(pending.headers['x-dharma-sequence'] || 0) + 1;
+        // Above every sequence used in this session, including one another client signed when it sent this entry.
+        const sequence = Math.max(Number(pending.headers['x-dharma-sequence'] || 0) + 1, slot.nextSequence);
         const timestamp = new Date().toISOString();
         const messageId = randomUUID();
         const nonce = randomBytes(24).toString('base64url');
