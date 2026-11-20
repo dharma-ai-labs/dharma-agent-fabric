@@ -104,8 +104,22 @@ takes signing control signs or sends a request. Every write of the local
 protocol state (the outbox, the session and recovered task completions)
 happens under the device signing control and starts from the latest file, so
 clients on one device never overwrite each other's kept requests or
-completions. A signed request that is kept in the outbox may be sent again:
-see the two cases below.
+completions when every process on the device runs this version. A process of
+an earlier version still writes the whole file from its own copy. The relay
+upgrade stops the relay before it switches versions, but a command of the
+earlier version that is still running can overwrite the file until it exits.
+
+The outbox holds one kept request for the whole device. A client sends a kept
+request of another client before it signs its own, and that outcome is never
+the caller's. If the server refuses the kept request, the caller's request is
+signed and sent as usual. If the server answers it with a retryable error, the
+call fails with the code `relay_outbox_busy` and the caller's request was not
+sent. After three retryable answers, the kept request of another client is set
+aside so that it cannot hold the outbox, and its client signs its next request
+above its sequence.
+
+A signed request that is kept in the outbox may be sent again: see the two
+cases below.
 
 - **Connect phase: at most 30 s** (`RELAY_CONNECT_TIMEOUT_MS`). A relay
   connection that does not open in time fails with the code

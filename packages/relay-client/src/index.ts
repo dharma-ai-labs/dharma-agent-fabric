@@ -67,6 +67,9 @@ interface PendingRequest {
   pathname: string;
   body: string;
   headers: Record<string, string>;
+  /** Retryable server answers to this request so far. A kept request of another client that reaches
+   * KEPT_REQUEST_RETRYABLE_FAILURES_MAX is set aside, so it cannot hold the device outbox for every client. */
+  retryableFailures?: number;
 }
 
 interface ProtocolState {
@@ -81,6 +84,7 @@ interface ProtocolState {
 }
 
 const RESIGNED_SEQUENCE_SESSIONS_MAX = 64;
+const KEPT_REQUEST_RETRYABLE_FAILURES_MAX = 3;
 
 // Several durable clients share one protocol-state file: one per relay workspace loop, plus ad hoc commands. Each
 // read-modify-write of it runs inside one device signing-control section that starts by reloading the shared
@@ -120,6 +124,8 @@ function assertProtocolState(value: unknown): asserts value is ProtocolState {
     && pending.headers !== null && typeof pending.headers === 'object' && !Array.isArray(pending.headers)
     && Object.entries(pending.headers as Record<string, unknown>)
       .every(([name, header]) => name.length > 0 && typeof header === 'string')
+    && (pending.retryableFailures === undefined
+      || Number.isSafeInteger(pending.retryableFailures) && Number(pending.retryableFailures) >= 1)
   );
   if (state.schema !== 'dharma.protocol-state/v1'
     || !(state.sessionId === null || typeof state.sessionId === 'string')
@@ -1363,11 +1369,16 @@ export class AgentFabricClient {
       this.#state.recoveredTaskCompletions = current.filter((item) => item.taskId !== taskId);
       await this.#persist();
     };
+    if (this.#durable) {
+      // The completion queue belongs to the whole device: acknowledge against the latest file, under signing control.
+      // Never on this client's request queue: a request that already holds signing control can wait there, and this
+      // acknowledgement would then wait in the signing-control line for that request while it waits for us.
+      return (async () => { await this.#assertHostScope(); return this.#withProtocolState(acknowledge); })();
+    }
     const operation = this.#serial.then(async () => {
       await this.#assertHostScope();
       if (this.#readOnly) throw new Error('relay_read_only_mutation_denied');
-      // The completion queue belongs to the whole device: acknowledge against the latest file, under signing control.
-      return this.#durable ? this.#withProtocolState(acknowledge) : acknowledge();
+      return acknowledge();
     });
     this.#serial = operation.catch(() => undefined);
     return operation;
@@ -1501,13 +1512,13 @@ export class AgentFabricClient {
       this.#state.nextSequence += 1;
       this.#state.pending = null;
       await this.#persist();
+    } else if (this.#state.pending && this.#state.pending.headers['x-dharma-session-id'] !== this.#state.sessionId) {
+      // Another client's kept request, even an identical one, is drained first and never answers this caller.
+      await this.#drainOtherClientsRequest();
     } else if (this.#state.pending) {
-      // Only this client's own kept request answers its caller. An identical request another client kept is
-      // drained, and this caller still sends its own.
       const sameRequest = this.#state.pending.method === method
         && this.#state.pending.pathname === pathname
-        && this.#state.pending.body === serialized
-        && this.#state.pending.headers['x-dharma-session-id'] === this.#state.sessionId;
+        && this.#state.pending.body === serialized;
       const recovered = await this.#sendPending();
       // Recovery acknowledges only its original caller's request identity.
       if (sameRequest) return recovered;
@@ -1540,6 +1551,29 @@ export class AgentFabricClient {
     this.#state.pending = pending;
     await this.#persist();
     return this.#sendPending();
+  }
+
+  /** The outcome of another client's kept request is never this caller's. A refusal clears the slot and this caller
+   * goes on to send its own request. A retryable server answer fails this caller with relay_outbox_busy: its own
+   * request was not sent. After KEPT_REQUEST_RETRYABLE_FAILURES_MAX such answers the kept request is set aside,
+   * and its owner moves past its sequence, so one request cannot hold the device outbox for every client. */
+  async #drainOtherClientsRequest(): Promise<void> {
+    const kept = this.#state.pending!;
+    try { await this.#sendPending(); return; }
+    catch (error) {
+      if (this.#state.pending !== kept) return;
+      if (!(error instanceof AgentFabricRequestError)) throw error;
+      if ((kept.retryableFailures ?? 0) < KEPT_REQUEST_RETRYABLE_FAILURES_MAX) {
+        throw Object.assign(new Error('relay_outbox_busy', {cause: error}), {code: 'relay_outbox_busy'});
+      }
+      const session = kept.headers['x-dharma-session-id'] || '';
+      const sequence = Number(kept.headers['x-dharma-sequence'] || 0);
+      if (UUID_PATTERN.test(session) && Number.isSafeInteger(sequence) && sequence >= 1) {
+        this.#recordResignedSequence(session, sequence);
+      }
+      this.#state.pending = null;
+      await this.#persist();
+    }
   }
 
   async #sendPending(): Promise<Record<string, unknown>> {
@@ -1675,8 +1709,10 @@ export class AgentFabricClient {
       if (definitive) {
         this.#state.nextSequence += 1;
         this.#state.pending = null;
-        await this.#persist();
+      } else {
+        pending.retryableFailures = (pending.retryableFailures ?? 0) + 1;
       }
+      await this.#persist();
       throw new AgentFabricRequestError(body, status, definitive);
     }
     this.#recordRecoveredTaskCompletion(pending, body);

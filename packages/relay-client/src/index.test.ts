@@ -2444,7 +2444,8 @@ test('a client never reuses a sequence after its stale action acknowledgement wa
   await assert.rejects(b.postActionEnforcement('33333333-3333-4333-8333-333333333333', sharedAcknowledgement()),
     error => error instanceof AgentFabricRequestError && error.status === 503);
   f.failNext();
-  await assert.rejects(sharedLater(9, () => a.pollTask()), error => error instanceof AgentFabricRequestError && error.status === 503);
+  await assert.rejects(sharedLater(9, () => a.pollTask()), (error: Error & { code?: unknown; cause?: unknown }) =>
+    error.code === 'relay_outbox_busy' && error.cause instanceof AgentFabricRequestError && error.cause.status === 503);
   const c = await f.open();
   await sharedLater(18, () => c.openSession());
   const resigned = f.calls.filter(call => call.sessionId === sessionB).at(-1)!;
