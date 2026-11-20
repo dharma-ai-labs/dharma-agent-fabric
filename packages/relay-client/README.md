@@ -100,9 +100,12 @@ fails closed instead of enrolling or generating a replacement key.
 Every signed request is signed, written to the local outbox, sent and
 acknowledged while the device signing control for its origin, organization,
 device and OS user is held. While one caller holds it, no other caller that
-takes signing control signs or sends a request. Opening a client and a session
-reads and writes protocol state without taking signing control. A signed
-request that is kept in the outbox may be sent again: see the two cases below.
+takes signing control signs or sends a request. Every write of the local
+protocol state (the outbox, the session and recovered task completions)
+happens under the device signing control and starts from the latest file, so
+clients on one device never overwrite each other's kept requests or
+completions. A signed request that is kept in the outbox may be sent again:
+see the two cases below.
 
 - **Connect phase: at most 30 s** (`RELAY_CONNECT_TIMEOUT_MS`). A relay
   connection that does not open in time fails with the code

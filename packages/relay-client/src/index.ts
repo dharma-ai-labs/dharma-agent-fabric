@@ -1,3 +1,4 @@
+import {AsyncLocalStorage} from 'node:async_hooks';
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -75,6 +76,12 @@ interface ProtocolState {
   pending: PendingRequest | null;
   recoveredTaskCompletions?: RecoveredTaskCompletion[];
 }
+
+// Several durable clients share one protocol-state file: one per relay workspace loop, plus ad hoc commands. Each
+// read-modify-write of it runs inside one device signing-control section that starts by reloading the shared
+// fields from the file. A section deactivates when its work settles, so a detached callback cannot write after it.
+interface ProtocolStateSection { client: AgentFabricClient; active: boolean; }
+const protocolStateSections = new AsyncLocalStorage<ProtocolStateSection>();
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -1270,20 +1277,27 @@ export class AgentFabricClient {
     if (this.#readOnly && (this.#state.sessionId || this.#readSessionAdmissionUsed)) {
       throw new Error('relay_read_only_session_already_started');
     }
-    if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
-      // Content-bearing requests require refreshed consent. Repository connect
-      // requests depend on current workspace registration. Both are rebuilt by
-      // their explicit workflows instead of replayed from stale prerequisites.
-      this.#state.pending = null;
+    // A durable client drains the device outbox and writes its new session from the latest file, all in one
+    // signing-control section. It calls the send directly: waiting on #serial while holding control could deadlock.
+    // The section ends before the session POST, which takes control again through #serial.
+    const replace = async (send: () => Promise<unknown>) => {
+      if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
+        // Content-bearing requests require refreshed consent. Repository connect
+        // requests depend on current workspace registration. Both are rebuilt by
+        // their explicit workflows instead of replayed from stale prerequisites.
+        this.#state.pending = null;
+        await this.#persist();
+      } else if (this.#state.pending) {
+        await send();
+      }
+      this.#state = {
+        schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null,
+        recoveredTaskCompletions: this.#state.recoveredTaskCompletions || [],
+      };
       await this.#persist();
-    } else if (this.#state.pending) {
-      await this.#sendPending();
-    }
-    this.#state = {
-      schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null,
-      recoveredTaskCompletions: this.#state.recoveredTaskCompletions || [],
     };
-    await this.#persist();
+    if (this.#durable) await this.#withProtocolState(() => replace(() => this.#sendPendingWithSigningControl()));
+    else await replace(() => this.#sendPending());
     return this.signedPost('/agent-fabric/sessions', {
       connectionId: randomBytes(24).toString('base64url'), durableCursor: null, relayVersion, deviceTelemetry,
     });
@@ -1329,15 +1343,19 @@ export class AgentFabricClient {
     return (this.#state.recoveredTaskCompletions || []).map((item) => ({ ...item }));
   }
   acknowledgeRecoveredTaskCompletion(taskId: string, receiptHash: string): Promise<void> {
-    const operation = this.#serial.then(async () => {
-      await this.#assertHostScope();
-      if (this.#readOnly) throw new Error('relay_read_only_mutation_denied');
+    const acknowledge = async () => {
       const current = this.#state.recoveredTaskCompletions || [];
       const matching = current.find((item) => item.taskId === taskId);
       if (!matching) return;
       if (matching.receiptHash !== receiptHash) throw new Error('Recovered task completion receipt does not match.');
       this.#state.recoveredTaskCompletions = current.filter((item) => item.taskId !== taskId);
       await this.#persist();
+    };
+    const operation = this.#serial.then(async () => {
+      await this.#assertHostScope();
+      if (this.#readOnly) throw new Error('relay_read_only_mutation_denied');
+      // The completion queue belongs to the whole device: acknowledge against the latest file, under signing control.
+      return this.#durable ? this.#withProtocolState(acknowledge) : acknowledge();
     });
     this.#serial = operation.catch(() => undefined);
     return operation;
@@ -1381,8 +1399,58 @@ export class AgentFabricClient {
   }
 
   async #signedRequestNow(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
-    const hostScope=this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
-    return withDeviceSigningControl({config:this.config,hostScope},()=>this.#signedRequestWithSigningControl(method,route,body));
+    return this.#withProtocolState(()=>this.#signedRequestWithSigningControl(method,route,body));
+  }
+
+  get #durable(): boolean { return !this.#readOnly && !this.#isolatedSession; }
+
+  #controlScope(): HostOperationScope | undefined {
+    return this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
+  }
+
+  /** Runs work under device signing control. A root section of a durable client first reloads the device-wide
+   * protocol state from the file; a nested call inside this client's live section reuses it without a reload. */
+  async #withProtocolState<T>(work: () => Promise<T>): Promise<T> {
+    const input = {config: this.config, hostScope: this.#controlScope()};
+    const current = protocolStateSections.getStore();
+    if (current?.client === this && current.active) return withDeviceSigningControl(input, work);
+    return withDeviceSigningControl(input, () => {
+      const section: ProtocolStateSection = {client: this, active: true};
+      return protocolStateSections.run(section, async () => {
+        try {
+          if (this.#durable) await this.#reloadSharedState();
+          return await work();
+        } finally { section.active = false; }
+      });
+    });
+  }
+
+  /** The file wins for the device-wide fields: the outbox slot and the recovered completion queue. The session and
+   * its sequence stay this client's own and are never reloaded. */
+  async #reloadSharedState(): Promise<void> {
+    let disk: Pick<ProtocolState, 'pending' | 'recoveredTaskCompletions'>;
+    try {
+      const bytes = this.#hostFence ? await this.#hostFence.step(() => readFile(this.#statePath, 'utf8'))
+        : await readFile(this.#statePath, 'utf8');
+      const parsed = JSON.parse(bytes) as unknown;
+      assertProtocolState(parsed);
+      disk = parsed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        await this.#hostFence?.assert();
+        throw new Error('Relay protocol state is invalid; preserve the file for recovery and re-enroll if necessary.', { cause: error });
+      }
+      disk = {pending: null, recoveredTaskCompletions: []};
+    }
+    const own = this.#state.pending;
+    if (own && own.headers['x-dharma-session-id'] === this.#state.sessionId
+      && disk.pending?.headers['x-dharma-message-id'] !== own.headers['x-dharma-message-id']) {
+      // This client's request left the file without this client seeing its outcome: another client delivered or
+      // dropped it, or it was never kept (a rebuilt request). Never sign at its sequence again.
+      this.#state.nextSequence = Math.max(this.#state.nextSequence, Number(own.headers['x-dharma-sequence'] || 0) + 1);
+    }
+    this.#state.pending = disk.pending;
+    this.#state.recoveredTaskCompletions = disk.recoveredTaskCompletions ?? [];
   }
 
   async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
@@ -1408,9 +1476,12 @@ export class AgentFabricClient {
       this.#state.pending = null;
       await this.#persist();
     } else if (this.#state.pending) {
+      // Only this client's own kept request answers its caller. An identical request another client kept is
+      // drained, and this caller still sends its own.
       const sameRequest = this.#state.pending.method === method
         && this.#state.pending.pathname === pathname
-        && this.#state.pending.body === serialized;
+        && this.#state.pending.body === serialized
+        && this.#state.pending.headers['x-dharma-session-id'] === this.#state.sessionId;
       const recovered = await this.#sendPending();
       // Recovery acknowledges only its original caller's request identity.
       if (sameRequest) return recovered;
@@ -1446,8 +1517,7 @@ export class AgentFabricClient {
   }
 
   async #sendPending(): Promise<Record<string, unknown>> {
-    const hostScope=this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
-    return withDeviceSigningControl({config:this.config,hostScope},()=>this.#sendPendingWithSigningControl());
+    return this.#withProtocolState(()=>this.#sendPendingWithSigningControl());
   }
 
   async #sendPendingWithSigningControl(): Promise<Record<string, unknown>> {
@@ -1502,7 +1572,8 @@ export class AgentFabricClient {
         pending.headers['x-dharma-signature'] = sign(
           null, signingPayload, { key: this.#privateJwk, format: 'jwk' },
         ).toString('base64url');
-        this.#state.nextSequence = sequence;
+        // A drained request of another client keeps its own session; this client's sequence is unrelated to it.
+        if (pending.headers['x-dharma-session-id'] === this.#state.sessionId) this.#state.nextSequence = sequence;
         await this.#persist();
       }
     }
@@ -1700,6 +1771,8 @@ export class AgentFabricClient {
 
   async #persist() {
     if (this.#readOnly || this.#isolatedSession) { await this.#assertHostScope();return; }
+    const section = protocolStateSections.getStore();
+    if (section?.client !== this || !section.active) throw new Error('relay_protocol_state_unserialized');
     await this.#assertHostScope();
     // Authorized content and state-dependent repository connects are rebuilt
     // from their governed source. Do not retain them as an automatic replay
