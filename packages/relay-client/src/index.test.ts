@@ -3317,12 +3317,19 @@ test('an orphan section queued behind a sibling\'s poll sends nothing once that 
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
 
-const sharedFullOfLiveEntries = (deviceId: string) => Object.fromEntries(Array.from({ length: 256 }, (_, index) =>
-  [`cli:${process.pid}:live:${index}`, sharedOrphan(deviceId, process.pid, index === 0
-    ? { route: '/agent-fabric/decisions/33333333-3333-4333-8333-333333333333/enforcements' } : {})]));
+/** 256 kept requests of a client that still runs; the first is an action acknowledgement. */
+const sharedFullOfLiveEntries = (deviceId: string) => {
+  const outboxes = Object.fromEntries(Array.from({ length: 256 }, (_, index) =>
+    [`cli:${process.pid}:live:${index}`, sharedOrphan(deviceId, process.pid, index === 0
+      ? { route: '/agent-fabric/decisions/33333333-3333-4333-8333-333333333333/enforcements' } : {})]));
+  outboxes[`cli:${process.pid}:live:0`]!.pending.body = JSON.stringify(sharedAcknowledgement());
+  return outboxes;
+};
 
 test('a kept request an earlier version re-signed at the top level replaces its entry\'s request, so a full file gains no entry (shared protocol state)', async () => {
-  const f = await sharedStateFixture('fabric-shared-rollback-resigned-', () => sharedOk());
+  // During an outage: only session opens are answered.
+  const f = await sharedStateFixture('fabric-shared-rollback-resigned-', call =>
+    call.path === '/agent-fabric/sessions' ? sharedOk() : sharedUnavailable());
   const outboxes = sharedFullOfLiveEntries(f.config.deviceId);
   const entry = Object.values(outboxes)[0]!;
   const resigned = { ...entry.pending, headers: { ...entry.pending.headers, 'x-dharma-message-id': randomUUID(),
