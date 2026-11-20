@@ -2234,7 +2234,7 @@ test('device keyset telemetry reports a keyset-less device as null and rejects m
 type SharedStateCall = { path: string; body: string; messageId: string; idempotencyKey: string | null; sessionId: string;
   sequence: number };
 type SharedOutboxEntry = { sessionId: string | null; nextSequence: number; ownerPid: number; updatedAt: string;
-  pending: { pathname: string; headers: Record<string, string> } | null };
+  pending: { pathname: string; headers: Record<string, string> } | null; adoptedOutcome?: unknown };
 type SharedProtocolState = { sessionId: string | null; nextSequence: number;
   pending: { headers: Record<string, string> } | null; recoveredTaskCompletions?: Array<{ taskId: string }>;
   outboxes?: Record<string, SharedOutboxEntry> };
@@ -2959,6 +2959,39 @@ test('an owner that read its entry before another client answered it finds the a
   assert.equal(sentTimes(f.calls, kept.messageId), 2, 'its owner takes the answer from the file and does not send it again');
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
+
+for (const [label, answer] of [['null', 'null'], ['an array', '[]'], ['a string', '"ok"']] as const) {
+  test(`an orphan answered with ${label} instead of an object leaves a file every client still opens (shared protocol state)`, async () => {
+    let mode: 'ok' | 'down' | 'bare' = 'ok';
+    const f = await sharedStateFixture('fabric-shared-orphan-bare-', call => {
+      if (call.path !== '/agent-fabric/workspaces' || mode === 'ok') return sharedOk();
+      return mode === 'down' ? sharedUnavailable() : new Response(answer, { status: 200 });
+    });
+    const earlier = await f.open('relay:w2');
+    await earlier.openSession();
+    mode = 'down';
+    await assert.rejects(earlier.registerWorkspace({ workspaceId: 'w2' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+    const kept = f.calls.at(-1)!;
+    const state = await f.read();
+    state.outboxes!['relay:w2']!.ownerPid = await exitedPid();
+    state.outboxes!['relay:w2']!.updatedAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    await writeFile(f.statePath, JSON.stringify(state));
+    mode = 'bare';
+    const w2 = await f.open('relay:w2'), w1 = await f.open('relay:w1');
+    assert.equal((await w1.openSession()).ok, true, 'the adopter opens its own session after it sends the orphan');
+    assert.equal(sentTimes(f.calls, kept.messageId), 2);
+    assert.equal((await f.read()).outboxes!['relay:w2']!.adoptedOutcome, undefined, 'an answer that is not an object is not kept');
+    const later = await f.open();
+    assert.equal((await later.openSession()).ok, true, 'a later client still opens the file');
+    await w2.openSession();
+    mode = 'ok';
+    await w2.registerWorkspace({ workspaceId: 'w2' });
+    const retry = f.calls.at(-1)!;
+    assert.deepEqual([retry.path, retry.messageId === kept.messageId], ['/agent-fabric/workspaces', false],
+      'without a kept answer its owner signs the call again');
+    assert.equal(sentTimes(f.calls, kept.messageId), 2);
+  });
+}
 
 function jsonFileStore(path: string): SecureSecretStore {
   const load = async () => JSON.parse(await readFile(path, 'utf8').catch(() => '{}')) as Record<string, string>;
