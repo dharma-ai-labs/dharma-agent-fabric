@@ -1316,12 +1316,12 @@ test('accepted task completion replay preserves the server receipt until the CLI
     }
     return new Response(JSON.stringify({ ok: true }), { status: 201 });
   };
-  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  const client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await client.openSession();
   await assert.rejects(client.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash }), /connection lost/);
   assert.deepEqual(client.listRecoveredTaskCompletions(), []);
 
-  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  const resumed = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await resumed.openSession();
   assert.equal(completionCalls, 2);
   assert.deepEqual(resumed.listRecoveredTaskCompletions().map(({ recoveredAt, ...item }) => item), [{
@@ -1548,7 +1548,7 @@ test('an ambiguous evidence response is neither persisted nor implicitly replaye
     }
     return new Response(JSON.stringify({ ok: true }), { status: 201 });
   };
-  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  const client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await client.openSession();
   await assert.rejects(
     client.postEvidenceResponse('request-1', { contentBase64: 'customer-content' }),
@@ -1556,8 +1556,8 @@ test('an ambiguous evidence response is neither persisted nor implicitly replaye
   );
   const persisted = await readFile(statePath, 'utf8');
   assert.doesNotMatch(persisted, /customer-content/);
-  assert.equal(JSON.parse(persisted).nextSequence, 3);
-  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  assert.equal(JSON.parse(persisted).outboxes['relay:restart'].nextSequence, 3);
+  const resumed = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await resumed.registerWorkspace({ workspaceId: 'control-operation' });
   assert.equal(paths.filter((path) => path.endsWith('/responses')).length, 1);
 });
@@ -1588,7 +1588,7 @@ test('deterministic client rejection advances the outbox instead of blocking the
     }
     return new Response(JSON.stringify({ ok: true }), { status: 201 });
   };
-  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  const client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await client.openSession();
   rejectNext = true;
   await assert.rejects(client.registerWorkspace({ workspaceId: 'oversized' }), (error) => {
@@ -1598,7 +1598,7 @@ test('deterministic client rejection advances the outbox instead of blocking the
     assert.equal(isDefinitiveAgentFabricRejection(error), true);
     return true;
   });
-  const state = JSON.parse(await readFile(statePath, 'utf8'));
+  const state = JSON.parse(await readFile(statePath, 'utf8')).outboxes['relay:restart'];
   assert.equal(state.pending, null);
   assert.equal(state.nextSequence, 3);
   await client.registerWorkspace({ workspaceId: 'bounded' });
@@ -1622,7 +1622,7 @@ test('retryable server rejection is an ambiguous delivery outcome', async () => 
   const fetcher = async () => new Response(JSON.stringify({
     ok: false, error: { code: 'upstream_unavailable', message: 'Try again.' },
   }), { status: retryable ? 503 : 201 });
-  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  const client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await client.openSession();
   retryable = true;
   await assert.rejects(client.registerWorkspace({ workspaceId: 'retryable' }), (error) => {
@@ -1632,7 +1632,7 @@ test('retryable server rejection is an ambiguous delivery outcome', async () => 
     assert.equal(isDefinitiveAgentFabricRejection(error), false);
     return true;
   });
-  assert.notEqual(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
+  assert.notEqual(JSON.parse(await readFile(statePath, 'utf8')).outboxes['relay:restart'].pending, null);
 });
 
 test('evidence poll and response remain device-signed organization routes', async () => {
@@ -1869,7 +1869,8 @@ async function withRelaySocket<T>(Socket: unknown, work: () => Promise<T>) {
 
 type StoredPending = { pathname: string; body: string; headers: Record<string, string> };
 async function storedPending(statePath: string) {
-  return (JSON.parse(await readFile(statePath, 'utf8')) as { pending: StoredPending | null }).pending;
+  const state = JSON.parse(await readFile(statePath, 'utf8')) as { outboxes?: Record<string, { pending: StoredPending | null }> };
+  return Object.values(state.outboxes ?? {}).find(entry => entry.pending)?.pending ?? null;
 }
 
 function isConnectTimeout(error: Error & { code?: unknown }) {
@@ -2423,7 +2424,7 @@ test('a kept task completion survives any number of another client\'s calls duri
   assert.equal(sent.length, 2, 'the completion is sent by its first attempt and by its owner\'s replay only');
   assert.deepEqual(sent.map(call => call.idempotencyKey), [kept.messageId, kept.messageId]);
   assert.deepEqual((await f.read()).recoveredTaskCompletions?.map(item => item.taskId), [taskId]);
-  assert.deepEqual(keptMessageIds(await f.read()), []);
+  assert.equal(keptMessageIds(await f.read()).includes(kept.messageId), false, 'the replayed completion left the file');
 });
 
 test('a workspace loop that restarts replays its kept completion when it opens its session (shared protocol state)', async () => {

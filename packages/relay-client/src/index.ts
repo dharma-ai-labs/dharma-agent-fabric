@@ -67,28 +67,42 @@ interface PendingRequest {
   pathname: string;
   body: string;
   headers: Record<string, string>;
-  /** Retryable server answers to this request so far. A kept request of another client that reaches
-   * KEPT_REQUEST_RETRYABLE_FAILURES_MAX is set aside, so it cannot hold the device outbox for every client. */
-  retryableFailures?: number;
+}
+
+/** One client's outbox in the shared protocol-state file. Only its owner signs, sends or writes it, with one
+ * exception: once the owner process has exited, the next session open on the device sends its kept request. */
+interface OutboxEntry {
+  sessionId: string | null;
+  nextSequence: number;
+  pending: PendingRequest | null;
+  ownerPid: number;
+  updatedAt: string;
+  /** When a session open last sent this orphaned request without getting a definite answer. */
+  adoptedAt?: string;
 }
 
 interface ProtocolState {
   schema: 'dharma.protocol-state/v1';
+  /** In memory: this client's own session, sequence and kept request. In the file these stay empty and each client's
+   * own are in outboxes, so a client of an earlier version finds no kept request to replay. */
   sessionId: string | null;
   nextSequence: number;
   pending: PendingRequest | null;
   recoveredTaskCompletions?: RecoveredTaskCompletion[];
-  /** Highest sequence a client re-signed in each session, so the client that owns a session never signs at or below
-   * it again. Device-wide, like the outbox slot. */
-  resignedSequences?: Record<string, number>;
+  /** Each client's outbox, by owner key: 'relay:<workspaceId>' for a workspace loop, 'cli:<pid>:<n>' otherwise. */
+  outboxes?: Record<string, OutboxEntry>;
 }
 
-const RESIGNED_SEQUENCE_SESSIONS_MAX = 64;
-const KEPT_REQUEST_RETRYABLE_FAILURES_MAX = 3;
+const OUTBOX_ENTRIES_MAX = 256;
+const IDLE_OUTBOX_ENTRIES_MAX = 32;
+/** A session open sends an orphaned request that got no definite answer again only after this interval. */
+const ORPHAN_RETRY_INTERVAL_MS = 10 * 60_000;
+const OWNER_KEY_PATTERN = /^(?:relay|cli|migrated):[A-Za-z0-9_.:-]{1,128}$/;
+let clientInstances = 0;
 
 // Several durable clients share one protocol-state file: one per relay workspace loop, plus ad hoc commands. Each
-// read-modify-write of it runs inside one device signing-control section that starts by reloading the shared
-// fields from the file. A section deactivates when its work settles, so a detached callback cannot write after it.
+// read-modify-write of it runs inside one device signing-control section that starts by reloading the other clients'
+// entries from the file. A section deactivates when its work settles, so a detached callback cannot write after it.
 interface ProtocolStateSection { client: AgentFabricClient; active: boolean; }
 const protocolStateSections = new AsyncLocalStorage<ProtocolStateSection>();
 
@@ -110,37 +124,75 @@ function isRecoveredTaskCompletion(value: unknown): value is RecoveredTaskComple
     && Number.isFinite(Date.parse(String(item.recoveredAt || '')));
 }
 
-function assertProtocolState(value: unknown): asserts value is ProtocolState {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Relay protocol state is invalid.');
-  const state = value as Record<string, unknown>;
-  const recovered = state.recoveredTaskCompletions;
-  const pending = state.pending as Record<string, unknown> | null;
-  const resigned = state.resignedSequences;
-  const pendingValid = pending === null || (
-    typeof pending === 'object' && !Array.isArray(pending)
-    && (pending.method === 'POST' || pending.method === 'GET')
+function isPendingRequest(value: unknown): value is PendingRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const pending = value as Record<string, unknown>;
+  return (pending.method === 'POST' || pending.method === 'GET')
     && typeof pending.pathname === 'string' && pending.pathname.startsWith('/')
     && typeof pending.body === 'string'
     && pending.headers !== null && typeof pending.headers === 'object' && !Array.isArray(pending.headers)
     && Object.entries(pending.headers as Record<string, unknown>)
-      .every(([name, header]) => name.length > 0 && typeof header === 'string')
-    && (pending.retryableFailures === undefined
-      || Number.isSafeInteger(pending.retryableFailures) && Number(pending.retryableFailures) >= 1)
-  );
+      .every(([name, header]) => name.length > 0 && typeof header === 'string');
+}
+
+const isInstant = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value));
+
+function isOutboxEntry(value: unknown): value is OutboxEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  return (entry.sessionId === null || typeof entry.sessionId === 'string')
+    && Number.isSafeInteger(entry.nextSequence) && Number(entry.nextSequence) >= 1
+    && (entry.pending === null || isPendingRequest(entry.pending))
+    && Number.isSafeInteger(entry.ownerPid) && Number(entry.ownerPid) >= 0
+    && isInstant(entry.updatedAt) && (entry.adoptedAt === undefined || isInstant(entry.adoptedAt));
+}
+
+function assertProtocolState(value: unknown): asserts value is ProtocolState {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Relay protocol state is invalid.');
+  const state = value as Record<string, unknown>;
+  const recovered = state.recoveredTaskCompletions;
+  const outboxes = state.outboxes;
   if (state.schema !== 'dharma.protocol-state/v1'
     || !(state.sessionId === null || typeof state.sessionId === 'string')
     || !Number.isSafeInteger(state.nextSequence) || Number(state.nextSequence) < 1
-    || !pendingValid
-    || (resigned !== undefined && (!resigned || typeof resigned !== 'object' || Array.isArray(resigned)
-      || Object.keys(resigned).length > RESIGNED_SEQUENCE_SESSIONS_MAX
-      || Object.entries(resigned as Record<string, unknown>)
-        .some(([session, sequence]) => !UUID_PATTERN.test(session)
-          || !Number.isSafeInteger(sequence) || Number(sequence) < 1)))
+    || !(state.pending === null || isPendingRequest(state.pending))
+    || (outboxes !== undefined && (!outboxes || typeof outboxes !== 'object' || Array.isArray(outboxes)
+      || Object.keys(outboxes).length > OUTBOX_ENTRIES_MAX
+      || Object.entries(outboxes as Record<string, unknown>)
+        .some(([owner, entry]) => !OWNER_KEY_PATTERN.test(owner) || !isOutboxEntry(entry))))
     || (recovered !== undefined && (!Array.isArray(recovered)
       || recovered.length > 1_000
       || recovered.some((item) => !isRecoveredTaskCompletion(item))))) {
     throw new Error('Relay protocol state is invalid.');
   }
+}
+
+/** Every outbox entry of a file. The kept request of an earlier single-slot file becomes an orphan keyed by its
+ * session, sent once by the next session open; a request that is always rebuilt is dropped as before. */
+function outboxesOf(state: ProtocolState): Record<string, OutboxEntry> {
+  const outboxes = {...state.outboxes};
+  const pending = state.pending;
+  if (pending && !isExplicitlyRebuiltPath(pending.pathname)) {
+    const session = pending.headers['x-dharma-session-id'] || state.sessionId || '';
+    const key = `migrated:${/^[A-Za-z0-9_-]{1,128}$/.test(session) ? session : sha256(session).slice(0, 32)}`;
+    outboxes[key] ??= {sessionId: session || null, nextSequence: state.nextSequence, pending, ownerPid: 0,
+      updatedAt: new Date().toISOString()};
+  }
+  return outboxes;
+}
+
+/** Whether the process that wrote an outbox entry still runs. A migrated entry has no owner process. */
+function ownerProcessAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fffffff) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+}
+
+/** A request that is always rebuilt is never kept in the file, as before. */
+function durableOutboxEntry(entry: OutboxEntry): OutboxEntry {
+  return entry.pending && isExplicitlyRebuiltPath(entry.pending.pathname)
+    ? {...entry, nextSequence: entry.nextSequence + 1, pending: null} : entry;
 }
 
 export interface EnrollmentResult {
@@ -1204,11 +1256,15 @@ export class AgentFabricClient {
   readonly #isolatedSession: boolean;
   #readSessionAdmissionUsed = false;
   #state: ProtocolState;
+  readonly #ownerKey: string;
+  /** The other clients' entries as of this client's last read of the file. */
+  #otherOutboxes: Record<string, OutboxEntry>;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
     state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean; isolatedSession?: boolean;
+    ownerKey: string; otherOutboxes: Record<string, OutboxEntry>;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -1222,6 +1278,8 @@ export class AgentFabricClient {
     this.#hostBinding = this.#binding();
     this.#readOnly = input.readOnly === true;
     this.#isolatedSession = input.isolatedSession === true;
+    this.#ownerKey = input.ownerKey;
+    this.#otherOutboxes = input.otherOutboxes;
   }
 
   #binding() {
@@ -1243,10 +1301,18 @@ export class AgentFabricClient {
     /** Isolated in-memory protocol session; no enrollment repair, durable outbox replay or application POSTs. */
     readOnly?: boolean;
     /** Fresh in-memory protocol state for an explicit workflow; application requests retain their normal authorization. */
-    isolatedSession?: boolean }) {
+    isolatedSession?: boolean;
+    /** The owner of this client's outbox entry: 'relay:<workspaceId>' for a workspace loop, so a restarted loop finds
+     * its own kept request and replays it. Omitted, the client gets an entry of its own in this process. */
+    ownerKey?: string }) {
     const {configPath, statePath, store: suppliedStore, fetcher, hostScope, readOnly, isolatedSession} = input;
     if (readOnly !== undefined && typeof readOnly !== 'boolean') throw new Error('relay_read_only_option_invalid');
     if (isolatedSession !== undefined && typeof isolatedSession !== 'boolean') throw new Error('relay_isolated_session_option_invalid');
+    if (input.ownerKey !== undefined && (typeof input.ownerKey !== 'string'
+      || !/^(?:relay|cli):/.test(input.ownerKey) || !OWNER_KEY_PATTERN.test(input.ownerKey))) {
+      throw new Error('relay_owner_key_invalid');
+    }
+    const ownerKey = input.ownerKey ?? `cli:${process.pid}:${++clientInstances}`;
     const fence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
     const rawStore = fence ? await fence.step(async () => suppliedStore ?? await createSystemSecureStore())
       : suppliedStore ?? await createSystemSecureStore();
@@ -1269,11 +1335,17 @@ export class AgentFabricClient {
       schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
       recoveredTaskCompletions: [],
     };
+    let otherOutboxes: Record<string, OutboxEntry> = {};
     if (!readOnly && !isolatedSession) try {
       const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
       const parsed = JSON.parse(bytes) as unknown;
       assertProtocolState(parsed);
-      state = parsed;
+      const {[ownerKey]: own, ...others} = outboxesOf(parsed);
+      otherOutboxes = others;
+      state = {
+        schema: 'dharma.protocol-state/v1', sessionId: own?.sessionId ?? null, nextSequence: own?.nextSequence ?? 1,
+        pending: own?.pending ?? null, recoveredTaskCompletions: parsed.recoveredTaskCompletions ?? [],
+      };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         if (fence) await fence.assert();
@@ -1284,7 +1356,7 @@ export class AgentFabricClient {
     await fence?.assert();
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
-      statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession,
+      statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession, ownerKey, otherOutboxes,
     });
   }
 
@@ -1294,10 +1366,11 @@ export class AgentFabricClient {
     if (this.#readOnly && (this.#state.sessionId || this.#readSessionAdmissionUsed)) {
       throw new Error('relay_read_only_session_already_started');
     }
-    // A durable client drains the device outbox and writes its new session from the latest file, all in one
-    // signing-control section. It calls the send directly: waiting on #serial while holding control could deadlock.
-    // The section ends before the session POST, which takes control again through #serial.
-    const replace = async (send: () => Promise<unknown>) => {
+    // A durable client sends orphaned requests, replays its own kept request and writes its new session from the
+    // latest file, all in one signing-control section. It calls the sends directly: waiting on #serial while holding
+    // control could deadlock. The section ends before the session POST, which takes control again through #serial.
+    const replace = async () => {
+      if (this.#durable) await this.#adoptOrphans();
       if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
         // Content-bearing requests require refreshed consent. Repository connect
         // requests depend on current workspace registration. Both are rebuilt by
@@ -1305,17 +1378,15 @@ export class AgentFabricClient {
         this.#state.pending = null;
         await this.#persist();
       } else if (this.#state.pending) {
-        await send();
+        await this.#sendPendingWithSigningControl(this.#state);
       }
-      this.#state = {
-        schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null,
-        recoveredTaskCompletions: this.#state.recoveredTaskCompletions || [],
-        ...(this.#state.resignedSequences ? {resignedSequences: this.#state.resignedSequences} : {}),
-      };
+      this.#state.sessionId = randomUUID();
+      this.#state.nextSequence = 1;
+      this.#state.pending = null;
       await this.#persist();
     };
-    if (this.#durable) await this.#withProtocolState(() => replace(() => this.#sendPendingWithSigningControl()));
-    else await replace(() => this.#sendPending());
+    if (this.#durable || this.#state.pending) await this.#withProtocolState(replace);
+    else await replace();
     return this.signedPost('/agent-fabric/sessions', {
       connectionId: randomBytes(24).toString('base64url'), durableCursor: null, relayVersion, deviceTelemetry,
     });
@@ -1448,10 +1519,10 @@ export class AgentFabricClient {
     });
   }
 
-  /** The file wins for the device-wide fields: the outbox slot, the recovered completion queue and the re-signed
-   * sequences. The session and its sequence stay this client's own and are never reloaded, only moved forward. */
+  /** The file wins for every other client's entry and for the recovered completion queue. This client's own entry is
+   * written only by this client, so it is never reloaded. */
   async #reloadSharedState(): Promise<void> {
-    let disk: Pick<ProtocolState, 'pending' | 'recoveredTaskCompletions' | 'resignedSequences'>;
+    let disk: ProtocolState | null = null;
     try {
       const bytes = this.#hostFence ? await this.#hostFence.step(() => readFile(this.#statePath, 'utf8'))
         : await readFile(this.#statePath, 'utf8');
@@ -1463,31 +1534,27 @@ export class AgentFabricClient {
         await this.#hostFence?.assert();
         throw new Error('Relay protocol state is invalid; preserve the file for recovery and re-enroll if necessary.', { cause: error });
       }
-      disk = {pending: null, recoveredTaskCompletions: []};
     }
-    const own = this.#state.pending;
-    if (own && own.headers['x-dharma-session-id'] === this.#state.sessionId
-      && disk.pending?.headers['x-dharma-message-id'] !== own.headers['x-dharma-message-id']) {
-      // This client's request left the file without this client seeing its outcome: another client delivered or
-      // dropped it, or it was never kept (a rebuilt request). Never sign at its sequence again.
-      this.#state.nextSequence = Math.max(this.#state.nextSequence, Number(own.headers['x-dharma-sequence'] || 0) + 1);
-    }
-    // Another client may have re-signed this client's request in this client's session, once or more.
-    const resigned = this.#state.sessionId ? disk.resignedSequences?.[this.#state.sessionId] : undefined;
-    if (resigned !== undefined) this.#state.nextSequence = Math.max(this.#state.nextSequence, resigned + 1);
-    this.#state.pending = disk.pending;
-    this.#state.recoveredTaskCompletions = disk.recoveredTaskCompletions ?? [];
-    this.#state.resignedSequences = disk.resignedSequences;
+    const others = disk ? outboxesOf(disk) : {};
+    delete others[this.#ownerKey];
+    this.#otherOutboxes = others;
+    this.#state.recoveredTaskCompletions = disk?.recoveredTaskCompletions ?? [];
   }
 
-  /** Records a re-signed sequence for the client that owns the session. The oldest sessions are dropped first. */
-  #recordResignedSequence(sessionId: string, sequence: number): void {
-    const resigned = {...this.#state.resignedSequences};
-    const highest = Math.max(sequence, resigned[sessionId] ?? 0);
-    delete resigned[sessionId];
-    resigned[sessionId] = highest;
-    for (const session of Object.keys(resigned).slice(0, -RESIGNED_SEQUENCE_SESSIONS_MAX)) delete resigned[session];
-    this.#state.resignedSequences = resigned;
+  /** Sends the kept request of each owner process that has exited, once per session open. Its outcome is never this
+   * caller's and is never thrown: an accepted or refused request leaves the file, and one without a definite answer
+   * stays for a later session open, which sends it again after ORPHAN_RETRY_INTERVAL_MS. The entry of a workspace loop
+   * is left to that loop, which replays it when it restarts. A re-signed request keeps its owner's session. */
+  async #adoptOrphans(): Promise<void> {
+    for (const [owner, entry] of Object.entries(this.#otherOutboxes)) {
+      if (!entry.pending || owner.startsWith('relay:') || ownerProcessAlive(entry.ownerPid)) continue;
+      if (entry.adoptedAt && Date.now() - Date.parse(entry.adoptedAt) < ORPHAN_RETRY_INTERVAL_MS) continue;
+      try { await this.#sendPendingWithSigningControl(entry); }
+      catch { await this.#assertHostScope(); }
+      if (entry.pending) entry.adoptedAt = new Date().toISOString();
+      else delete this.#otherOutboxes[owner];
+      await this.#persist();
+    }
   }
 
   async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
@@ -1512,14 +1579,11 @@ export class AgentFabricClient {
       this.#state.nextSequence += 1;
       this.#state.pending = null;
       await this.#persist();
-    } else if (this.#state.pending && this.#state.pending.headers['x-dharma-session-id'] !== this.#state.sessionId) {
-      // Another client's kept request, even an identical one, is drained first and never answers this caller.
-      await this.#drainOtherClientsRequest();
     } else if (this.#state.pending) {
       const sameRequest = this.#state.pending.method === method
         && this.#state.pending.pathname === pathname
         && this.#state.pending.body === serialized;
-      const recovered = await this.#sendPending();
+      const recovered = await this.#sendPendingWithSigningControl(this.#state);
       // Recovery acknowledges only its original caller's request identity.
       if (sameRequest) return recovered;
     }
@@ -1550,45 +1614,19 @@ export class AgentFabricClient {
     this.#assertRecoveredTaskCompletionCapacity(pending);
     this.#state.pending = pending;
     await this.#persist();
-    return this.#sendPending();
+    return this.#sendPendingWithSigningControl(this.#state);
   }
 
-  /** The outcome of another client's kept request is never this caller's. A refusal clears the slot and this caller
-   * goes on to send its own request. A retryable server answer fails this caller with relay_outbox_busy: its own
-   * request was not sent. After KEPT_REQUEST_RETRYABLE_FAILURES_MAX such answers the kept request is set aside,
-   * and its owner moves past its sequence, so one request cannot hold the device outbox for every client. */
-  async #drainOtherClientsRequest(): Promise<void> {
-    const kept = this.#state.pending!;
-    try { await this.#sendPending(); return; }
-    catch (error) {
-      if (this.#state.pending !== kept) return;
-      if (!(error instanceof AgentFabricRequestError)) throw error;
-      if ((kept.retryableFailures ?? 0) < KEPT_REQUEST_RETRYABLE_FAILURES_MAX) {
-        throw Object.assign(new Error('relay_outbox_busy', {cause: error}), {code: 'relay_outbox_busy'});
-      }
-      const session = kept.headers['x-dharma-session-id'] || '';
-      const sequence = Number(kept.headers['x-dharma-sequence'] || 0);
-      if (UUID_PATTERN.test(session) && Number.isSafeInteger(sequence) && sequence >= 1) {
-        this.#recordResignedSequence(session, sequence);
-      }
-      this.#state.pending = null;
-      await this.#persist();
-    }
-  }
-
-  async #sendPending(): Promise<Record<string, unknown>> {
-    return this.#withProtocolState(()=>this.#sendPendingWithSigningControl());
-  }
-
-  async #sendPendingWithSigningControl(): Promise<Record<string, unknown>> {
+  /** Sends the kept request of one outbox entry: this client's own, or an orphan in #adoptOrphans. */
+  async #sendPendingWithSigningControl(slot: Pick<OutboxEntry, 'nextSequence' | 'pending'>): Promise<Record<string, unknown>> {
     await this.#assertHostScope();
-    const pending = this.#state.pending;
+    const pending = slot.pending;
     if (!pending) throw new Error('No pending protocol request.');
     try {
       this.#assertRecoveredTaskCompletionCapacity(pending);
     } catch (error) {
-      this.#state.nextSequence += 1;
-      this.#state.pending = null;
+      slot.nextSequence += 1;
+      slot.pending = null;
       await this.#persist();
       throw error;
     }
@@ -1601,11 +1639,11 @@ export class AgentFabricClient {
       }
       const contract = validateActionDecisionAcknowledgementContract(acknowledgement);
       if (!contract.ok) {
-        this.#state.nextSequence = Math.max(
-          this.#state.nextSequence + 1,
+        slot.nextSequence = Math.max(
+          slot.nextSequence + 1,
           Number(pending.headers['x-dharma-sequence'] || 0) + 1,
         );
-        this.#state.pending = null;
+        slot.pending = null;
         await this.#persist();
         throw new Error('Stale action acknowledgement is invalid and was discarded.');
       }
@@ -1632,11 +1670,7 @@ export class AgentFabricClient {
         pending.headers['x-dharma-signature'] = sign(
           null, signingPayload, { key: this.#privateJwk, format: 'jwk' },
         ).toString('base64url');
-        // A drained request of another client keeps its own session; this client's sequence is unrelated to it. The
-        // file records the sequence, so the client that owns the session moves past it on its next reload.
-        if (pending.headers['x-dharma-session-id'] === this.#state.sessionId) this.#state.nextSequence = sequence;
-        const session = pending.headers['x-dharma-session-id'] || '';
-        if (UUID_PATTERN.test(session)) this.#recordResignedSequence(session, sequence);
+        slot.nextSequence = sequence;
         await this.#persist();
       }
     }
@@ -1707,17 +1741,15 @@ export class AgentFabricClient {
       // signed request, as do upstream failures whose commit state is unknown.
       const definitive = status >= 400 && status < 500 && status !== 408 && status !== 429;
       if (definitive) {
-        this.#state.nextSequence += 1;
-        this.#state.pending = null;
-      } else {
-        pending.retryableFailures = (pending.retryableFailures ?? 0) + 1;
+        slot.nextSequence += 1;
+        slot.pending = null;
+        await this.#persist();
       }
-      await this.#persist();
       throw new AgentFabricRequestError(body, status, definitive);
     }
     this.#recordRecoveredTaskCompletion(pending, body);
-    this.#state.nextSequence += 1;
-    this.#state.pending = null;
+    slot.nextSequence += 1;
+    slot.pending = null;
     await this.#persist();
     return body;
   }
@@ -1842,10 +1874,25 @@ export class AgentFabricClient {
     // Authorized content and state-dependent repository connects are rebuilt
     // from their governed source. Do not retain them as an automatic replay
     // that can outlive consent or the workspace registration they depend on.
-    const durableState = this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)
-      ? { ...this.#state, nextSequence: this.#state.nextSequence + 1, pending: null }
-      : this.#state;
-    return atomicJson(this.#statePath, durableState, this.#hostFence);
+    // Each other client's entry is written back as read; an idle entry of an
+    // owner process that has exited is dropped, and the newest idle entries
+    // are kept up to IDLE_OUTBOX_ENTRIES_MAX. A kept request is never dropped.
+    const outboxes: Record<string, OutboxEntry> = {};
+    const idle: Array<[string, OutboxEntry]> = [];
+    for (const [owner, entry] of Object.entries(this.#otherOutboxes)) {
+      if (entry.pending) outboxes[owner] = durableOutboxEntry(entry);
+      else if (ownerProcessAlive(entry.ownerPid)) idle.push([owner, entry]);
+    }
+    idle.sort(([, a], [, b]) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    for (const [owner, entry] of idle.slice(0, IDLE_OUTBOX_ENTRIES_MAX)) outboxes[owner] = entry;
+    const {sessionId, nextSequence, pending} = this.#state;
+    outboxes[this.#ownerKey] = durableOutboxEntry({sessionId, nextSequence, pending, ownerPid: process.pid,
+      updatedAt: new Date().toISOString()});
+    if (Object.keys(outboxes).length > OUTBOX_ENTRIES_MAX) throw new Error('relay_protocol_state_outbox_full');
+    return atomicJson(this.#statePath, {
+      schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+      recoveredTaskCompletions: this.#state.recoveredTaskCompletions ?? [], outboxes,
+    } satisfies ProtocolState, this.#hostFence);
   }
 }
 

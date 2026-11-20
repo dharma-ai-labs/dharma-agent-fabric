@@ -1864,10 +1864,12 @@ async function gitValue(workspace: string, argv: string[]) {
   }
 }
 
-async function client(telemetry: DeviceTelemetryOptions = {}) {
+/** ownerKey names a stable outbox entry, such as the one of a relay workspace loop, so a restarted loop replays its
+ * own kept request; other callers get an entry of their own. */
+async function client(telemetry: DeviceTelemetryOptions = {}, ownerKey?: string) {
   const hostScope = currentBootstrapHostScope();
   const instance = admitSignedRequests(await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
-    hostScope, isolatedSession: isIsolatedDeviceSession() }), hostScope);
+    hostScope, isolatedSession: isIsolatedDeviceSession(), ...(ownerKey === undefined ? {} : { ownerKey }) }), hostScope);
   await instance.openSession(VERSION, telemetry);
   return instance;
 }
@@ -9349,7 +9351,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   signal.throwIfAborted();
   const fabric = await withRepositoryRelayStage('session_open', async () => {
     const telemetry = await relayAutostartReport();
-    return retrySigningControlBusy(() => client(telemetry), { signal });
+    return retrySigningControlBusy(() => client(telemetry, `relay:${canonicalWorkspace.workspaceId}`), { signal });
   });
   // The first poll receipt can follow a long task, so status needs this earlier success.
   await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', canonicalWorkspace.workspaceId,

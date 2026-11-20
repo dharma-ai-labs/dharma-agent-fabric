@@ -105,18 +105,27 @@ protocol state (the outbox, the session and recovered task completions)
 happens under the device signing control and starts from the latest file, so
 clients on one device never overwrite each other's kept requests or
 completions when every process on the device runs this version. A process of
-an earlier version still writes the whole file from its own copy. The relay
-upgrade stops the relay before it switches versions, but a command of the
-earlier version that is still running can overwrite the file until it exits.
+an earlier version still writes the whole file from its own copy and does not
+read the per-client outbox entries described below. The relay upgrade stops
+the relay before it switches versions, but a command of the earlier version
+that is still running can overwrite the file until it exits.
 
-The outbox holds one kept request for the whole device. A client sends a kept
-request of another client before it signs its own, and that outcome is never
-the caller's. If the server refuses the kept request, the caller's request is
-signed and sent as usual. If the server answers it with a retryable error, the
-call fails with the code `relay_outbox_busy` and the caller's request was not
-sent. After three retryable answers, the kept request of another client is set
-aside so that it cannot hold the outbox, and its client signs its next request
-above its sequence.
+Each client keeps its own outbox entry in the protocol-state file: its
+session, its next sequence and at most one kept request. A relay workspace
+loop uses one entry per workspace, and every other client gets an entry of its
+own. A client signs, sends and replays only the kept request in its own entry,
+in its own session, so another client's kept request never delays, fails or
+answers its calls. A workspace loop that restarts finds its entry and sends its
+kept request again, with the same message id, when it opens its session.
+
+When the owner process has exited, as with an ad hoc command that stopped
+during an outage, the next session open on the device sends the kept request
+of that entry once. The outcome never answers that session open and is never
+raised to its caller. An accepted or refused request leaves the file. A
+request without a definite answer stays in the file, and a later session open
+sends it again after at least 10 minutes. A kept request in a file written by
+an earlier version is moved to such an entry when the file is first read.
+Entries without a kept request are removed once their owner process has exited.
 
 A signed request that is kept in the outbox may be sent again: see the two
 cases below.
