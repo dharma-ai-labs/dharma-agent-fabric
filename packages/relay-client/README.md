@@ -145,18 +145,23 @@ minutes, and the next write after that removes it. An owner that still runs
 takes that outcome from the file instead of sending the request again: when
 its caller retries the same call, it returns that answer or raises that
 refusal without signing the call again. Only an answer whose body is a JSON
-object is kept; after any other answer the owner signs its retry again. The
+object is kept. When no answer is there (any other answer, or one removed
+after its 10 minutes), the owner sends the request it signed again, with the
+same message id and idempotency key; it never signs that call again. The
 client records each such send in
 the file before it starts, so a request without a definite answer, including
 one whose sender stopped during the send, stays in the file and is sent again
-after at least 10 minutes. A session open
-sends at most 4 such requests in its signing-control section and stops at the
-first without a definite answer; while more are due, each next request of that
-client sends one more. A kept session open, poll or read matters only to its
+after at least 10 minutes. A session open sends at most one such request in
+its signing-control section, and none when it replays its own kept request
+there, so another process that waits for signing control waits for at most
+one such send; while more are due, each next request of that client sends one
+more. A kept session open, poll or read matters only to its
 owner: another client removes an orphaned one without sending it, so the task
 or content a poll or read returns is never written to the file. A kept request
 in a file written by an earlier version is moved to such an entry when the file
-is first read, unless it is the copy of a kept request in an entry. Entries without a kept request are removed once
+is first read, unless it is the copy of a kept request in an entry, or that
+request as the earlier version re-signed it (same session, path and
+idempotency key), which then replaces the entry's request. Entries without a kept request are removed once
 their owner process has exited, except that an entry whose request another
 client answered stays for 10 minutes, so an owner that read the entry before
 still finds the answer.
@@ -164,9 +169,11 @@ still finds the answer.
 The file holds at most 256 kept requests. A client without a kept request
 still opens its session in a full file; that session open is not kept in the
 file. Before a request that would add a
-kept request to a full file, the client sends due requests of other entries to
+kept request to a full file, the client sends a due request of another entry to
 make room; when none is due yet, the request is refused with
-`relay_protocol_state_outbox_full`.
+`relay_protocol_state_outbox_full`. A new kept request that an earlier version
+adds to a full file stays at the top level of the file, in place of the copy
+described above, until a client of this version sends it.
 
 A signed request that is kept in the outbox may be sent again: see the two
 cases below.
