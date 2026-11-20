@@ -2255,8 +2255,8 @@ const sharedUnavailable = () => new Response(JSON.stringify({
 const sharedGate = () => { let open!: () => void; const promise = new Promise<void>(accept => { open = accept; }); return { promise, open }; };
 const sharedDelay = (ms: number) => new Promise(accept => setTimeout(accept, ms));
 
-async function sharedStateFixture(prefix: string, respond: (call: SharedStateCall) => Response | Promise<Response>) {
-  const store = memoryStore();
+async function sharedStateFixture(prefix: string, respond: (call: SharedStateCall) => Response | Promise<Response>,
+  store: SecureSecretStore = memoryStore()) {
   const root = await mkdtemp(resolve(tmpdir(), prefix));
   const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
   const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
@@ -2284,7 +2284,7 @@ async function sharedStateFixture(prefix: string, respond: (call: SharedStateCal
     try { return await respond(call); } finally { inFlight.delete(call.messageId); }
   };
   return {
-    config, statePath, calls, overlapping: () => overlapping,
+    config, configPath, statePath, calls, overlapping: () => overlapping,
     open: (ownerKey?: string) => AgentFabricClient.open(ownerKey === undefined
       ? { configPath, statePath, store, fetcher } : withOwner({ configPath, statePath, store, fetcher }, ownerKey)),
     read: async () => JSON.parse(await readFile(statePath, 'utf8')) as SharedProtocolState,
@@ -2514,6 +2514,7 @@ test('a protocol-state file with an invalid outbox entry is refused and kept (sh
   for (const outboxes of [[], { nobody: idle }, { 'cli:1:1': { ...idle, nextSequence: 0 } },
     { 'cli:1:1': { ...idle, ownerPid: -1 } }, { 'cli:1:1': { ...idle, updatedAt: 'later' } },
     { 'cli:1:1': { ...idle, pending: { method: 'PUT', pathname: '/x', body: '', headers: {} } } },
+    { 'cli:1:1': { ...idle, adoptedAt: idle.updatedAt, adoptedOutcome: { messageId: 'm', status: 503, response: {} } } },
     Object.fromEntries(Array.from({ length: 257 }, (_, index) => [`cli:1:${index + 1}`, idle]))]) {
     const content = JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null, outboxes });
     await writeFile(f.statePath, content);
@@ -2898,5 +2899,111 @@ test('a live owner whose kept request another client sent after 10 minutes never
   const last = f.calls.at(-1)!;
   assert.deepEqual([last.path, last.sessionId], ['/agent-fabric/tasks/poll', kept.sessionId]);
   assert.ok(last.sequence > kept.sequence);
+  assert.deepEqual(keptMessageIds(await f.read()), []);
+});
+
+for (const outcome of ['accepted', 'refused'] as const) {
+  test(`a live owner's retry of a call another client sent gets that answer and is not sent again: ${outcome} (shared protocol state)`, async () => {
+    let mode: 'ok' | 'down' | 'answer' = 'ok';
+    const f = await sharedStateFixture(`fabric-shared-orphan-live-retry-${outcome}-`, call => {
+      if (call.path !== '/agent-fabric/workspaces' || mode === 'ok') return sharedOk();
+      if (mode === 'down') return sharedUnavailable();
+      return outcome === 'accepted' ? sharedOk({ workspace: { id: 'registered' } })
+        : new Response(JSON.stringify({ ok: false, error: { code: 'workspace_conflict', message: 'Refused.' } }), { status: 409 });
+    });
+    const a = await f.open(), b = await f.open();
+    await a.openSession();
+    await b.openSession();
+    mode = 'down';
+    await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+    const kept = f.calls.at(-1)!;
+    mode = 'answer';
+    await sharedLater(11, () => b.pollTask());
+    assert.equal(sentTimes(f.calls, kept.messageId), 2, 'another client sends a request whose entry stood unchanged for 10 minutes');
+    const retry = a.registerWorkspace({ workspaceId: 'a' });
+    if (outcome === 'accepted') {
+      assert.deepEqual(await retry, { ok: true, workspace: { id: 'registered' } }, 'the retry returns the answer the other client got');
+    } else {
+      await assert.rejects(retry, error => error instanceof AgentFabricRequestError && error.status === 409 && error.definitive
+        && error.serverCode === 'workspace_conflict', 'the retry raises the refusal the other client got');
+    }
+    assert.equal(f.calls.filter(call => call.path === '/agent-fabric/workspaces').length, 2, 'the call is not signed or sent again');
+    mode = 'ok';
+    await a.registerWorkspace({ workspaceId: 'a' });
+    const next = f.calls.at(-1)!;
+    assert.notEqual(next.messageId, kept.messageId, 'a later call is a new request');
+    assert.deepEqual([next.sessionId, next.sequence > kept.sequence], [kept.sessionId, true]);
+  });
+}
+
+test('an owner that read its entry before another client answered it finds the answer after its process id is gone (shared protocol state)', async () => {
+  let down = false;
+  const f = await sharedStateFixture('fabric-shared-orphan-restart-', call =>
+    down && call.path === '/agent-fabric/workspaces' ? sharedUnavailable() : sharedOk());
+  const earlier = await f.open('relay:w2');
+  await earlier.openSession();
+  down = true;
+  await assert.rejects(earlier.registerWorkspace({ workspaceId: 'w2' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  down = false;
+  const state = await f.read();
+  state.outboxes!['relay:w2']!.ownerPid = await exitedPid();
+  state.outboxes!['relay:w2']!.updatedAt = new Date(Date.now() - 11 * 60_000).toISOString();
+  await writeFile(f.statePath, JSON.stringify(state));
+  // A restarted relay opens both workspace loops' clients, then their sessions in line order.
+  const w2 = await f.open('relay:w2'), w1 = await f.open('relay:w1');
+  await w1.openSession();
+  assert.equal(sentTimes(f.calls, kept.messageId), 2, 'the other loop sends the request that stood unchanged');
+  assert.ok('relay:w2' in ((await f.read()).outboxes ?? {}), 'the answered entry stays in the file for its owner');
+  await w2.openSession();
+  assert.equal(sentTimes(f.calls, kept.messageId), 2, 'its owner takes the answer from the file and does not send it again');
+  assert.deepEqual(keptMessageIds(await f.read()), []);
+});
+
+function jsonFileStore(path: string): SecureSecretStore {
+  const load = async () => JSON.parse(await readFile(path, 'utf8').catch(() => '{}')) as Record<string, string>;
+  return {
+    backend: 'linux-secret-service',
+    async get(account) { return (await load())[account] ?? null; },
+    async put(account, value) { const values = await load(); values[account] = value; await writeFile(path, JSON.stringify(values)); },
+    async delete(account) { const values = await load(); delete values[account]; await writeFile(path, JSON.stringify(values)); },
+  };
+}
+
+test('a client that stops while it sends an orphan leaves the attempt in the file, so the next client waits 10 minutes (shared protocol state)', async () => {
+  const storePath = resolve(await mkdtemp(resolve(tmpdir(), 'fabric-shared-orphan-cut-store-')), 'store.json');
+  const f = await sharedStateFixture('fabric-shared-orphan-cut-', () => sharedOk(), jsonFileStore(storePath));
+  const orphan = sharedOrphan(f.config.deviceId, await exitedPid());
+  await writeSharedOutboxes(f.statePath, { 'cli:1:orphan:1': orphan });
+  // A short command, such as a prompt hook, sends the orphan from its session open and is stopped during that send.
+  const module = new URL('./index.js', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `import {AgentFabricClient} from ${JSON.stringify(module)};
+import {readFile,writeFile} from 'node:fs/promises';
+const [configPath,statePath,storePath,orphanId]=process.argv.slice(1);
+const load=async()=>JSON.parse(await readFile(storePath,'utf8').catch(()=>'{}'));
+const store={backend:'linux-secret-service',get:async a=>(await load())[a]??null,
+put:async(a,v)=>{const s=await load();s[a]=v;await writeFile(storePath,JSON.stringify(s));},
+delete:async a=>{const s=await load();delete s[a];await writeFile(storePath,JSON.stringify(s));}};
+const fetcher=async(url,init)=>{if(new Headers(init?.headers).get('x-dharma-message-id')===orphanId){
+process.stdout.write('sending;');setInterval(()=>{},1000);await new Promise(()=>{});}
+return new Response(JSON.stringify({ok:true}),{status:201});};
+const client=await AgentFabricClient.open({configPath,statePath,store,fetcher});
+await client.openSession();process.stdout.write('done;');`,
+  f.configPath, f.statePath, storePath, orphanMessageId(orphan)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const exited = new Promise(accept => child.once('exit', accept));
+  let output = '';
+  const sending = new Promise<void>(accept => child.stdout!.on('data', data => {
+    output += String(data);
+    if (output.includes('sending;')) accept();
+  }));
+  assert.equal(await Promise.race([sending.then(() => 'sending'), exited.then(() => 'exited')]), 'sending', output);
+  child.kill('SIGKILL');
+  await exited;
+  const a = await f.open();
+  await a.openSession();
+  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'the next client does not send it within 10 minutes');
+  const b = await f.open();
+  await sharedLater(11, () => b.openSession());
+  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'it is sent again once 10 minutes have passed');
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
