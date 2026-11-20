@@ -1660,8 +1660,9 @@ export class AgentFabricClient {
         () => finish(() => reject(Object.assign(new Error('Relay response timed out.'), {code: 'relay_response_timeout'}))),
         RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS,
       );
-      // #512: before the socket opens nothing has been sent, so this limit fails the request cleanly and the
-      // kept signed request is sent for the first time on retry. It never shortens the window after send.
+      // #512: before the socket opens this attempt has sent nothing, so this limit fails it cleanly. The kept signed
+      // request is sent on the next attempt, exactly as after any other failure that keeps it (an earlier attempt
+      // may already have sent it). It never shortens the window after send.
       const connectTimeout = setTimeout(
         () => finish(() => reject(Object.assign(
           new Error('Relay connection timed out before the request was sent.'), {code: 'relay_connect_timeout'}))),

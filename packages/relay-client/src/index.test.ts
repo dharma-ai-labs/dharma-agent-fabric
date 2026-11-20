@@ -1793,8 +1793,9 @@ test('a relay that never acknowledges fails with the stable relay_response_timeo
 });
 
 // #512: one signed relay request holds device signing control until it is acknowledged. The connect phase has its
-// own, shorter limit: before the socket opens nothing has been sent, so failing there is a clean failure and the
-// later retry is the first send. After the request is sent the 90 s acknowledgement window is unchanged.
+// own, shorter limit: before the socket opens this attempt has sent nothing, so failing there is a clean failure and
+// the kept request is sent on the next attempt, as after any other failure that keeps it. After the request is sent
+// the 90 s acknowledgement window is unchanged.
 function relayConnectTimeoutMs() {
   const value = (relayClientModule as unknown as { RELAY_CONNECT_TIMEOUT_MS?: unknown }).RELAY_CONNECT_TIMEOUT_MS;
   assert.equal(typeof value, 'number', 'the relay connect phase has no time limit of its own');
@@ -1895,7 +1896,7 @@ test('a relay that never accepts the connection fails at the connect limit, send
   assert.equal(relay.sockets[0]!.sent.length, 0, 'a connect timeout means the request was never sent');
   assert.equal(relay.sockets[0]!.closeCalls, 1);
   const pending = await storedPending(f.statePath);
-  assert.match(pending?.pathname ?? '', /\/agent-fabric\/sessions$/, 'the signed request is kept for its first send');
+  assert.match(pending?.pathname ?? '', /\/agent-fabric\/sessions$/, 'the signed request is kept for the next attempt');
   const started = Date.now();
   assert.equal(await withDeviceSigningControl({ config: f.config, timeoutMs: 1_000 }, async () => 'free'), 'free');
   assert.ok(Date.now() - started < 1_000, 'signing control is free once the connect limit fails the request');
