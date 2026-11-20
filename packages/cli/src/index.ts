@@ -10160,9 +10160,9 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
                 lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}),
+                skillActivation, ...(Object.keys(providerPathRemedies).length ? { providerPathRemedies } : {}),
                 ...(failureHistory ? { failureHistory: { count: failureHistory.count, since: failureHistory.since,
-                  recent: [...failureHistory.entries].reverse() } } : {}),
-                skillActivation, ...(Object.keys(providerPathRemedies).length ? { providerPathRemedies } : {}) });
+                  recent: [...failureHistory.entries].reverse() } } : {}) });
             }
             status.repositoryRelays = { state: 'observed', repositories: observations };
           }
