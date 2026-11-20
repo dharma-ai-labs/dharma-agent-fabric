@@ -1751,7 +1751,7 @@ export class AgentFabricClient {
     // idle cap, by an earlier version that rewrote the file without outboxes, or with the file). The file no longer
     // shows whether anyone sent it, nor which sequences were signed in this session. So this client keeps the request
     // and sends it again only exactly as signed, signs nothing new in this session, and then closes it (see
-    // #sendKeptAsSigned). Its next write puts the request back in the file.
+    // #sendKeptAsSigned), which writes the request back to the file before it sends it.
     if (this.#state.pending && this.#keptOnDisk && !own) {
       this.#sequenceFloorLost = true;
       this.#keptOnDisk = false;
@@ -1914,11 +1914,16 @@ export class AgentFabricClient {
    * the same message id, sequence and idempotency key, with at most a fresh timestamp. A request that could be sent
    * only at a new sequence, or never replayed (see cannotResendAsSigned), is settled unsent. Once the request has a
    * definite answer or is settled, the session is closed, so the next call needs a new session. A retryable failure
-   * keeps both the request and the session for the next call. Returns the answer when the request was sent. */
+   * keeps both the request and the session for the next call. The request is back in this client's entry before it is
+   * sent, so after a failed send, a crash or a new client with the same owner key, its owner replays it, or another
+   * client sends it once it is due (see orphanDue). Returns the answer when the request was sent. */
   async #sendKeptAsSigned(): Promise<Record<string, unknown> | undefined> {
     try {
       const kept = this.#state.pending;
-      if (kept && !cannotResendAsSigned(kept, Date.now())) return await this.#sendPendingWithSigningControl(this.#state);
+      if (kept && !cannotResendAsSigned(kept, Date.now())) {
+        if (!this.#keptOnDisk) await this.#persist();
+        return await this.#sendPendingWithSigningControl(this.#state);
+      }
       this.#state.pending = null;
       return undefined;
     } finally {
