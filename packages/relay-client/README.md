@@ -130,7 +130,9 @@ it and is never raised to its caller. An accepted or refused request leaves
 the file and its answer stays in the owner's entry. An owner that still runs
 takes that outcome from the file instead of sending the request again: when
 its caller retries the same call, it returns that answer or raises that
-refusal without signing the call again. The client records each such send in
+refusal without signing the call again. Only an answer whose body is a JSON
+object is kept; after any other answer the owner signs its retry again. The
+client records each such send in
 the file before it starts, so a request without a definite answer, including
 one whose sender stopped during the send, stays in the file and is sent again
 after at least 10 minutes. One client

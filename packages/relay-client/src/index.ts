@@ -1651,7 +1651,9 @@ export class AgentFabricClient {
       unwritten = false;
       try {
         await this.#sendPendingWithSigningControl(entry, (status, response) => {
-          if (messageId) entry.adoptedOutcome = {messageId, status, response};
+          // Only an answer every reader accepts is kept; without one, the owner signs its retry again.
+          const outcome = {messageId, status, response};
+          if (isAdoptedOutcome(outcome)) entry.adoptedOutcome = outcome;
         });
       } catch { await this.#assertHostScope(); }
       entry.adoptedAt = new Date().toISOString();
