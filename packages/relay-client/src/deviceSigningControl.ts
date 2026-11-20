@@ -4,7 +4,7 @@ import {userInfo} from 'node:os';
 import {resolve} from 'node:path';
 import {performance} from 'node:perf_hooks';
 import {canonicalize} from '@dharma-ai-labs/agent-fabric-contracts';
-import {acquireEnrollmentAnchorLock} from './enrollmentAnchorLock.js';
+import {acquireEnrollmentAnchorLock,type EnrollmentAnchorLockRelease} from './enrollmentAnchorLock.js';
 import {HostOperationFence,type HostOperationScope} from './hostOperationScope.js';
 
 export interface DeviceSigningControlLease {
@@ -15,6 +15,42 @@ export interface DeviceSigningControlLease {
 }
 interface Owner {namespace:string;active:boolean;lease:DeviceSigningControlLease;}
 const owners=new AsyncLocalStorage<Owner>();
+// #511: one relay process runs several workspace loops on one device. Their roots wait in one line per
+// namespace in this process, in arrival order, so a sibling's long hold is a wait in line rather than a
+// connection_anchor_busy after the lock wait. Only the root at the front of the line contends for the lock
+// file, which still excludes every other process and still recovers a lock whose owner died.
+const DEVICE_SIGNING_LINE_WAIT_MS=120_000;
+const DEVICE_SIGNING_LOCK_WAIT_MS=10_000;
+interface Line {tail:Promise<void>;waiting:number;}
+const lines=new Map<string,Line>();
+
+/** Resolves with this root's leave() once every root ahead of it has left. A root that gives up, at the
+ * deadline or when its host scope is withdrawn, leaves at once, so the roots behind it keep their order. */
+async function waitInLine(namespace:string,deadline:number,fence:HostOperationFence|undefined):Promise<()=>void>{
+  const line=lines.get(namespace)??{tail:Promise.resolve(),waiting:0};
+  lines.set(namespace,line);
+  const ahead=line.tail;let open!:()=>void,left=false;
+  const leaving=new Promise<void>(accept=>{open=accept;});
+  line.tail=ahead.then(()=>leaving);
+  line.waiting++;
+  const leave=()=>{
+    if(left)return;left=true;open();
+    if(--line.waiting===0&&lines.get(namespace)===line)lines.delete(namespace);
+  };
+  let timer:NodeJS.Timeout|undefined,onAbort:(()=>void)|undefined;
+  try{
+    const outcome=await new Promise<'turn'|'deadline'|'withdrawn'>(accept=>{
+      void ahead.then(()=>accept('turn'));
+      timer=setTimeout(()=>accept('deadline'),Math.max(0,deadline-Date.now()));
+      if(fence){onAbort=()=>accept('withdrawn');fence.signal.addEventListener('abort',onAbort,{once:true});
+        if(fence.signal.aborted)accept('withdrawn');}
+    });
+    if(outcome==='turn')return leave;
+    if(outcome==='withdrawn')await fence!.assert();
+    throw Error('connection_anchor_busy');
+  }catch(error){leave();throw error;}
+  finally{clearTimeout(timer);if(onAbort)fence!.signal.removeEventListener('abort',onAbort);}
+}
 const hash=(v:unknown)=>'sha256:'+createHash('sha256').update(canonicalize(v)).digest('hex');
 const denied=():never=>{throw Error('device_signing_control_unavailable');};
 
@@ -28,8 +64,11 @@ export async function withDeviceSigningControl<T>(input:{config:{hqUrl:string;or
   const loopback=['127.0.0.1','[::1]','localhost'].includes(url.hostname);
   if((url.protocol!=='https:'&&!(loopback&&url.protocol==='http:'))||url.origin!==input.config.hqUrl
     ||[org,device].some(value=>typeof value!=='string'||value.length<1||value.length>256||/[\x00-\x1f\x7f]/.test(value)))return denied();
-  const timeout=input.timeoutMs??10000;
-  if(!Number.isSafeInteger(timeout)||timeout<1||timeout>10000)return denied();
+  // An explicit timeoutMs bounds the whole wait, in line and for the lock. Without one, a root waits in
+  // line for up to DEVICE_SIGNING_LINE_WAIT_MS and then for up to 10 s for the lock file.
+  const timeout=input.timeoutMs??DEVICE_SIGNING_LOCK_WAIT_MS;
+  if(!Number.isSafeInteger(timeout)||timeout<1||timeout>DEVICE_SIGNING_LOCK_WAIT_MS)return denied();
+  const started=Date.now();
   const user=userInfo(),userHash=hash({home:user.homedir,user:user.username}).slice(7);
   const namespace=hash({origin:url.origin,organizationId:org,deviceId:device,user:userHash});
   const fence=input.hostScope?new HostOperationFence(input.hostScope):undefined;
@@ -42,7 +81,11 @@ export async function withDeviceSigningControl<T>(input:{config:{hqUrl:string;or
   }
   const root=process.platform==='win32'?resolve(user.homedir,'AppData','Local','Temp'):'/tmp';
   const path=resolve(root,'dharma-signing-controls-'+userHash.slice(0,32),namespace.slice(7)+'.lock');
-  const release=await acquireEnrollmentAnchorLock(path,fence,timeout);
+  const explicit=input.timeoutMs!==undefined;
+  const leaveLine=await waitInLine(namespace,started+(explicit?timeout:DEVICE_SIGNING_LINE_WAIT_MS),fence);
+  let release:EnrollmentAnchorLockRelease;
+  try{release=await acquireEnrollmentAnchorLock(path,fence,explicit?Math.max(1,started+timeout-Date.now()):timeout);}
+  catch(error){leaveLine();throw error;}
   const controllerInstanceId=randomUUID(),owner:Owner={namespace,active:true,lease:undefined!};
   const processIdentityDigest=hash({schema:'dharma.signing-controller-process/v1',hostUser:userHash,
     pid:process.pid,processTimeOrigin:performance.timeOrigin,controllerInstanceId});
@@ -54,5 +97,5 @@ export async function withDeviceSigningControl<T>(input:{config:{hqUrl:string;or
     }});
   try{return await owners.run(owner,async()=>{
     await owner.lease.assertHeld();const result=await work(owner.lease);await owner.lease.assertHeld();return result;
-  });}finally{owner.active=false;await release();}
+  });}finally{owner.active=false;try{await release();}finally{leaveLine();}}
 }

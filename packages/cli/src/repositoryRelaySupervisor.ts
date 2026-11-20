@@ -150,6 +150,26 @@ export function repositoryRelayObservationReady(input: {
     && Number.isFinite(age) && age >= 0 && age <= 300_000;
 }
 
+// #511: sibling loops in this process wait in the signing-control line, but a holder in another process (a CLI
+// command or a native turn) can still outlast the 10 s lock wait. A stage retries that busy answer a few times
+// instead of ending the loop, which would reopen a device session and wait out the restart backoff.
+const SIGNING_CONTROL_BUSY_RETRIES = 3;
+const SIGNING_CONTROL_BUSY_RETRY_MS = 1_000;
+
+export async function retrySigningControlBusy<T>(operation: () => Promise<T>, input: { signal: AbortSignal;
+  wait?: (ms: number, signal: AbortSignal) => Promise<void> }): Promise<T> {
+  const wait = input.wait ?? waitForRelayRefresh;
+  for (let retries = 0; ; retries++) {
+    try { return await operation(); }
+    catch (error) {
+      if (retries >= SIGNING_CONTROL_BUSY_RETRIES || input.signal.aborted
+        || failureMessage(error) !== 'connection_anchor_busy') throw error;
+      await wait(SIGNING_CONTROL_BUSY_RETRY_MS, input.signal);
+      if (input.signal.aborted) throw error;
+    }
+  }
+}
+
 export function serializeRelayWork() {
   let tail = Promise.resolve();
   return <T>(operation: () => Promise<T>): Promise<T> => {
