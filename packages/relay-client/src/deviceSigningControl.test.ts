@@ -155,3 +155,41 @@ test('control: a lock left by a killed holder process is still recovered',async(
   await other.exited;
   assert.equal(await run(scope,async lease=>{await lease.assertHeld();return 'signed';}),'signed');
 });
+
+// Review round 1 on #511: a relay loop that is told to stop leaves the line at once. Relay loops have no host
+// scope, so their stop signal reaches the line through withDeviceSigningLineSignal.
+function lineSignal(){
+  const fn=(relay as unknown as Record<string,unknown>).withDeviceSigningLineSignal;
+  assert.equal(typeof fn,'function','withDeviceSigningLineSignal is exported');
+  return fn as <T>(signal:AbortSignal,work:()=>Promise<T>)=>Promise<T>;
+}
+
+test('a queued waiter whose relay loop stops leaves the line at once, never runs its work, and keeps the rest in order',async()=>{
+  const run=api(),inLoop=lineSignal(),scope=input(),held=gate(),released=gate(),loop=new AbortController();let ran=0;
+  const holder=run(scope,async()=>{held.open();await released.promise;});
+  await held.promise;
+  const stopped=inLoop(loop.signal,()=>run(scope,async()=>{ran++;})).then(()=>'admitted',(error:Error)=>error.name);
+  const behind=settle(run(scope,async()=>'admitted'));
+  await delay(20);const started=Date.now();loop.abort();
+  assert.equal(await stopped,'AbortError');
+  assert.ok(Date.now()-started<2_000);
+  released.open();await holder;
+  assert.equal(await behind,'admitted');
+  assert.equal(ran,0);
+});
+
+test('a waiter whose relay loop has already stopped does not join a busy line',async()=>{
+  const run=api(),inLoop=lineSignal(),scope=input(),held=gate(),released=gate(),loop=new AbortController();let ran=0;
+  const holder=run(scope,async()=>{held.open();await released.promise;});
+  await held.promise;loop.abort();
+  const started=Date.now();
+  assert.equal(await inLoop(loop.signal,()=>run(scope,async()=>{ran++;})).then(()=>'admitted',(error:Error)=>error.name),'AbortError');
+  assert.ok(Date.now()-started<2_000);
+  released.open();await holder;
+  assert.equal(ran,0);
+});
+
+test('control: a stopping loop with nobody ahead of it still signs, as before the line existed',async()=>{
+  const run=api(),inLoop=lineSignal(),scope=input(),loop=new AbortController();loop.abort();
+  assert.equal(await inLoop(loop.signal,()=>run(scope,async lease=>{await lease.assertHeld();return 'signed';})),'signed');
+});

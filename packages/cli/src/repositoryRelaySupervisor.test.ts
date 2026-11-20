@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays, selectRepositoryRelayRegistrations,
   serializeRelayWork, waitForRelayRefresh, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import * as supervisor from './repositoryRelaySupervisor.js';
+import { withDeviceSigningControl } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { workspaceIdForDevice } from './onboardingWorkspace.js';
 
 function deferred<T = void>() {
@@ -467,4 +469,31 @@ test('a stopping loop does not retry a busy signing control', async () => {
   await assert.rejects(retry(async () => { calls++; controller.abort(); throw Error('connection_anchor_busy'); },
     { signal: controller.signal, wait: async () => assert.fail('waited while stopping') }), { message: 'connection_anchor_busy' });
   assert.equal(calls, 1);
+});
+
+// Review round 1 on #511: stopping the relay reaches a loop that waits in the in-process signing line.
+test('a relay stop releases a loop queued behind a sibling signing hold before the hold ends, and it signs nothing', async () => {
+  const controller = new AbortController(), held = deferred(), released = deferred(), queued = deferred();
+  const config = { hqUrl: 'https://www.dharma-ai.io', organizationId: `org_fixture${Date.now()}`, deviceId: randomUUID() };
+  const outcome: Record<string, string> = {};
+  let signedByB = 0;
+  const stopped = runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a, b],
+    run: async row => {
+      if (row.workspaceId === 'a') {
+        await withDeviceSigningControl({ config }, async () => { held.resolve(); await released.promise; });
+        outcome.a = 'released';
+        return;
+      }
+      await held.promise;
+      const signing = withDeviceSigningControl({ config }, async () => { signedByB++; });
+      queued.resolve();
+      outcome.b = await signing.then(() => 'signed', (error: Error) => error.name);
+    },
+    wait: async (_ms, signal) => { await queued.promise; if (!signal.aborted) controller.abort(); } });
+  try {
+    const deadline = Date.now() + 2_000;
+    while (!outcome.b && Date.now() < deadline) await new Promise(accept => setTimeout(accept, 10));
+    assert.deepEqual(outcome, { b: 'AbortError' }, 'the queued loop settles while its sibling still holds signing control');
+  } finally { released.resolve(); await stopped; }
+  assert.deepEqual({ outcome, signedByB }, { outcome: { b: 'AbortError', a: 'released' }, signedByB: 0 });
 });
