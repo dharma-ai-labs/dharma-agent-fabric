@@ -23,12 +23,22 @@ const DEVICE_SIGNING_LINE_WAIT_MS=120_000;
 const DEVICE_SIGNING_LOCK_WAIT_MS=10_000;
 interface Line {tail:Promise<void>;waiting:number;}
 const lines=new Map<string,Line>();
+// A relay workspace loop has no host scope, so its stop signal reaches the line through this store. It only
+// lets a root leave the line: a root with nobody ahead of it, and the lock file itself, behave as before.
+const lineSignals=new AsyncLocalStorage<AbortSignal>();
+
+/** Runs work so that a root signing-control wait inside it leaves the line when signal aborts. */
+export function withDeviceSigningLineSignal<T>(signal:AbortSignal,work:()=>Promise<T>):Promise<T>{
+  return lineSignals.run(signal,work);
+}
 
 /** Resolves with this root's leave() once every root ahead of it has left. A root that gives up, at the
- * deadline or when its host scope is withdrawn, leaves at once, so the roots behind it keep their order. */
+ * deadline, when its host scope is withdrawn or when its relay loop stops, leaves at once, so the roots
+ * behind it keep their order. */
 async function waitInLine(namespace:string,deadline:number,fence:HostOperationFence|undefined):Promise<()=>void>{
   const line=lines.get(namespace)??{tail:Promise.resolve(),waiting:0};
   lines.set(namespace,line);
+  const stop=line.waiting>0?lineSignals.getStore():undefined;
   const ahead=line.tail;let open!:()=>void,left=false;
   const leaving=new Promise<void>(accept=>{open=accept;});
   line.tail=ahead.then(()=>leaving);
@@ -37,19 +47,23 @@ async function waitInLine(namespace:string,deadline:number,fence:HostOperationFe
     if(left)return;left=true;open();
     if(--line.waiting===0&&lines.get(namespace)===line)lines.delete(namespace);
   };
-  let timer:NodeJS.Timeout|undefined,onAbort:(()=>void)|undefined;
+  let timer:NodeJS.Timeout|undefined,onAbort:(()=>void)|undefined,onStop:(()=>void)|undefined;
   try{
-    const outcome=await new Promise<'turn'|'deadline'|'withdrawn'>(accept=>{
+    const outcome=await new Promise<'turn'|'deadline'|'withdrawn'|'stopped'>(accept=>{
       void ahead.then(()=>accept('turn'));
       timer=setTimeout(()=>accept('deadline'),Math.max(0,deadline-Date.now()));
       if(fence){onAbort=()=>accept('withdrawn');fence.signal.addEventListener('abort',onAbort,{once:true});
         if(fence.signal.aborted)accept('withdrawn');}
+      if(stop){onStop=()=>accept('stopped');stop.addEventListener('abort',onStop,{once:true});
+        if(stop.aborted)accept('stopped');}
     });
     if(outcome==='turn')return leave;
     if(outcome==='withdrawn')await fence!.assert();
+    if(outcome==='stopped')stop!.throwIfAborted();
     throw Error('connection_anchor_busy');
   }catch(error){leave();throw error;}
-  finally{clearTimeout(timer);if(onAbort)fence!.signal.removeEventListener('abort',onAbort);}
+  finally{clearTimeout(timer);if(onAbort)fence!.signal.removeEventListener('abort',onAbort);
+    if(onStop)stop!.removeEventListener('abort',onStop);}
 }
 const hash=(v:unknown)=>'sha256:'+createHash('sha256').update(canonicalize(v)).digest('hex');
 const denied=():never=>{throw Error('device_signing_control_unavailable');};

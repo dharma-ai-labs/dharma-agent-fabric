@@ -1,4 +1,5 @@
 import { isAbsolute, resolve, win32 } from 'node:path';
+import { withDeviceSigningLineSignal } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { selectDeviceWorkspace, type OnboardingWorkspaceRecord } from './onboardingWorkspace.js';
 import { RELAY_OPEN_FAILURE_CODES, relayOpenFailureCode } from './relayOpenFailure.js';
 import { relayRestartDelayMs } from './relaySupervisor.js';
@@ -260,7 +261,8 @@ export async function runRegisteredRepositoryRelays(input: {
         worker.flight = Promise.resolve().then(async () => {
           if (controller.signal.aborted || input.signal.aborted) return;
           try {
-            await input.run(row, controller.signal);
+            // A stopped or revoked loop leaves the in-process signing line at once instead of waiting its turn.
+            await withDeviceSigningLineSignal(controller.signal, () => input.run(row, controller.signal));
             if (!controller.signal.aborted) {
               worker.failed = true;
               observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',

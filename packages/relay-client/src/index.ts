@@ -24,7 +24,7 @@ import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRe
 import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 import {planSigningRecovery} from './signingRecoveryPlan.js';
 import {withDeviceSigningControl} from './deviceSigningControl.js';
-export {withDeviceSigningControl,type DeviceSigningControlLease} from './deviceSigningControl.js';
+export {withDeviceSigningControl,withDeviceSigningLineSignal,type DeviceSigningControlLease} from './deviceSigningControl.js';
 export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 export {progressPreparedDeviceSigningRecoveryOffer,SigningRecoveryOfferClientError,
   type ProgressPreparedDeviceSigningRecoveryOfferInput,type SigningRecoveryOfferClientPhase} from './signingRecoveryOfferClient.js';
