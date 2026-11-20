@@ -3428,6 +3428,48 @@ test('a task completion the server accepted survives a failed state write and re
   assert.deepEqual((await f.read()).recoveredTaskCompletions, [], 'an acknowledged receipt does not come back');
 });
 
+// Convergence review round 1 (third loop): a kept completion never pushes the stored list past what a reader accepts.
+test('a completion kept after a failed state write waits in memory while other clients have filled the stored list (shared protocol state)', async () => {
+  const hex = (seed: string) => `sha256:${createHash('sha256').update(seed).digest('hex')}`;
+  const taskA = randomUUID(), receiptA = hex('receipt-a');
+  let blockTask = '', saved = '';
+  const f = await sharedStateFixture('fabric-shared-completion-full-', async call => {
+    if (blockTask && call.path === `/agent-fabric/tasks/${blockTask}/events`) {
+      // The server accepts the completion; the client's state write after it then fails once.
+      blockTask = '';
+      saved = await readFile(f.statePath, 'utf8');
+      await rm(f.statePath, { force: true });
+      await mkdir(resolve(f.statePath, 'blocker'), { recursive: true });
+      return sharedOk({ receipt: { hash: receiptA } });
+    }
+    return sharedOk(call.path.endsWith('/events') ? { receipt: { hash: hex(call.path) } } : {});
+  });
+  const a = await f.open('relay:workspace-a');
+  await a.openSession();
+  const stored = Array.from({ length: 999 }, (_, index) => ({ taskId: randomUUID(), trajectoryCapsuleHash: hex(`c${index}`),
+    receiptHash: hex(`r${index}`), recoveredAt: new Date().toISOString() }));
+  await writeFile(f.statePath, JSON.stringify({ ...(await f.read()), recoveredTaskCompletions: stored }));
+  blockTask = taskA;
+  await assert.rejects(a.postTaskEvent(taskA, 'completed', { trajectoryCapsuleHash: hex('capsule-a') }));
+  await rm(f.statePath, { recursive: true, force: true });
+  await writeFile(f.statePath, saved);
+  const b = await f.open('relay:workspace-b');
+  await b.openSession();
+  await b.postTaskEvent(randomUUID(), 'completed', { trajectoryCapsuleHash: hex('capsule-b') });
+  assert.equal((await f.read()).recoveredTaskCompletions?.length, 1_000, 'the other client fills the stored list');
+  await a.pollTask();
+  const full = (await f.read()).recoveredTaskCompletions ?? [];
+  assert.equal(full.length, 1_000, 'the kept completion does not push the stored list past what a reader accepts');
+  assert.ok(!full.some(item => item.taskId === taskA));
+  await (await f.open()).openSession();
+  await b.pollTask();
+  await b.acknowledgeRecoveredTaskCompletion(stored[0]!.taskId, stored[0]!.receiptHash);
+  await a.pollTask();
+  const after = (await f.read()).recoveredTaskCompletions ?? [];
+  assert.equal(after.length, 1_000);
+  assert.ok(after.some(item => item.taskId === taskA), 'it reaches the file once there is room');
+});
+
 test('a client opened without an owner key sends due orphans only when it opens its session (shared protocol state)', async () => {
   const f = await sharedStateFixture('fabric-shared-orphan-one-shot-', () => sharedOk());
   const dead = await exitedPid();

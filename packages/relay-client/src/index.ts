@@ -111,6 +111,8 @@ interface ProtocolState {
 /** The most kept requests in one file. Entries without one fill only the room that is left. */
 const OUTBOX_ENTRIES_MAX = 256;
 const IDLE_OUTBOX_ENTRIES_MAX = 32;
+/** The most recovered task completions in one file. */
+const RECOVERED_TASK_COMPLETIONS_MAX = 1_000;
 /** An entry whose kept request stood unchanged this long is orphaned, and another client sends an orphaned request
  * that got no definite answer again only after this interval. */
 const ORPHAN_RETRY_INTERVAL_MS = 10 * 60_000;
@@ -200,7 +202,7 @@ function assertProtocolState(value: unknown): asserts value is ProtocolState {
       || Object.entries(outboxes as Record<string, unknown>)
         .some(([owner, entry]) => !OWNER_KEY_PATTERN.test(owner) || !isOutboxEntry(entry))))
     || (recovered !== undefined && (!Array.isArray(recovered)
-      || recovered.length > 1_000
+      || recovered.length > RECOVERED_TASK_COMPLETIONS_MAX
       || recovered.some((item) => !isRecoveredTaskCompletion(item))))) {
     throw new Error('Relay protocol state is invalid.');
   }
@@ -1654,8 +1656,9 @@ export class AgentFabricClient {
   }
 
   /** The file wins for every other client's entry and for the recovered completion queue, except for a completion this
-   * client recorded and no write has stored yet, which it keeps. This client's own entry is written only by this
-   * client, so it is never reloaded. */
+   * client recorded and no write has stored yet, which it keeps. Such a completion joins the queue only while the queue
+   * stays within what a reader accepts; otherwise it waits in memory for room. This client's own entry is written only
+   * by this client, so it is never reloaded. */
   async #reloadSharedState(): Promise<void> {
     let disk: ProtocolState | null = null;
     try {
@@ -1675,8 +1678,12 @@ export class AgentFabricClient {
     delete others[this.#ownerKey];
     this.#otherOutboxes = others;
     const stored = disk?.recoveredTaskCompletions ?? [];
-    this.#state.recoveredTaskCompletions = [...stored, ...[...this.#unwrittenCompletions.values()]
-      .filter(item => !stored.some(other => other.taskId === item.taskId))];
+    const merged = [...stored];
+    for (const item of this.#unwrittenCompletions.values()) {
+      if (merged.length >= RECOVERED_TASK_COMPLETIONS_MAX) break;
+      if (!stored.some(other => other.taskId === item.taskId)) merged.push(item);
+    }
+    this.#state.recoveredTaskCompletions = merged;
     // Another client sent this client's kept request after it stood unchanged (see orphanDue). The file then holds
     // its outcome: no kept request once it was answered, with the answer, or the request as last sent. When the
     // answer is not there (never kept, or removed after ORPHAN_RETRY_INTERVAL_MS), this client keeps its signed
@@ -1997,7 +2004,7 @@ export class AgentFabricClient {
       }
       return;
     }
-    if (current.length >= 1_000) throw new Error('Recovered task completion queue is full.');
+    if (current.length >= RECOVERED_TASK_COMPLETIONS_MAX) throw new Error('Recovered task completion queue is full.');
     const completion = { taskId, trajectoryCapsuleHash, receiptHash, recoveredAt: new Date().toISOString() };
     this.#state.recoveredTaskCompletions = [...current, completion];
     this.#unwrittenCompletions.set(taskId, completion);
@@ -2011,7 +2018,7 @@ export class AgentFabricClient {
     if (request.eventType !== 'completed') return;
     const taskId = decodeURIComponent(route[1]!);
     const current = this.#state.recoveredTaskCompletions || [];
-    if (!current.some((item) => item.taskId === taskId) && current.length >= 1_000) {
+    if (!current.some((item) => item.taskId === taskId) && current.length >= RECOVERED_TASK_COMPLETIONS_MAX) {
       throw new Error('Recovered task completion queue is full; acknowledge stored completions before sending another completion.');
     }
   }
@@ -2131,7 +2138,8 @@ export class AgentFabricClient {
       schema: 'dharma.protocol-state/v1', sessionId: copy?.sessionId ?? null, nextSequence: copy?.nextSequence ?? 1,
       pending: copy?.pending ?? null, recoveredTaskCompletions: this.#state.recoveredTaskCompletions ?? [], outboxes,
     } satisfies ProtocolState, this.#hostFence);
-    this.#unwrittenCompletions.clear();
+    // A kept completion that found no room in the queue stays for a later write.
+    for (const item of this.#state.recoveredTaskCompletions ?? []) this.#unwrittenCompletions.delete(item.taskId);
   }
 }
 
