@@ -179,13 +179,19 @@ that still runs is removed after another client answered its request, the
 owner no longer knows which sequences that client signed in its session. It
 then treats the request as settled and signs nothing more in that session: its
 next call fails with `Relay session is not open.` until it opens a new session.
+It does the same when an earlier version rewrote the file while its request was
+the copy at the top level, which that version sends. When its entry is gone
+otherwise (the file was removed, or an earlier version rewrote it while another
+request was the copy), nobody sent its request: the owner keeps it and sends it
+again with the same message id.
 
 The file holds at most 1,000 recovered task completions. A new completion is
 refused while that list is full, but a kept completion is still sent again,
 since the server may already have accepted it. A completion the server accepted
 is never dropped: when the list has no room for it, its receipt waits in its
 client's entry, which stays like an entry with a kept request, and the next
-write by any client that finds room moves it to the list.
+write by any client that finds room moves it to the list. Acknowledging a
+completion removes its receipt from the list and from any entry it waits in.
 
 The file holds at most 256 kept requests. A client without a kept request
 still opens its session in a full file; that session open is not kept in the

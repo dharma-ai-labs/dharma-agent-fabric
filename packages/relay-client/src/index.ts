@@ -244,6 +244,12 @@ function outboxesOf(state: ProtocolState): Record<string, OutboxEntry> {
   return outboxes;
 }
 
+/** Whether an owner's kept request is the file's top-level copy, the one an earlier version sends (see #persist). */
+function isTopCopy(state: ProtocolState, own: OutboxEntry | undefined): boolean {
+  const id = own?.pending?.headers['x-dharma-message-id'];
+  return !!id && state.pending?.headers['x-dharma-message-id'] === id;
+}
+
 /** Whether the process that wrote an outbox entry still runs. A migrated entry has no owner process. */
 function ownerProcessAlive(pid: number): boolean {
   if (pid === process.pid) return true;
@@ -1360,6 +1366,9 @@ export class AgentFabricClient {
   #keptCompletions: RecoveredTaskCompletion[] = [];
   /** Whether this client's kept request is in its own entry in the file, as of the last read or write. */
   #keptOnDisk: boolean;
+  /** Whether this client's kept request is also the file's top-level copy (see #persist), as of the last read or write
+   * that found its entry. */
+  #topCopy: boolean;
   /** Opened with an owner key, as a workspace loop is: it also sends due orphans after its own requests. */
   readonly #longLived: boolean;
   #serial: Promise<unknown> = Promise.resolve();
@@ -1367,7 +1376,7 @@ export class AgentFabricClient {
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
     state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean; isolatedSession?: boolean;
-    ownerKey: string; longLived: boolean; otherOutboxes: Record<string, OutboxEntry>; keptOnDisk: boolean;
+    ownerKey: string; longLived: boolean; otherOutboxes: Record<string, OutboxEntry>; keptOnDisk: boolean; topCopy: boolean;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -1385,6 +1394,7 @@ export class AgentFabricClient {
     this.#longLived = input.longLived;
     this.#otherOutboxes = input.otherOutboxes;
     this.#keptOnDisk = input.keptOnDisk;
+    this.#topCopy = input.topCopy;
   }
 
   #binding() {
@@ -1443,7 +1453,7 @@ export class AgentFabricClient {
       recoveredTaskCompletions: [],
     };
     let otherOutboxes: Record<string, OutboxEntry> = {};
-    let keptOnDisk = false;
+    let keptOnDisk = false, topCopy = false;
     if (!readOnly && !isolatedSession) try {
       const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
       const parsed = JSON.parse(bytes) as unknown;
@@ -1451,6 +1461,7 @@ export class AgentFabricClient {
       const {[ownerKey]: own, ...others} = outboxesOf(parsed);
       otherOutboxes = others;
       keptOnDisk = !!own?.pending;
+      topCopy = isTopCopy(parsed, own);
       state = {
         schema: 'dharma.protocol-state/v1', sessionId: own?.sessionId ?? null, nextSequence: own?.nextSequence ?? 1,
         pending: own?.pending ?? null, recoveredTaskCompletions: parsed.recoveredTaskCompletions ?? [],
@@ -1466,7 +1477,7 @@ export class AgentFabricClient {
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
       statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession, ownerKey,
-      longLived: input.ownerKey !== undefined, otherOutboxes, keptOnDisk,
+      longLived: input.ownerKey !== undefined, otherOutboxes, keptOnDisk, topCopy,
     });
   }
 
@@ -1546,12 +1557,24 @@ export class AgentFabricClient {
   }
   acknowledgeRecoveredTaskCompletion(taskId: string, receiptHash: string): Promise<void> {
     const acknowledge = async () => {
+      // A receipt can wait outside the stored list: in this client's memory or entry, or in another client's entry,
+      // until there is room. It is removed wherever it waits, so no later read moves it back to the list.
       const current = this.#state.recoveredTaskCompletions || [];
-      const matching = current.find((item) => item.taskId === taskId);
-      if (!matching) return;
-      if (matching.receiptHash !== receiptHash) throw new Error('Recovered task completion receipt does not match.');
-      this.#state.recoveredTaskCompletions = current.filter((item) => item.taskId !== taskId);
+      const entries = Object.values(this.#otherOutboxes);
+      const matching = [...current, ...this.#keptCompletions, ...this.#unwrittenCompletions.values(),
+        ...entries.flatMap(entry => entry.keptCompletions ?? [])].filter(item => item.taskId === taskId);
+      if (!matching.length) return;
+      if (matching.some(item => item.receiptHash !== receiptHash)) {
+        throw new Error('Recovered task completion receipt does not match.');
+      }
+      const other = (item: RecoveredTaskCompletion) => item.taskId !== taskId;
+      this.#state.recoveredTaskCompletions = current.filter(other);
+      this.#keptCompletions = this.#keptCompletions.filter(other);
       this.#unwrittenCompletions.delete(taskId);
+      for (const entry of entries) {
+        const waiting = entry.keptCompletions?.filter(other);
+        if (waiting?.length) entry.keptCompletions = waiting; else delete entry.keptCompletions;
+      }
       await this.#persist();
     };
     if (this.#durable) {
@@ -1706,14 +1729,20 @@ export class AgentFabricClient {
       if (waiting?.length) entry.keptCompletions = waiting; else delete entry.keptCompletions;
     }
     this.#state.recoveredTaskCompletions = merged;
-    // This client's kept request left the file, although no write drops one: another client sent it and got a definite
-    // answer, and the entry was removed before this client read it again (by the idle cap, or the file was replaced).
-    // The sequences that client signed in this session are then unknown, so this session signs nothing more: the
-    // request is settled, and the next call needs a new session.
+    if (own) this.#topCopy = isTopCopy(disk!, own);
+    // This client's kept request left the file. A writer of this version (the file still has outboxes) drops an entry
+    // only after another client sent its request and got a definite answer, and the idle cap then removed it; an
+    // earlier version sends the top-level copy, and may re-sign it, before it writes a file without outboxes. Either
+    // way the sequences signed in this session are unknown, so this session signs nothing more: the request is
+    // settled, and the next call needs a new session. Otherwise (the file was removed, or an earlier version rewrote
+    // it while another request was the top-level copy) nobody sent it: this client keeps it and sends it again with
+    // the same message id, and its next write puts it back in the file.
     if (this.#state.pending && this.#keptOnDisk && !own) {
-      this.#state.pending = null;
-      this.#state.sessionId = null;
-      this.#adoptedOutcome = null;
+      if (disk && (disk.outboxes !== undefined || this.#topCopy)) {
+        this.#state.pending = null;
+        this.#state.sessionId = null;
+        this.#adoptedOutcome = null;
+      } else this.#keptOnDisk = false;
     }
     // Another client sent this client's kept request after it stood unchanged (see orphanDue). The file then holds
     // its outcome: no kept request once it was answered, with the answer, or the request as last sent. When the
@@ -2174,6 +2203,7 @@ export class AgentFabricClient {
     this.#unwrittenCompletions.clear();
     this.#keptCompletions = waiting;
     this.#keptOnDisk = !!outboxes[this.#ownerKey]?.pending;
+    this.#topCopy = !!copy && copy === outboxes[this.#ownerKey];
   }
 }
 
