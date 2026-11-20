@@ -95,6 +95,32 @@ ordinary authentication/audit record. Report that effect separately from source,
 plan and credential mutations. Unavailable or inconsistent protected identity
 fails closed instead of enrolling or generating a replacement key.
 
+## How long one signed relay request holds device signing control
+
+Every signed request is signed, written to the local outbox, sent and
+acknowledged while the device signing control for its origin, organization,
+device and OS user is held. No other process on the device signs, sends or
+writes protocol state during that time, so the same signed request is never
+in flight twice.
+
+- **Connect phase: at most 30 s** (`RELAY_CONNECT_TIMEOUT_MS`). A relay
+  connection that does not open in time fails with the code
+  `relay_connect_timeout`. Nothing was sent, so the signed request stays in the
+  outbox and the next attempt is its first send.
+- **After the request is sent: up to 90 s from the start**
+  (`RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS`). The gateway normally answers within
+  about 35 s. If no answer arrives, the call fails with `relay_response_timeout`
+  and the outcome is unknown, so the exact signed request is kept and sent again
+  later. This window is not shortened: a shorter wait would resend requests that
+  already succeeded.
+
+Another process that needs signing control on the same device waits up to 10 s
+and then fails with `connection_anchor_busy`. That error is raised before the
+lock is held and before anything is signed, so retrying the call is safe. The
+repository relay loop retries its session open on this error and restarts the
+loop after a failure at a later stage; ad hoc callers should retry the call.
+Callers in the same process wait in line for up to 120 s instead.
+
 - [Bidirectional protocol](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/05-bidirectional-protocol.md)
 - [Security boundary](https://github.com/dharma-ai-labs/dharma-agent-fabric/blob/main/docs/10-security-privacy-and-threat-model.md)
 - [Source](https://github.com/dharma-ai-labs/dharma-agent-fabric/tree/main/packages/relay-client)
