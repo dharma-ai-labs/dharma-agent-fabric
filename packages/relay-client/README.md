@@ -183,9 +183,10 @@ then sends its kept request again only exactly as signed, with the same message
 id, sequence and idempotency key. It drops unsent a request that could be sent
 only at a new sequence or never replayed (an action acknowledgement past its
 time window, or a content-bearing request). It signs nothing new in that
-session: once the request has an answer or is dropped, the session is closed,
-and a call that is not the kept request fails with `Relay session is not open.`
-until the owner opens a new session.
+session: once the request has an answer or is dropped, the session is closed.
+The call that sent it gets the answer only when it is the same call as the
+kept request; otherwise, and for every later call until the owner opens a new
+session, it fails with `Relay session is not open.`
 
 The file holds at most 1,000 recovered task completions. A new completion is
 refused while that list is full, but a kept completion is still sent again,
