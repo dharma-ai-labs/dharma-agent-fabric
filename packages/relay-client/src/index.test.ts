@@ -3618,3 +3618,103 @@ test('a client opened without an owner key sends due orphans only when it opens 
   await loop.openSession();
   assert.deepEqual(orphans.map(entry => sentTimes(f.calls, orphanMessageId(entry))), [1, 1], 'the next session open sends the other');
 });
+
+// Owner review round 2: an owner whose kept request left the file without being sent sends it again, and an
+// acknowledgement removes a receipt wherever it still waits.
+async function sharedLostEntryFixture(prefix: string) {
+  const down = new Set<string>();
+  const f = await sharedStateFixture(prefix, call => {
+    const task = call.path.match(/^\/agent-fabric\/tasks\/([^/]+)\/events$/)?.[1];
+    if (task && down.has(task)) return sharedUnavailable();
+    return sharedOk(task ? { receipt: { hash: `sha256:${createHash('sha256').update(task).digest('hex')}` } } : {});
+  });
+  return { ...f, down };
+}
+
+test('an owner whose kept request left the file because the file was removed sends it again with its message id (shared protocol state)', async () => {
+  const f = await sharedLostEntryFixture('fabric-shared-lost-entry-removed-');
+  const taskId = randomUUID(), body = { trajectoryCapsuleHash: `sha256:${'a'.repeat(64)}` };
+  const a = await f.open('relay:workspace-a');
+  await a.openSession();
+  f.down.add(taskId);
+  await assert.rejects(a.postTaskEvent(taskId, 'completed', body),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  f.down.clear();
+  await rm(f.statePath, { force: true });
+  await a.postTaskEvent(taskId, 'completed', body);
+  const sent = f.calls.filter(call => call.messageId === kept.messageId);
+  assert.equal(sent.length, 2, 'the owner sends its kept completion again');
+  assert.deepEqual(sent.map(call => call.idempotencyKey), [kept.messageId, kept.messageId]);
+  assert.deepEqual((await f.read()).recoveredTaskCompletions?.map(item => item.taskId), [taskId]);
+});
+
+test('an owner whose kept request left the file in a rewrite without outboxes sends it again when another request was the top-level copy (shared protocol state)', async () => {
+  const f = await sharedLostEntryFixture('fabric-shared-lost-entry-rewritten-');
+  const older = randomUUID(), taskId = randomUUID(), body = { trajectoryCapsuleHash: `sha256:${'a'.repeat(64)}` };
+  const b = await f.open('relay:workspace-b'), a = await f.open('relay:workspace-a');
+  await b.openSession();
+  await a.openSession();
+  f.down.add(older).add(taskId);
+  await assert.rejects(b.postTaskEvent(older, 'completed', body));
+  const copied = f.calls.at(-1)!;
+  await sharedDelay(5);
+  await assert.rejects(a.postTaskEvent(taskId, 'completed', body),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  f.down.clear();
+  const state = await f.read();
+  assert.equal(state.pending?.headers['x-dharma-message-id'], copied.messageId, 'the older kept request is the top-level copy');
+  // A session open of the earlier version replays only the top-level copy, then writes a file without outboxes.
+  await writeFile(f.statePath, JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null,
+    recoveredTaskCompletions: state.recoveredTaskCompletions ?? [] }));
+  await a.postTaskEvent(taskId, 'completed', body);
+  const sent = f.calls.filter(call => call.messageId === kept.messageId);
+  assert.equal(sent.length, 2, 'the owner sends its kept completion again');
+  assert.deepEqual(sent.map(call => call.idempotencyKey), [kept.messageId, kept.messageId]);
+  assert.ok((await f.read()).recoveredTaskCompletions?.some(item => item.taskId === taskId));
+});
+
+test('acknowledging a listed receipt that the file still keeps in another client\'s entry removes it there, so it never comes back (shared protocol state)', async () => {
+  const f = await sharedLostEntryFixture('fabric-shared-ack-kept-');
+  const hex = (seed: string) => `sha256:${createHash('sha256').update(seed).digest('hex')}`;
+  const body = (seed: string) => ({ trajectoryCapsuleHash: hex(seed) });
+  const a = await f.open('relay:a'), c = await f.open('relay:c'), b = await f.open('relay:b'), d = await f.open('relay:d');
+  for (const client of [a, b, c, d]) await client.openSession();
+  const stored = Array.from({ length: 999 }, (_, index) => ({ taskId: randomUUID(), trajectoryCapsuleHash: hex(`c${index}`),
+    receiptHash: hex(`r${index}`), recoveredAt: new Date().toISOString() }));
+  await writeFile(f.statePath, JSON.stringify({ ...(await f.read()), recoveredTaskCompletions: stored }));
+  const x = randomUUID(), w = randomUUID();
+  f.down.add(x).add(w);
+  await assert.rejects(a.postTaskEvent(x, 'completed', body('x')));
+  await assert.rejects(c.postTaskEvent(w, 'completed', body('w')));
+  f.down.clear();
+  await b.postTaskEvent(randomUUID(), 'completed', body('y'));
+  assert.equal((await f.read()).recoveredTaskCompletions?.length, 1_000, 'the stored list is full');
+  // Both are accepted now and wait in their owners' entries.
+  await a.openSession();
+  await c.openSession();
+  const keptIn = async (taskId: string) => Object.values((await f.read()).outboxes ?? {})
+    .some(entry => (entry as { keptCompletions?: Array<{ taskId: string }> }).keptCompletions?.some(item => item.taskId === taskId));
+  assert.ok(await keptIn(x) && await keptIn(w));
+  // One slot frees; then a section that reads the file and writes nothing lists one of the waiting receipts.
+  await b.acknowledgeRecoveredTaskCompletion(stored[0]!.taskId, stored[0]!.receiptHash);
+  await d.acknowledgeRecoveredTaskCompletion(stored[0]!.taskId, stored[0]!.receiptHash);
+  const seen = d.listRecoveredTaskCompletions().filter(item => item.taskId === x || item.taskId === w);
+  assert.equal(seen.length, 1);
+  const listed = seen[0]!;
+  // The other owner writes: its own waiting receipt takes the free slot, so the one d listed waits again.
+  await (listed.taskId === x ? c : a).pollTask();
+  assert.ok(!((await f.read()).recoveredTaskCompletions ?? []).some(item => item.taskId === listed.taskId));
+  await assert.rejects(d.acknowledgeRecoveredTaskCompletion(listed.taskId, hex('another receipt')),
+    /Recovered task completion receipt does not match/);
+  await d.acknowledgeRecoveredTaskCompletion(listed.taskId, listed.receiptHash);
+  assert.equal(await keptIn(listed.taskId), false, 'the acknowledgement removes the receipt from the entry that keeps it');
+  // Room frees again; no reader moves the acknowledged receipt back to the list.
+  await b.acknowledgeRecoveredTaskCompletion(stored[1]!.taskId, stored[1]!.receiptHash);
+  await b.pollTask();
+  const fresh = await f.open('relay:e');
+  await fresh.openSession();
+  assert.ok(!((await f.read()).recoveredTaskCompletions ?? []).some(item => item.taskId === listed.taskId),
+    'the acknowledged receipt never comes back');
+});
