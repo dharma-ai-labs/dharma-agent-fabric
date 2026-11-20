@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { createHash, createPublicKey, generateKeyPairSync, verify, type JsonWebKey } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { createHash, createPublicKey, generateKeyPairSync, randomUUID, verify, type JsonWebKey } from 'node:crypto';
 import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -28,6 +29,7 @@ import {
   saveOrganizationApiToken,
   deviceKeysetTelemetry,
   withDeviceSigningControl,
+  withDeviceSigningLineSignal,
 } from './index.js';
 import * as relayClientModule from './index.js';
 import {
@@ -2221,4 +2223,235 @@ test('device keyset telemetry reports a keyset-less device as null and rejects m
   }
   assert.throws(() => deviceKeysetTelemetry(legacy, { relayAutostartEnabled: 'yes' as unknown as boolean }),
     /device_keyset_telemetry_invalid/);
+});
+
+// One relay process runs a durable client per workspace loop, and ad hoc commands open their own, all on the same
+// protocol-state file. Every read-modify-write of that file happens under device signing control and starts from the
+// file, so one client's write never drops another client's kept request or recovered task completion, and a client
+// never sends a request again from a stale copy of the file.
+type SharedStateCall = { path: string; body: string; messageId: string; sessionId: string; sequence: number };
+type SharedProtocolState = { sessionId: string | null; nextSequence: number;
+  pending: { headers: Record<string, string> } | null; recoveredTaskCompletions?: Array<{ taskId: string }> };
+const sharedOk = (body: Record<string, unknown> = {}) => new Response(JSON.stringify({ ok: true, ...body }), { status: 201 });
+const sharedUnavailable = () => new Response(JSON.stringify({
+  ok: false, error: { code: 'upstream_unavailable', message: 'Try again.' } }), { status: 503 });
+const sharedGate = () => { let open!: () => void; const promise = new Promise<void>(accept => { open = accept; }); return { promise, open }; };
+const sharedDelay = (ms: number) => new Promise(accept => setTimeout(accept, ms));
+
+async function sharedStateFixture(prefix: string, respond: (call: SharedStateCall) => Response | Promise<Response>) {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), prefix));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
+  const config = {
+    schema: 'dharma.device-config/v1' as const, hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: randomUUID(), deviceName: 'Test', platform: 'linux' as const,
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  };
+  await saveDeviceConfig(configPath, config);
+  await anchorConfig(configPath, store);
+  const calls: SharedStateCall[] = [];
+  const inFlight = new Set<string>();
+  let overlapping = 0;
+  const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    const call: SharedStateCall = {
+      path: new URL(String(url)).pathname.replace('/api/v1/orgs/org_a', ''), body: String(init?.body ?? ''),
+      messageId: headers.get('x-dharma-message-id')!, sessionId: headers.get('x-dharma-session-id')!,
+      sequence: Number(headers.get('x-dharma-sequence')),
+    };
+    calls.push(call);
+    if (inFlight.has(call.messageId)) overlapping += 1;
+    inFlight.add(call.messageId);
+    try { return await respond(call); } finally { inFlight.delete(call.messageId); }
+  };
+  return {
+    config, statePath, calls, overlapping: () => overlapping,
+    open: () => AgentFabricClient.open({ configPath, statePath, store, fetcher }),
+    read: async () => JSON.parse(await readFile(statePath, 'utf8')) as SharedProtocolState,
+  };
+}
+
+// The child holds the same device signing control from another process, through the real lock file.
+function sharedChildHolder(config: { hqUrl: string; organizationId: string; deviceId: string }) {
+  const module = new URL('./index.js', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `import {withDeviceSigningControl} from ${JSON.stringify(module)};
+await withDeviceSigningControl({config:JSON.parse(process.argv[1])},async()=>{process.stdout.write('held;');
+await new Promise(accept=>process.stdin.once('data',accept));});process.stdout.write('released;');`,
+  JSON.stringify({ hqUrl: config.hqUrl, organizationId: config.organizationId, deviceId: config.deviceId })],
+  { stdio: ['pipe', 'pipe', 'inherit'] });
+  let output = ''; const waiters: Array<() => void> = [];
+  child.stdout.on('data', chunk => { output += chunk; for (const wake of waiters.splice(0)) wake(); });
+  const saw = async (text: string) => { while (!output.includes(text)) await new Promise<void>(wake => waiters.push(wake)); };
+  const exited = new Promise<number | null>(accept => child.once('exit', code => accept(code)));
+  return { child, saw, exited };
+}
+
+test('a task completion recorded by one client survives a later write by another client (shared protocol state)', async () => {
+  const taskId = randomUUID(), trajectoryCapsuleHash = `sha256:${'a'.repeat(64)}`, receiptHash = `sha256:${'b'.repeat(64)}`;
+  const f = await sharedStateFixture('fabric-shared-completion-', call =>
+    sharedOk(call.path.endsWith('/events') ? { receipt: { hash: receiptHash } } : {}));
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  await b.openSession();
+  await a.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash });
+  await b.pollTask();
+  assert.deepEqual((await f.read()).recoveredTaskCompletions?.map(item => item.taskId), [taskId],
+    'a write by another client keeps the recorded completion');
+  await b.acknowledgeRecoveredTaskCompletion(taskId, receiptHash);
+  assert.deepEqual((await f.read()).recoveredTaskCompletions, [], 'any client on the device can acknowledge it');
+});
+
+test('opening a session never overwrites a request another client has in flight (shared protocol state)', async () => {
+  const gate = sharedGate(), entered = sharedGate();
+  let block = false;
+  const f = await sharedStateFixture('fabric-shared-inflight-', async call => {
+    if (block && call.path === '/agent-fabric/workspaces') { block = false; entered.open(); await gate.promise; }
+    return sharedOk();
+  });
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  block = true;
+  const registering = a.registerWorkspace({ workspaceId: 'a' });
+  await entered.promise;
+  const inFlight = f.calls.at(-1)!.messageId;
+  const opening = b.openSession();
+  await sharedDelay(300);
+  assert.equal((await f.read()).pending?.headers['x-dharma-message-id'], inFlight, 'the in-flight request stays in the file');
+  assert.equal(f.calls.filter(call => call.path === '/agent-fabric/sessions').length, 1, 'the second session open waits');
+  gate.open();
+  await registering;
+  await opening;
+  assert.deepEqual(f.calls.map(call => call.path), ['/agent-fabric/sessions', '/agent-fabric/workspaces', '/agent-fabric/sessions']);
+  assert.equal((await f.read()).pending, null);
+});
+
+test('a request another client already delivered is never sent again from a stale snapshot (shared protocol state)', async () => {
+  const delivered = new Set<string>(), gate = sharedGate(), entered = sharedGate();
+  let mode: 'fail' | 'block' | 'ok' = 'ok';
+  const f = await sharedStateFixture('fabric-shared-replay-', async call => {
+    if (call.path === '/agent-fabric/workspaces' && mode === 'fail') { mode = 'ok'; return sharedUnavailable(); }
+    if (call.path === '/agent-fabric/workspaces' && mode === 'block') { mode = 'ok'; entered.open(); await gate.promise; }
+    if (delivered.has(call.messageId)) {
+      return new Response(JSON.stringify({ ok: false, error: { code: 'message_replayed', message: 'Already accepted.' } }), { status: 409 });
+    }
+    delivered.add(call.messageId);
+    return sharedOk();
+  });
+  const a = await f.open();
+  await a.openSession();
+  mode = 'fail';
+  await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = (await f.read()).pending!.headers['x-dharma-message-id']!;
+  const b = await f.open();
+  mode = 'block';
+  const retry = a.registerWorkspace({ workspaceId: 'a' });
+  await entered.promise;
+  const opening = b.openSession();
+  await sharedDelay(100);
+  gate.open();
+  await retry;
+  await opening;
+  assert.equal(f.calls.filter(call => call.messageId === kept).length, 2,
+    'the kept request is sent by its first attempt and by its one retry, never again from a stale snapshot');
+  assert.equal(f.overlapping(), 0, 'one message id is never in flight twice at once');
+});
+
+test('a kept request is drained once by another client, which never takes its response or its sequence (shared protocol state)', async () => {
+  let unavailable = 0;
+  const f = await sharedStateFixture('fabric-shared-drain-', call => {
+    if (unavailable > 0) { unavailable -= 1; return sharedUnavailable(); }
+    return sharedOk({ observed: call });
+  });
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  await b.openSession();
+  const sessionA = f.calls[0]!.sessionId, sessionB = f.calls[1]!.sessionId;
+  unavailable = 1;
+  await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+  const keptA = f.calls.at(-1)!;
+  await b.signedPost('/agent-fabric/skills/poll', { workspaceId: 'b', provider: 'codex' });
+  assert.equal(f.calls.filter(call => call.messageId === keptA.messageId).length, 2, 'the other client drains the kept request once');
+  assert.equal(f.calls.at(-1)!.sessionId, sessionB);
+  assert.equal(f.calls.at(-1)!.path, '/agent-fabric/skills/poll');
+  unavailable = 1;
+  await assert.rejects(b.pollTask(), error => error instanceof AgentFabricRequestError && error.status === 503);
+  const keptB = f.calls.at(-1)!;
+  const polled = await a.pollTask();
+  const own = f.calls.at(-1)!;
+  assert.equal(f.calls.at(-2)!.messageId, keptB.messageId, 'the identical kept poll of the other client is drained first');
+  assert.equal(own.sessionId, sessionA);
+  assert.notEqual(own.messageId, keptB.messageId);
+  assert.ok(own.sequence > keptA.sequence, 'a client never reuses the sequence of its request another client delivered');
+  assert.deepEqual(polled.observed, own, 'a client gets the response to its own request, not to an identical one of another client');
+  assert.equal((await f.read()).pending, null);
+});
+
+test('protocol state is not written while another process holds device signing control (shared protocol state)', async () => {
+  const taskId = randomUUID(), receiptHash = `sha256:${'b'.repeat(64)}`;
+  const f = await sharedStateFixture('fabric-shared-cross-process-', () => sharedOk());
+  await writeFile(f.statePath, JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+    recoveredTaskCompletions: [{ taskId, trajectoryCapsuleHash: `sha256:${'a'.repeat(64)}`, receiptHash,
+      recoveredAt: new Date().toISOString() }] }));
+  const client = await f.open();
+  const before = await readFile(f.statePath, 'utf8');
+  const other = sharedChildHolder(f.config);
+  try {
+    await other.saw('held');
+    const opening = client.openSession();
+    const acknowledging = client.acknowledgeRecoveredTaskCompletion(taskId, receiptHash);
+    await sharedDelay(500);
+    assert.equal(await readFile(f.statePath, 'utf8'), before, 'nothing is written while the other process holds control');
+    assert.equal(f.calls.length, 0);
+    other.child.stdin!.end('go');
+    await other.saw('released');
+    await opening;
+    await acknowledging;
+    const after = await f.read();
+    assert.deepEqual(after.recoveredTaskCompletions, []);
+    assert.notEqual(after.sessionId, null);
+    assert.equal(await other.exited, 0);
+  } finally { other.child.kill(); }
+});
+
+test('opening a session drains a kept request inside its own signing-control section (shared protocol state)', async () => {
+  let unavailable = 0;
+  const f = await sharedStateFixture('fabric-shared-reentrant-', () => {
+    if (unavailable > 0) { unavailable -= 1; return sharedUnavailable(); }
+    return sharedOk();
+  });
+  const client = await f.open();
+  await client.openSession();
+  unavailable = 1;
+  await assert.rejects(client.registerWorkspace({ workspaceId: 'w' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  await client.openSession();
+  assert.deepEqual(f.calls.slice(-2).map(call => call.path), ['/agent-fabric/workspaces', '/agent-fabric/sessions']);
+  assert.equal(f.calls.at(-2)!.messageId, kept.messageId);
+  assert.equal((await f.read()).pending, null);
+});
+
+test('a session open queued behind a holder leaves the line when its relay loop stops and writes nothing (shared protocol state)', async () => {
+  const f = await sharedStateFixture('fabric-shared-stop-', () => sharedOk());
+  const client = await f.open();
+  const held = sharedGate(), released = sharedGate(), loop = new AbortController();
+  const holder = withDeviceSigningControl({ config: f.config }, async () => { held.open(); await released.promise; });
+  await held.promise;
+  const stopped = withDeviceSigningLineSignal(loop.signal, () => client.openSession())
+    .then(() => 'opened', (error: Error) => error.name);
+  await sharedDelay(50);
+  loop.abort();
+  assert.equal(await stopped, 'AbortError');
+  released.open();
+  await holder;
+  await assert.rejects(stat(f.statePath), { code: 'ENOENT' }, 'a stopped session open writes no protocol state');
+  assert.equal(f.calls.length, 0);
+});
+
+test('the README says every protocol-state write takes device signing control (shared protocol state)', async () => {
+  const readme = (await readFile(new URL('../README.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  assert.equal(/without taking signing control/.test(readme), false, 'no protocol-state write skips signing control');
+  assert.equal(/protocol state [^.]*under the device signing control/i.test(readme), true,
+    'the README says protocol-state writes take device signing control');
 });
