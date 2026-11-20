@@ -1126,14 +1126,14 @@ test('signed outbox retries the exact message after an unknown network outcome',
     if (failAfterAccept) { failAfterAccept = false; throw new Error('socket closed after upstream accepted'); }
     return new Response(JSON.stringify({ ok: true, session: { id: headers.get('x-dharma-session-id') } }), { status: 201 });
   };
-  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  const client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await client.openSession();
   failAfterAccept = true;
   await assert.rejects(client.registerWorkspace({ workspaceId: 'workspace', name: 'Work' }), /socket closed/);
   const state = JSON.parse(await readFile(statePath, 'utf8'));
-  state.pending.headers['x-dharma-timestamp'] = '2026-01-01T00:00:00.000Z';
+  state.outboxes['relay:restart'].pending.headers['x-dharma-timestamp'] = '2026-01-01T00:00:00.000Z';
   await writeFile(statePath, JSON.stringify(state));
-  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  const resumed = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await resumed.registerWorkspace({ name: 'Work', workspaceId: 'workspace' });
   assert.equal(messageIds.at(-2), messageIds.at(-1));
   assert.equal(idempotencyKeys.at(-2), messageIds.at(-2));
@@ -1171,13 +1171,13 @@ for (const scenario of [
       if (failures > 0) { failures -= 1; throw new Error('unknown delivery outcome'); }
       return new Response(JSON.stringify({ ok: true, organizationId: 'org_a', rollout: null, observed: call }), { status: 200 });
     };
-    let client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+    let client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
     await client.openSession();
     const send = (method: string, route: string, body: unknown) => method === 'GET' ? client.signedGet(route) : client.signedPost(route, body);
     failures = 1;
     await assert.rejects(send(scenario.oldMethod, scenario.oldRoute, scenario.oldBody), /unknown delivery/);
     const original = calls.at(-1)!;
-    client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+    client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
     const pendingBytes = await readFile(statePath, 'utf8');
     const count = calls.length;
     const invalid: Record<string, unknown> = {};
@@ -1188,7 +1188,8 @@ for (const scenario of [
     failures = 1;
     await assert.rejects(send(scenario.method, scenario.route, scenario.body), /unknown delivery/);
     assert.equal(calls.at(-1)?.messageId, original.messageId);
-    assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending.pathname, `/api/v1/orgs/org_a${scenario.oldRoute}`);
+    assert.equal(JSON.parse(await readFile(statePath, 'utf8')).outboxes['relay:restart'].pending.pathname,
+      `/api/v1/orgs/org_a${scenario.oldRoute}`);
     const [current, next] = await Promise.all([
       send(scenario.method, scenario.route, scenario.body),
       client.signedGet('/control-agent/sessions?sessionId=third'),
@@ -1203,7 +1204,7 @@ for (const scenario of [
     assert.deepEqual(current.observed, dispatched);
     assert.deepEqual(next.observed, calls.at(-1));
     assert.equal(calls.at(-1)?.route, '/control-agent/sessions?sessionId=third');
-    assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
+    assert.equal(JSON.parse(await readFile(statePath, 'utf8')).outboxes['relay:restart'].pending, null);
   });
 }
 
@@ -1393,16 +1394,16 @@ test('a malformed successful task acknowledgement remains pending until a durabl
     }
     return new Response(JSON.stringify({ ok: true }), { status: 201 });
   };
-  const client = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  const client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await client.openSession();
   await assert.rejects(
     client.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash }),
     /missing a valid durable receipt/,
   );
   const pending = JSON.parse(await readFile(statePath, 'utf8'));
-  assert.match(pending.pending.pathname, new RegExp(`${taskId}/events$`));
+  assert.match(pending.outboxes['relay:restart'].pending.pathname, new RegExp(`${taskId}/events$`));
   validReceipt = true;
-  const resumed = await AgentFabricClient.open({ configPath, statePath, store, fetcher });
+  const resumed = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await resumed.openSession();
   assert.equal(completionCalls, 2);
   assert.equal(JSON.parse(await readFile(statePath, 'utf8')).pending, null);
@@ -2226,12 +2227,27 @@ test('device keyset telemetry reports a keyset-less device as null and rejects m
 });
 
 // One relay process runs a durable client per workspace loop, and ad hoc commands open their own, all on the same
-// protocol-state file. Every read-modify-write of that file happens under device signing control and starts from the
-// file, so one client's write never drops another client's kept request or recovered task completion, and a client
-// never sends a request again from a stale copy of the file.
-type SharedStateCall = { path: string; body: string; messageId: string; sessionId: string; sequence: number };
+// protocol-state file. Each client keeps its own outbox entry in that file. Every read-modify-write of the file happens
+// under device signing control and starts from the file, so one client's write never drops another client's kept
+// request or recovered task completion, and no client sends, fails on or answers for another live client's request.
+type SharedStateCall = { path: string; body: string; messageId: string; idempotencyKey: string | null; sessionId: string;
+  sequence: number };
+type SharedOutboxEntry = { sessionId: string | null; nextSequence: number; ownerPid: number; updatedAt: string;
+  pending: { pathname: string; headers: Record<string, string> } | null };
 type SharedProtocolState = { sessionId: string | null; nextSequence: number;
-  pending: { headers: Record<string, string> } | null; recoveredTaskCompletions?: Array<{ taskId: string }> };
+  pending: { headers: Record<string, string> } | null; recoveredTaskCompletions?: Array<{ taskId: string }>;
+  outboxes?: Record<string, SharedOutboxEntry> };
+type OpenInput = Parameters<typeof AgentFabricClient.open>[0];
+/** A stable owner lane, such as the one a relay workspace loop passes, so a restarted client finds its own entry. */
+const withOwner = (input: OpenInput, ownerKey: string) => ({ ...input, ownerKey }) as OpenInput;
+const keptMessageIds = (state: SharedProtocolState) => Object.values(state.outboxes ?? {})
+  .flatMap(entry => entry.pending ? [entry.pending.headers['x-dharma-message-id']!] : []);
+/** The pid of a process that has exited, standing in for an ad hoc command that left a kept request behind. */
+async function exitedPid(): Promise<number> {
+  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await new Promise(accept => child.once('exit', accept));
+  return child.pid!;
+}
 const sharedOk = (body: Record<string, unknown> = {}) => new Response(JSON.stringify({ ok: true, ...body }), { status: 201 });
 const sharedUnavailable = () => new Response(JSON.stringify({
   ok: false, error: { code: 'upstream_unavailable', message: 'Try again.' } }), { status: 503 });
@@ -2258,8 +2274,8 @@ async function sharedStateFixture(prefix: string, respond: (call: SharedStateCal
     const headers = new Headers(init?.headers);
     const call: SharedStateCall = {
       path: new URL(String(url)).pathname.replace('/api/v1/orgs/org_a', ''), body: String(init?.body ?? ''),
-      messageId: headers.get('x-dharma-message-id')!, sessionId: headers.get('x-dharma-session-id')!,
-      sequence: Number(headers.get('x-dharma-sequence')),
+      messageId: headers.get('x-dharma-message-id')!, idempotencyKey: headers.get('idempotency-key'),
+      sessionId: headers.get('x-dharma-session-id')!, sequence: Number(headers.get('x-dharma-sequence')),
     };
     calls.push(call);
     if (inFlight.has(call.messageId)) overlapping += 1;
@@ -2268,7 +2284,8 @@ async function sharedStateFixture(prefix: string, respond: (call: SharedStateCal
   };
   return {
     config, statePath, calls, overlapping: () => overlapping,
-    open: () => AgentFabricClient.open({ configPath, statePath, store, fetcher }),
+    open: (ownerKey?: string) => AgentFabricClient.open(ownerKey === undefined
+      ? { configPath, statePath, store, fetcher } : withOwner({ configPath, statePath, store, fetcher }, ownerKey)),
     read: async () => JSON.parse(await readFile(statePath, 'utf8')) as SharedProtocolState,
   };
 }
@@ -2318,13 +2335,14 @@ test('opening a session never overwrites a request another client has in flight 
   const inFlight = f.calls.at(-1)!.messageId;
   const opening = b.openSession();
   await sharedDelay(300);
-  assert.equal((await f.read()).pending?.headers['x-dharma-message-id'], inFlight, 'the in-flight request stays in the file');
+  assert.deepEqual(keptMessageIds(await f.read()), [inFlight], 'the in-flight request stays in its owner\'s entry');
   assert.equal(f.calls.filter(call => call.path === '/agent-fabric/sessions').length, 1, 'the second session open waits');
   gate.open();
   await registering;
   await opening;
   assert.deepEqual(f.calls.map(call => call.path), ['/agent-fabric/sessions', '/agent-fabric/workspaces', '/agent-fabric/sessions']);
   assert.equal((await f.read()).pending, null);
+  assert.deepEqual(keptMessageIds(await f.read()), []);
 });
 
 test('a request another client already delivered is never sent again from a stale snapshot (shared protocol state)', async () => {
@@ -2343,7 +2361,8 @@ test('a request another client already delivered is never sent again from a stal
   await a.openSession();
   mode = 'fail';
   await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
-  const kept = (await f.read()).pending!.headers['x-dharma-message-id']!;
+  const [kept] = keptMessageIds(await f.read());
+  assert.ok(kept);
   const b = await f.open();
   mode = 'block';
   const retry = a.registerWorkspace({ workspaceId: 'a' });
@@ -2358,34 +2377,82 @@ test('a request another client already delivered is never sent again from a stal
   assert.equal(f.overlapping(), 0, 'one message id is never in flight twice at once');
 });
 
-test('a kept request is drained once by another client, which never takes its response or its sequence (shared protocol state)', async () => {
-  let unavailable = 0;
-  const f = await sharedStateFixture('fabric-shared-drain-', call => {
-    if (unavailable > 0) { unavailable -= 1; return sharedUnavailable(); }
-    return sharedOk({ observed: call });
-  });
+test('another live client never sends, fails on or sets aside a client\'s kept request (shared protocol state)', async () => {
+  const f = await sharedStateFixture('fabric-shared-live-', call =>
+    call.path === '/agent-fabric/workspaces' ? sharedUnavailable() : sharedOk({ observed: call }));
   const a = await f.open(), b = await f.open();
   await a.openSession();
   await b.openSession();
-  const sessionA = f.calls[0]!.sessionId, sessionB = f.calls[1]!.sessionId;
-  unavailable = 1;
   await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
-  const keptA = f.calls.at(-1)!;
-  await b.signedPost('/agent-fabric/skills/poll', { workspaceId: 'b', provider: 'codex' });
-  assert.equal(f.calls.filter(call => call.messageId === keptA.messageId).length, 2, 'the other client drains the kept request once');
-  assert.equal(f.calls.at(-1)!.sessionId, sessionB);
-  assert.equal(f.calls.at(-1)!.path, '/agent-fabric/skills/poll');
-  unavailable = 1;
-  await assert.rejects(b.pollTask(), error => error instanceof AgentFabricRequestError && error.status === 503);
-  const keptB = f.calls.at(-1)!;
-  const polled = await a.pollTask();
-  const own = f.calls.at(-1)!;
-  assert.equal(f.calls.at(-2)!.messageId, keptB.messageId, 'the identical kept poll of the other client is drained first');
-  assert.equal(own.sessionId, sessionA);
-  assert.notEqual(own.messageId, keptB.messageId);
-  assert.ok(own.sequence > keptA.sequence, 'a client never reuses the sequence of its request another client delivered');
-  assert.deepEqual(polled.observed, own, 'a client gets the response to its own request, not to an identical one of another client');
-  assert.equal((await f.read()).pending, null);
+  const kept = f.calls.at(-1)!;
+  for (let call = 0; call < 5; call++) {
+    const polled = await b.pollTask();
+    assert.deepEqual(polled.observed, f.calls.at(-1), 'every call of the other client gets the response to its own request');
+  }
+  const c = await f.open();
+  await c.openSession();
+  await c.pollTask();
+  assert.equal(f.calls.filter(call => call.messageId === kept.messageId).length, 1, 'no other live client sends the kept request');
+  assert.deepEqual(keptMessageIds(await f.read()), [kept.messageId], 'the kept request stays in its owner\'s entry');
+  await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+  assert.deepEqual([f.calls.at(-1)!.messageId, f.calls.at(-1)!.idempotencyKey], [kept.messageId, kept.messageId],
+    'its owner sends it again with the same message id and idempotency key');
+});
+
+test('a kept task completion survives any number of another client\'s calls during an outage and its owner replays it (shared protocol state)', async () => {
+  const taskId = randomUUID(), trajectoryCapsuleHash = `sha256:${'a'.repeat(64)}`, receiptHash = `sha256:${'b'.repeat(64)}`;
+  let outage = false;
+  const f = await sharedStateFixture('fabric-shared-outage-', call => outage ? sharedUnavailable()
+    : sharedOk(call.path.endsWith('/events') ? { receipt: { hash: receiptHash } } : {}));
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  await b.openSession();
+  outage = true;
+  await assert.rejects(a.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash }),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  for (let call = 0; call < 6; call++) {
+    await assert.rejects(b.pollTask(), error => error instanceof AgentFabricRequestError && error.status === 503,
+      'the other client sees only the outcome of its own request');
+    assert.notEqual(f.calls.at(-1)!.messageId, kept.messageId, 'the other client sends only its own request');
+  }
+  assert.ok(keptMessageIds(await f.read()).includes(kept.messageId), 'the completion is still kept');
+  outage = false;
+  await a.pollTask();
+  const sent = f.calls.filter(call => call.messageId === kept.messageId);
+  assert.equal(sent.length, 2, 'the completion is sent by its first attempt and by its owner\'s replay only');
+  assert.deepEqual(sent.map(call => call.idempotencyKey), [kept.messageId, kept.messageId]);
+  assert.deepEqual((await f.read()).recoveredTaskCompletions?.map(item => item.taskId), [taskId]);
+  assert.deepEqual(keptMessageIds(await f.read()), []);
+});
+
+test('a workspace loop that restarts replays its kept completion when it opens its session (shared protocol state)', async () => {
+  const taskId = randomUUID(), trajectoryCapsuleHash = `sha256:${'a'.repeat(64)}`, receiptHash = `sha256:${'b'.repeat(64)}`;
+  let eventsDown = false;
+  const f = await sharedStateFixture('fabric-shared-restart-', call => {
+    if (!call.path.endsWith('/events')) return sharedOk();
+    return eventsDown ? sharedUnavailable() : sharedOk({ receipt: { hash: receiptHash } });
+  });
+  const a = await f.open('relay:workspace-a'), b = await f.open();
+  await a.openSession();
+  await b.openSession();
+  eventsDown = true;
+  await assert.rejects(a.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash }),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  for (let call = 0; call < 4; call++) await b.pollTask();
+  assert.equal(f.calls.filter(call => call.messageId === kept.messageId).length, 1, 'the other client never sends it');
+  eventsDown = false;
+  const restarted = await f.open('relay:workspace-a');
+  await restarted.openSession();
+  const sent = f.calls.filter(call => call.messageId === kept.messageId);
+  assert.equal(sent.length, 2, 'the restarted loop sends its kept completion once more');
+  assert.deepEqual([sent[1]!.idempotencyKey, sent[1]!.sessionId], [kept.messageId, kept.sessionId],
+    'with the same idempotency key, in the session it was signed in');
+  assert.equal(f.calls.at(-1)!.path, '/agent-fabric/sessions');
+  assert.notEqual(f.calls.at(-1)!.sessionId, kept.sessionId, 'then it opens a new session');
+  assert.deepEqual((await f.read()).recoveredTaskCompletions?.map(item => item.taskId), [taskId]);
+  assert.deepEqual(keptMessageIds(await f.read()), []);
 });
 
 // The server accepts a session's sequences only in increasing order; gaps are allowed.
@@ -2416,7 +2483,7 @@ async function sharedLater<T>(minutes: number, work: () => Promise<T>): Promise<
   try { return await work(); } finally { Date.now = now; }
 }
 
-test('a client never reuses a sequence another client used to re-sign its stale action acknowledgement (shared protocol state)', async () => {
+test('a stale action acknowledgement is re-signed only by its owner, in its own session (shared protocol state)', async () => {
   const f = await sharedMonotonicFixture('fabric-shared-resign-');
   const a = await f.open(), b = await f.open();
   await a.openSession();
@@ -2425,48 +2492,122 @@ test('a client never reuses a sequence another client used to re-sign its stale 
   f.failNext();
   await assert.rejects(b.postActionEnforcement('33333333-3333-4333-8333-333333333333', sharedAcknowledgement()),
     error => error instanceof AgentFabricRequestError && error.status === 503);
-  await sharedLater(9, () => a.pollTask());
-  const resigned = f.calls.at(-2)!;
-  assert.equal(resigned.sessionId, sessionB, 'the drained acknowledgement is re-signed and delivered');
-  await b.pollTask();
-  const next = f.calls.at(-1)!;
-  assert.equal(next.sessionId, sessionB);
-  assert.ok(next.sequence > resigned.sequence, 'the owner signs above the sequence another client re-signed in its session');
+  const kept = f.calls.at(-1)!;
+  await sharedLater(9, async () => { await a.pollTask(); await a.pollTask(); });
+  assert.equal(f.calls.filter(call => call.sessionId === sessionB).length, 2, 'the other client never re-signs or sends it');
+  await sharedLater(9, () => b.pollTask());
+  const [resigned, next] = f.calls.slice(-2) as [SharedStateCall, SharedStateCall];
+  assert.deepEqual([resigned.sessionId, resigned.path], [sessionB, kept.path], 'its owner re-signs it in its own session');
+  assert.notEqual(resigned.messageId, kept.messageId);
+  assert.ok(resigned.sequence > kept.sequence);
+  assert.deepEqual([next.sessionId, next.path], [sessionB, '/agent-fabric/tasks/poll']);
+  assert.ok(next.sequence > resigned.sequence, 'the owner signs its next request above the re-signed one');
 });
 
-test('a client never reuses a sequence after its stale action acknowledgement was re-signed twice while it was idle (shared protocol state)', async () => {
-  const f = await sharedMonotonicFixture('fabric-shared-resign-twice-');
-  const a = await f.open(), b = await f.open();
-  await a.openSession();
-  await b.openSession();
-  const sessionB = f.calls[1]!.sessionId;
-  f.failNext();
-  await assert.rejects(b.postActionEnforcement('33333333-3333-4333-8333-333333333333', sharedAcknowledgement()),
-    error => error instanceof AgentFabricRequestError && error.status === 503);
-  f.failNext();
-  await assert.rejects(sharedLater(9, () => a.pollTask()), (error: Error & { code?: unknown; cause?: unknown }) =>
-    error.code === 'relay_outbox_busy' && error.cause instanceof AgentFabricRequestError && error.cause.status === 503);
-  const c = await f.open();
-  await sharedLater(18, () => c.openSession());
-  const resigned = f.calls.filter(call => call.sessionId === sessionB).at(-1)!;
-  assert.ok(resigned.sequence >= 3, 'the acknowledgement was re-signed twice in the session of its owner');
-  await b.pollTask();
-  const next = f.calls.at(-1)!;
-  assert.equal(next.sessionId, sessionB);
-  assert.ok(next.sequence > resigned.sequence, 'the owner signs above every sequence other clients re-signed in its session');
-});
+const sharedIdleEntry = (ownerPid: number, minute = 0) => ({ sessionId: randomUUID(), nextSequence: 2, pending: null, ownerPid,
+  updatedAt: new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString() });
 
-test('a protocol-state file with an invalid re-signed sequence record is refused and kept (shared protocol state)', async () => {
-  const f = await sharedStateFixture('fabric-shared-resigned-invalid-', () => sharedOk());
-  for (const resignedSequences of [{ 'not-a-session': 2 }, { [randomUUID()]: 0 }, [], Object.fromEntries(
-    Array.from({ length: 65 }, () => [randomUUID(), 1]))]) {
-    const content = JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
-      resignedSequences });
+test('a protocol-state file with an invalid outbox entry is refused and kept (shared protocol state)', async () => {
+  const f = await sharedStateFixture('fabric-shared-outbox-invalid-', () => sharedOk());
+  const idle = sharedIdleEntry(1);
+  for (const outboxes of [[], { nobody: idle }, { 'cli:1:1': { ...idle, nextSequence: 0 } },
+    { 'cli:1:1': { ...idle, ownerPid: -1 } }, { 'cli:1:1': { ...idle, updatedAt: 'later' } },
+    { 'cli:1:1': { ...idle, pending: { method: 'PUT', pathname: '/x', body: '', headers: {} } } },
+    Object.fromEntries(Array.from({ length: 257 }, (_, index) => [`cli:1:${index + 1}`, idle]))]) {
+    const content = JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null, outboxes });
     await writeFile(f.statePath, content);
     await assert.rejects(f.open(), /protocol state is invalid/);
     assert.equal(await readFile(f.statePath, 'utf8'), content);
   }
   assert.equal(f.calls.length, 0);
+});
+
+for (const outcome of ['accepted', 'refused', 'retryable'] as const) {
+  test(`an orphan left by a command that exited is adopted once and never answers the adopter: ${outcome} (shared protocol state)`, async () => {
+    const taskId = randomUUID(), trajectoryCapsuleHash = `sha256:${'a'.repeat(64)}`, receiptHash = `sha256:${'b'.repeat(64)}`;
+    let mode: 'down' | 'accepted' | 'refused' | 'retryable' = 'down';
+    const f = await sharedStateFixture(`fabric-shared-orphan-${outcome}-`, call => {
+      if (!call.path.endsWith('/events')) return sharedOk();
+      if (mode === 'down' || mode === 'retryable') return sharedUnavailable();
+      if (mode === 'refused') {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'lease_expired', message: 'Lease expired.' } }), { status: 409 });
+      }
+      return sharedOk({ receipt: { hash: receiptHash } });
+    });
+    const command = await f.open();
+    await command.openSession();
+    await assert.rejects(command.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash }),
+      error => error instanceof AgentFabricRequestError && error.status === 503);
+    const kept = f.calls.at(-1)!;
+    // The command exits: its entry now names a process that is gone.
+    const dead = await exitedPid();
+    const state = await f.read();
+    const [key, entry] = Object.entries(state.outboxes ?? {})
+      .find(([, item]) => item.pending?.headers['x-dharma-message-id'] === kept.messageId) ?? [];
+    assert.ok(key && entry, 'the command kept its request in its own entry');
+    delete state.outboxes![key];
+    state.outboxes![`cli:${dead}:1`] = { ...entry, ownerPid: dead };
+    await writeFile(f.statePath, JSON.stringify(state));
+    mode = outcome;
+    const adopter = await f.open();
+    assert.equal((await adopter.openSession()).ok, true, 'the adopter opens its session whatever the orphan\'s outcome');
+    const later = await f.open();
+    assert.equal((await later.openSession()).ok, true);
+    let sent = f.calls.filter(call => call.messageId === kept.messageId);
+    assert.equal(sent.length, 2, 'the orphan is sent once by the next session open, not again by the one after it');
+    assert.deepEqual([sent[1]!.idempotencyKey, sent[1]!.sessionId], [kept.messageId, kept.sessionId]);
+    if (outcome === 'retryable') {
+      assert.deepEqual(keptMessageIds(await f.read()), [kept.messageId], 'an orphan without a definite answer is kept');
+      mode = 'accepted';
+      const next = await f.open();
+      assert.equal((await sharedLater(11, () => next.openSession())).ok, true);
+      sent = f.calls.filter(call => call.messageId === kept.messageId);
+      assert.equal(sent.length, 3, 'a later session open sends it again');
+      assert.equal(sent[2]!.idempotencyKey, kept.messageId);
+    }
+    assert.deepEqual(keptMessageIds(await f.read()), [], 'an answered orphan leaves the file');
+    assert.deepEqual((await f.read()).recoveredTaskCompletions?.map(item => item.taskId),
+      outcome === 'refused' ? [] : [taskId]);
+  });
+}
+
+test('a kept request in an earlier single-slot file is sent once by the next session open and never answers it (shared protocol state)', async () => {
+  const legacy = randomUUID(), legacySession = randomUUID();
+  const f = await sharedStateFixture('fabric-shared-migrate-', call => call.messageId === legacy
+    ? new Response(JSON.stringify({ ok: false, error: { code: 'sequence_out_of_order', message: 'Out of order.' } }), { status: 409 })
+    : sharedOk());
+  await writeFile(f.statePath, JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: legacySession, nextSequence: 5,
+    pending: { method: 'POST', pathname: '/api/v1/orgs/org_a/agent-fabric/tasks/poll', body: '{"leaseSeconds":120}', headers: {
+      'content-type': 'application/json', 'idempotency-key': legacy, 'x-dharma-device-id': f.config.deviceId,
+      'x-dharma-session-id': legacySession, 'x-dharma-message-id': legacy, 'x-dharma-timestamp': '2026-01-01T00:00:00.000Z',
+      'x-dharma-nonce': 'legacy-nonce', 'x-dharma-sequence': '4', 'x-dharma-signature': 'legacy-signature' } } }));
+  const a = await f.open();
+  assert.equal((await a.openSession()).ok, true, 'a refusal of the migrated request never fails the session open');
+  const b = await f.open();
+  await b.openSession();
+  const sent = f.calls.filter(call => call.messageId === legacy);
+  assert.equal(sent.length, 1, 'the migrated request is sent exactly once');
+  assert.deepEqual([sent[0]!.sessionId, sent[0]!.sequence, sent[0]!.idempotencyKey], [legacySession, 4, legacy]);
+  const state = await f.read();
+  assert.equal(state.pending, null);
+  assert.deepEqual(keptMessageIds(state), []);
+});
+
+test('idle entries of exited owners are pruned and the other idle entries are capped (shared protocol state)', async () => {
+  const f = await sharedStateFixture('fabric-shared-prune-', () => sharedOk());
+  const dead = await exitedPid();
+  const outboxes: Record<string, ReturnType<typeof sharedIdleEntry>> = {};
+  for (let index = 1; index <= 3; index++) outboxes[`cli:${dead}:${index}`] = sharedIdleEntry(dead, index);
+  for (let index = 1; index <= 40; index++) outboxes[`cli:${process.pid}:${1000 + index}`] = sharedIdleEntry(process.pid, 10 + index);
+  await writeFile(f.statePath, JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+    outboxes }));
+  const client = await f.open('relay:workspace-prune');
+  await client.openSession();
+  const keys = Object.keys((await f.read()).outboxes ?? {});
+  assert.equal(keys.some(key => key.startsWith(`cli:${dead}:`)), false, 'idle entries of exited owners are pruned');
+  assert.ok(keys.includes('relay:workspace-prune'), 'the client writes its own entry');
+  assert.equal(keys.length, 33, 'at most 32 idle entries of other clients are kept');
+  assert.ok(keys.includes(`cli:${process.pid}:1040`) && !keys.includes(`cli:${process.pid}:1001`), 'the oldest idle entries go first');
 });
 
 test('protocol state is not written while another process holds device signing control (shared protocol state)', async () => {
@@ -2491,12 +2632,12 @@ test('protocol state is not written while another process holds device signing c
     await acknowledging;
     const after = await f.read();
     assert.deepEqual(after.recoveredTaskCompletions, []);
-    assert.notEqual(after.sessionId, null);
+    assert.ok(Object.values(after.outboxes ?? {}).some(entry => entry.sessionId), 'the opened session is in the client\'s entry');
     assert.equal(await other.exited, 0);
   } finally { other.child.kill(); }
 });
 
-test('opening a session drains a kept request inside its own signing-control section (shared protocol state)', async () => {
+test('opening a session replays this client\'s own kept request inside its signing-control section (shared protocol state)', async () => {
   let unavailable = 0;
   const f = await sharedStateFixture('fabric-shared-reentrant-', () => {
     if (unavailable > 0) { unavailable -= 1; return sharedUnavailable(); }
@@ -2511,6 +2652,7 @@ test('opening a session drains a kept request inside its own signing-control sec
   assert.deepEqual(f.calls.slice(-2).map(call => call.path), ['/agent-fabric/workspaces', '/agent-fabric/sessions']);
   assert.equal(f.calls.at(-2)!.messageId, kept.messageId);
   assert.equal((await f.read()).pending, null);
+  assert.deepEqual(keptMessageIds(await f.read()), []);
 });
 
 test('a session open queued behind a holder leaves the line when its relay loop stops and writes nothing (shared protocol state)', async () => {
@@ -2550,73 +2692,6 @@ test('a protocol-state file corrupted after open is preserved and stops the next
   assert.equal(f.calls.length, sent, 'nothing is signed or sent from a state the client cannot read');
 });
 
-// A kept request of another client is drained before this caller signs its own. Its outcome is never this caller's:
-// a refusal of it lets the caller send its own request, and a retryable failure of it reaches the caller as
-// relay_outbox_busy, which says the caller's request was not sent.
-const isOutboxBusy = (error: Error & { code?: unknown; definitive?: unknown }) =>
-  !(error instanceof AgentFabricRequestError) && error.code === 'relay_outbox_busy' && error.definitive !== true;
-
-test('a refusal of another client\'s kept request never answers this caller, which still gets its own response (shared protocol state)', async () => {
-  const taskId = randomUUID();
-  let events = 0;
-  const f = await sharedStateFixture('fabric-shared-drain-refused-', call => {
-    if (call.path.endsWith('/events')) {
-      events += 1;
-      if (events === 1) return sharedUnavailable();
-      return new Response(JSON.stringify({ ok: false, error: { code: 'lease_expired', message: 'Lease expired.' } }), { status: 409 });
-    }
-    return sharedOk({ observed: call });
-  });
-  const a = await f.open(), b = await f.open();
-  await a.openSession();
-  await b.openSession();
-  const sessionA = f.calls[0]!.sessionId, sessionB = f.calls[1]!.sessionId;
-  await assert.rejects(b.postTaskEvent(taskId, 'progress', { note: 'working' }),
-    error => error instanceof AgentFabricRequestError && error.status === 503);
-  const polled = await a.pollTask();
-  const own = f.calls.at(-1)!;
-  assert.deepEqual(f.calls.slice(-2).map(call => [call.path, call.sessionId]),
-    [[`/agent-fabric/tasks/${taskId}/events`, sessionB], ['/agent-fabric/tasks/poll', sessionA]],
-    'the refused request of the other client is drained, then this caller sends its own');
-  assert.deepEqual(polled.observed, own, 'the caller gets the response to its own request');
-  assert.equal((await f.read()).pending, null);
-});
-
-test('another client\'s kept request that keeps failing retryably holds the outbox for a few attempts only (shared protocol state)', async () => {
-  const highest = new Map<string, number>();
-  const f = await sharedStateFixture('fabric-shared-drain-stuck-', call => {
-    if (call.path === '/agent-fabric/workspaces') return sharedUnavailable();
-    if ((highest.get(call.sessionId) ?? 0) >= call.sequence) {
-      return new Response(JSON.stringify({ ok: false, error: { code: 'sequence_out_of_order', message: 'Out of order.' } }), { status: 409 });
-    }
-    highest.set(call.sessionId, call.sequence);
-    return sharedOk({ observed: call });
-  });
-  const a = await f.open(), b = await f.open();
-  await a.openSession();
-  await b.openSession();
-  const sessionA = f.calls[0]!.sessionId, sessionB = f.calls[1]!.sessionId;
-  await assert.rejects(b.registerWorkspace({ workspaceId: 'b' }), error => error instanceof AgentFabricRequestError && error.status === 503);
-  const stuck = f.calls.at(-1)!;
-  let polled: Record<string, unknown> | undefined, busy = 0;
-  for (let attempt = 0; attempt < 5 && !polled; attempt++) {
-    try { polled = await a.pollTask(); }
-    catch (error) { assert.ok(isOutboxBusy(error as Error), `attempt ${attempt + 1} reports a busy outbox, not the other request's outcome`); busy += 1; }
-  }
-  assert.ok(polled, 'the caller sends its own request after a few attempts');
-  assert.ok(busy >= 1 && busy <= 3, `the stuck request held the outbox for ${busy} attempts`);
-  assert.deepEqual([f.calls.at(-1)!.path, f.calls.at(-1)!.sessionId], ['/agent-fabric/tasks/poll', sessionA]);
-  assert.deepEqual(polled.observed, f.calls.at(-1));
-  assert.equal(f.calls.filter(call => call.messageId === stuck.messageId).length, busy + 2,
-    'the stuck request is sent by its owner and once per attempt, then set aside');
-  assert.equal((await f.read()).pending, null, 'the stuck request no longer holds the outbox');
-  await a.pollTask();
-  await b.pollTask();
-  const next = f.calls.at(-1)!;
-  assert.deepEqual([next.path, next.sessionId], ['/agent-fabric/tasks/poll', sessionB]);
-  assert.ok(next.sequence > stuck.sequence, 'the owner signs above the sequence of its request that was set aside');
-});
-
 test('an acknowledgement never waits on this client\'s queue behind a request that already holds signing control (shared protocol state)', async () => {
   const taskId = randomUUID(), receiptHash = `sha256:${'b'.repeat(64)}`;
   const f = await sharedStateFixture('fabric-shared-ack-line-', () => sharedOk());
@@ -2651,4 +2726,12 @@ test('the README limits the shared protocol-state guarantee to one client versio
   assert.equal(/every process on the device runs this version/i.test(readme), true,
     'the README says the guarantee needs every process on the device to run this version');
   assert.equal(/upgrade stops the relay before/i.test(readme), true, 'the README says the relay upgrade stops the relay first');
+});
+
+test('the README describes one outbox entry per client and no draining of another client\'s request (shared protocol state)', async () => {
+  const readme = (await readFile(new URL('../README.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  assert.equal(/relay_outbox_busy|one kept request for the whole device|set aside/i.test(readme), false,
+    'no shared outbox slot, busy outbox or set-aside is described');
+  assert.equal(/each client keeps its own outbox entry/i.test(readme), true);
+  assert.equal(/owner process has exited/i.test(readme), true, 'the README says when another client sends a kept request');
 });
