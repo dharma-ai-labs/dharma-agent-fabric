@@ -3399,7 +3399,7 @@ test('a new kept request an earlier version left at the top level of a full file
   assert.equal(Object.keys(after.outboxes ?? {}).length, 256);
 });
 
-// Convergence review round 3: a recorded completion whose state write failed, and orphan sends after a one-shot call.
+// Convergence review round 2 (second loop): a recorded completion whose state write failed, and orphan sends after a one-shot call.
 test('a task completion the server accepted survives a failed state write and reaches the file on the next request (shared protocol state)', async () => {
   const taskId = randomUUID(), trajectoryCapsuleHash = `sha256:${'a'.repeat(64)}`, receiptHash = `sha256:${'b'.repeat(64)}`;
   let blockNextWrite = false, saved = '';
