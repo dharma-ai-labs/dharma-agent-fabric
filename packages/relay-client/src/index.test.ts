@@ -2388,6 +2388,73 @@ test('a kept request is drained once by another client, which never takes its re
   assert.equal((await f.read()).pending, null);
 });
 
+// The server accepts a session's sequences only in increasing order; gaps are allowed.
+async function sharedMonotonicFixture(prefix: string) {
+  const highest = new Map<string, number>();
+  let unavailable = 0;
+  const f = await sharedStateFixture(prefix, call => {
+    if (unavailable > 0) { unavailable -= 1; return sharedUnavailable(); }
+    if ((highest.get(call.sessionId) ?? 0) >= call.sequence) {
+      return new Response(JSON.stringify({ ok: false, error: { code: 'sequence_out_of_order', message: 'Out of order.' } }), { status: 409 });
+    }
+    highest.set(call.sessionId, call.sequence);
+    return sharedOk();
+  });
+  return { ...f, failNext: (count = 1) => { unavailable = count; } };
+}
+
+const sharedAcknowledgement = () => ({
+  taskId: '11111111-1111-4111-8111-111111111111', endpointId: '22222222-2222-4222-8222-222222222222',
+  actionDigest: `sha256:${'a'.repeat(64)}`, disposition: 'executed' as const,
+  externalIdempotencyKeyHash: 'b'.repeat(64), resultDigest: `sha256:${'c'.repeat(64)}`,
+  acknowledgedAt: new Date().toISOString(),
+});
+
+async function sharedLater<T>(minutes: number, work: () => Promise<T>): Promise<T> {
+  const now = Date.now;
+  Date.now = () => now() + minutes * 60_000;
+  try { return await work(); } finally { Date.now = now; }
+}
+
+test('a client never reuses a sequence another client used to re-sign its stale action acknowledgement (shared protocol state)', async () => {
+  const f = await sharedMonotonicFixture('fabric-shared-resign-');
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  await b.openSession();
+  const sessionB = f.calls[1]!.sessionId;
+  f.failNext();
+  await assert.rejects(b.postActionEnforcement('33333333-3333-4333-8333-333333333333', sharedAcknowledgement()),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  await sharedLater(9, () => a.pollTask());
+  const resigned = f.calls.at(-2)!;
+  assert.equal(resigned.sessionId, sessionB, 'the drained acknowledgement is re-signed and delivered');
+  await b.pollTask();
+  const next = f.calls.at(-1)!;
+  assert.equal(next.sessionId, sessionB);
+  assert.ok(next.sequence > resigned.sequence, 'the owner signs above the sequence another client re-signed in its session');
+});
+
+test('a client never reuses a sequence after its stale action acknowledgement was re-signed twice while it was idle (shared protocol state)', async () => {
+  const f = await sharedMonotonicFixture('fabric-shared-resign-twice-');
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  await b.openSession();
+  const sessionB = f.calls[1]!.sessionId;
+  f.failNext();
+  await assert.rejects(b.postActionEnforcement('33333333-3333-4333-8333-333333333333', sharedAcknowledgement()),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  f.failNext();
+  await assert.rejects(sharedLater(9, () => a.pollTask()), error => error instanceof AgentFabricRequestError && error.status === 503);
+  const c = await f.open();
+  await sharedLater(18, () => c.openSession());
+  const resigned = f.calls.filter(call => call.sessionId === sessionB).at(-1)!;
+  assert.ok(resigned.sequence >= 3, 'the acknowledgement was re-signed twice in the session of its owner');
+  await b.pollTask();
+  const next = f.calls.at(-1)!;
+  assert.equal(next.sessionId, sessionB);
+  assert.ok(next.sequence > resigned.sequence, 'the owner signs above every sequence other clients re-signed in its session');
+});
+
 test('protocol state is not written while another process holds device signing control (shared protocol state)', async () => {
   const taskId = randomUUID(), receiptHash = `sha256:${'b'.repeat(64)}`;
   const f = await sharedStateFixture('fabric-shared-cross-process-', () => sharedOk());
