@@ -3816,3 +3816,53 @@ test('an owner sends its kept completion again exactly as signed when another cl
   await a.openSession();
   await a.pollTask();
 });
+
+// Owner review round 4: an owner whose entry left the file writes its kept request back to the file before it sends
+// it again, so a failed send followed by a new client with the same owner key never loses it.
+test('an owner whose entry left the file keeps its completion in the file while it sends it again, so a fresh owner replays it after a failed send (shared protocol state)', async () => {
+  const f = await sharedLostEntryFixture('fabric-shared-lost-entry-resend-fails-');
+  const taskId = randomUUID(), body = { trajectoryCapsuleHash: `sha256:${'a'.repeat(64)}` };
+  const a = await f.open('relay:workspace-a');
+  await a.openSession();
+  f.down.add(taskId);
+  await assert.rejects(a.postTaskEvent(taskId, 'completed', body),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  await rm(f.statePath, { force: true });
+  await assert.rejects(a.postTaskEvent(taskId, 'completed', body),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  assert.deepEqual(keptMessageIds(await f.read()), [kept.messageId], 'the kept completion is back in the file');
+  f.down.clear();
+  // The failed stage ends the loop; its supervisor opens a new client with the same owner key.
+  const fresh = await f.open('relay:workspace-a');
+  await fresh.openSession();
+  const sent = f.calls.filter(call => call.messageId === kept.messageId);
+  assert.equal(sent.length, 3, 'the fresh owner sends the kept completion again');
+  assert.deepEqual(sent.map(call => [call.sequence, call.idempotencyKey]),
+    Array.from({ length: 3 }, () => [kept.sequence, kept.messageId]), 'always as signed');
+  assert.ok((await f.read()).recoveredTaskCompletions?.some(item => item.taskId === taskId), 'its receipt is recorded');
+  assert.deepEqual(keptMessageIds(await f.read()), []);
+  assertNoSequenceSignedTwice(f.calls, kept.sessionId);
+});
+
+test('a fresh owner that replays an acknowledgement written back after its entry left the file never signs a sequence again (shared protocol state)', async () => {
+  const f = await sharedMonotonicFixture('fabric-shared-lost-ack-written-back-');
+  const a = await f.open('relay:workspace-a');
+  await a.openSession();
+  const decisionId = '33333333-3333-4333-8333-333333333333';
+  const acknowledgement = sharedAcknowledgement();
+  f.failNext();
+  await assert.rejects(a.postActionEnforcement(decisionId, acknowledgement),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  await rm(f.statePath, { force: true });
+  f.failNext();
+  await assert.rejects(a.postActionEnforcement(decisionId, acknowledgement),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  assert.deepEqual(keptMessageIds(await f.read()), [kept.messageId], 'the kept acknowledgement is back in the file');
+  // The fresh owner opens after the acknowledgement left its time window, and another client after 11 minutes.
+  await sharedLater(9, async () => { const fresh = await f.open('relay:workspace-a'); await fresh.openSession(); });
+  await sharedLater(11, async () => { const other = await f.open('relay:workspace-b'); await other.openSession(); });
+  assertNoSequenceSignedTwice(f.calls, kept.sessionId);
+  assert.deepEqual(keptMessageIds(await f.read()), []);
+});
