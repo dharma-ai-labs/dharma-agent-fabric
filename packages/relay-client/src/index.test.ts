@@ -3040,3 +3040,129 @@ await client.openSession();process.stdout.write('done;');`,
   assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'it is sent again once 10 minutes have passed');
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
+
+// Convergence review round 1: orphans are sent after the caller has its answer, answers leave the file, and an
+// earlier version still finds one kept request.
+const isOrphanCall = (orphans: SharedOrphan[], call: SharedStateCall) => orphans.some(entry => orphanMessageId(entry) === call.messageId);
+
+test('a long-lived client returns its own answer before it sends a due orphan, and sends one per section (shared protocol state)', async () => {
+  const gate = sharedGate(), entered = sharedGate();
+  const slow = new Set<string>();
+  const f = await sharedStateFixture('fabric-shared-orphan-after-', async call => {
+    if (slow.delete(call.messageId)) { entered.open(); await gate.promise; }
+    return sharedOk();
+  });
+  const dead = await exitedPid();
+  const orphans = [sharedOrphan(f.config.deviceId, dead), sharedOrphan(f.config.deviceId, dead)];
+  for (const entry of orphans) slow.add(orphanMessageId(entry));
+  // Entries of workspace loops that are gone become due only after 10 minutes, so the session open leaves them.
+  await writeSharedOutboxes(f.statePath, { 'relay:gone-a': orphans[0], 'relay:gone-b': orphans[1] });
+  const loop = await f.open('relay:workspace-loop');
+  await loop.openSession();
+  assert.equal(f.calls.filter(call => isOrphanCall(orphans, call)).length, 0);
+  const now = Date.now;
+  Date.now = () => now() + 11 * 60_000;
+  try {
+    const first = await Promise.race([loop.pollTask().then(() => 'answered'), sharedDelay(2_000).then(() => 'held')]);
+    assert.equal(first, 'answered', 'the poll returns its own answer while the orphan send is still open');
+    await entered.promise;
+    const next = loop.pollTask();
+    await sharedDelay(100);
+    assert.equal(f.calls.filter(call => call.path === '/agent-fabric/tasks/poll').length, 1, 'the next request waits for that one send');
+    gate.open();
+    await next;
+    assert.deepEqual(f.calls.slice(0, 4).map(call => isOrphanCall(orphans, call) ? 'orphan' : call.path),
+      ['/agent-fabric/sessions', '/agent-fabric/tasks/poll', 'orphan', '/agent-fabric/tasks/poll'],
+      'one orphan per section, after the request has its answer');
+    await loop.pollTask();
+  } finally { Date.now = now; gate.open(); }
+  assert.deepEqual(orphans.map(entry => sentTimes(f.calls, orphanMessageId(entry))), [1, 1]);
+  assert.deepEqual(keptMessageIds(await f.read()), []);
+});
+
+test('no client of a process sends orphans after its requests while a task lease is held there (shared protocol state)', async () => {
+  const taskId = randomUUID();
+  let leased = true;
+  const f = await sharedStateFixture('fabric-shared-orphan-lease-', call => call.path === '/agent-fabric/tasks/poll' && leased
+    ? sharedOk({ task: { envelope: { taskId } } }) : sharedOk());
+  const orphan = sharedOrphan(f.config.deviceId, await exitedPid());
+  await writeSharedOutboxes(f.statePath, { 'relay:gone': orphan });
+  const a = await f.open('relay:workspace-a'), b = await f.open('relay:workspace-b');
+  await a.openSession();
+  await b.openSession();
+  await sharedLater(11, async () => {
+    await a.pollTask();
+    leased = false;
+    await b.pollTask();
+    await a.postTaskEvent(taskId, 'started', {});
+    await a.postTaskEvent(taskId, 'lease_extended', { taskId });
+    await b.pollTask();
+    await b.pollTask();
+    assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'no orphan is sent while the task lease is held');
+    await a.postTaskEvent(taskId, 'completed', {});
+    await b.pollTask();
+  });
+  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'once the task ends, it is sent after the next request');
+  assert.deepEqual(keptMessageIds(await f.read()), []);
+});
+
+test('an adopted answer stays in the file only for an owner that can read it, and for at most 10 minutes (shared protocol state)', async () => {
+  let down = false;
+  const f = await sharedStateFixture('fabric-shared-orphan-canary-', call => {
+    if (down && call.path === '/agent-fabric/workspaces') return sharedUnavailable();
+    return sharedOk({ private: `private-${call.path.split('/').at(-1)}-canary` });
+  });
+  const dead = await exitedPid();
+  const poll = sharedOrphan(f.config.deviceId, dead, { route: '/agent-fabric/tasks/poll' });
+  const exited = sharedOrphan(f.config.deviceId, dead);
+  await writeSharedOutboxes(f.statePath, { 'cli:1:exited:1': poll, 'cli:1:exited:2': exited });
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  assert.equal(sentTimes(f.calls, orphanMessageId(poll)), 0, 'an orphaned poll is removed without sending, like a session open');
+  assert.equal(sentTimes(f.calls, orphanMessageId(exited)), 1);
+  assert.doesNotMatch(await readFile(f.statePath, 'utf8'), /canary/, 'no answer is kept for an owner that has exited');
+  await b.openSession();
+  down = true;
+  await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  down = false;
+  await sharedLater(11, async () => { await b.pollTask(); await b.pollTask(); });
+  assert.equal(sentTimes(f.calls, kept.messageId), 2);
+  assert.match(await readFile(f.statePath, 'utf8'), /private-workspaces-canary/, 'the answer stays for its live owner');
+  const c = await f.open();
+  await sharedLater(22, () => c.openSession());
+  assert.doesNotMatch(await readFile(f.statePath, 'utf8'), /canary/,
+    'and leaves the file once 10 minutes have passed, while the owner still runs');
+  assert.deepEqual(keptMessageIds(await f.read()), []);
+});
+
+test('a kept request stays where a session open of the earlier version replays it, and this version sends it once (shared protocol state)', async () => {
+  let down = false;
+  const f = await sharedStateFixture('fabric-shared-rollback-', call =>
+    down && call.path === '/agent-fabric/workspaces' ? sharedUnavailable() : sharedOk());
+  const a = await f.open('relay:w1');
+  await a.openSession();
+  down = true;
+  await assert.rejects(a.registerWorkspace({ workspaceId: 'w1' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  down = false;
+  const state = await f.read();
+  const entry = state.outboxes!['relay:w1']!;
+  assert.deepEqual([state.sessionId, state.nextSequence, state.pending], [entry.sessionId, entry.nextSequence, entry.pending],
+    'the earlier version finds the kept request at the top level, exactly as signed');
+  assert.equal(state.pending?.headers['x-dharma-message-id'], kept.messageId);
+  const b = await f.open();
+  await b.openSession();
+  assert.equal(sentTimes(f.calls, kept.messageId), 1, 'this version never takes that copy for an orphan of its own');
+  const c = await f.open();
+  await sharedLater(11, () => c.openSession());
+  assert.equal(sentTimes(f.calls, kept.messageId), 2, 'it is sent once when its entry is due');
+  const after = await f.read();
+  assert.deepEqual([after.pending, keptMessageIds(after)], [null, []]);
+});
+
+test('the README says what a rollback to an earlier version keeps (shared protocol state)', async () => {
+  const readme = (await readFile(new URL('../README.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  assert.equal(/rollback to an earlier version/i.test(readme), true, 'the README describes a rollback');
+  assert.equal(/oldest kept request/i.test(readme), true, 'the README names the one kept request an earlier version replays');
+});
