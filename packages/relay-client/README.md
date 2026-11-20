@@ -110,6 +110,15 @@ read the per-client outbox entries described below. The relay upgrade stops
 the relay before it switches versions, but a command of the earlier version
 that is still running can overwrite the file until it exits.
 
+An earlier version reads only one kept request, at the top level of the file.
+Every write of this version copies the oldest kept request there, exactly as
+signed (a session open, poll or read is never copied); this version never sends
+that copy on its own. After a rollback to an earlier version, the first
+session open of that version sends the copied request again, with the same
+message id, and then writes a file without the per-client entries. Every other
+kept request is then discarded, and whether the server received it stays
+unknown.
+
 Each client keeps its own outbox entry in the protocol-state file: its
 session, its next sequence and at most one kept request. A relay workspace
 loop uses one entry per workspace, and every other client gets an entry of its
@@ -121,13 +130,18 @@ kept request again, with the same message id, when it opens its session.
 When the owner process has exited, as with an ad hoc command that stopped
 during an outage, another client sends the kept request of that entry: the
 next session open on the device, or a long-lived client such as a workspace
-loop after one of its own requests has its answer. So does a kept request that
+loop after one of its own requests. That client sends it in a signing-control
+section of its own, which starts only once the request has returned its
+answer, sends one kept request at most, and does not start while any client of
+the process holds a task lease. So does a kept request that
 stood unchanged for 10 minutes, even when its process id still answers (it may
 have been reused or belong to another account) or when it belongs to a
 workspace loop that never ran again; a workspace loop that restarts sooner
 replays its own request first. The outcome never answers the client that sent
 it and is never raised to its caller. An accepted or refused request leaves
-the file and its answer stays in the owner's entry. An owner that still runs
+the file. When its owner can still read the entry (a workspace loop, or a
+process that still runs), the answer stays in the owner's entry for 10
+minutes, and the next write after that removes it. An owner that still runs
 takes that outcome from the file instead of sending the request again: when
 its caller retries the same call, it returns that answer or raises that
 refusal without signing the call again. Only an answer whose body is a JSON
@@ -135,13 +149,14 @@ object is kept; after any other answer the owner signs its retry again. The
 client records each such send in
 the file before it starts, so a request without a definite answer, including
 one whose sender stopped during the send, stays in the file and is sent again
-after at least 10 minutes. One client
-sends at most 4 such requests in one signing-control section and stops at the
-first without a definite answer; while more are due, its next request sends
-the next ones. A kept session open matters only to its owner: another client
-removes an orphaned one without sending it. A kept request in a file written
-by an earlier version is moved to such an entry
-when the file is first read. Entries without a kept request are removed once
+after at least 10 minutes. A session open
+sends at most 4 such requests in its signing-control section and stops at the
+first without a definite answer; while more are due, each next request of that
+client sends one more. A kept session open, poll or read matters only to its
+owner: another client removes an orphaned one without sending it, so the task
+or content a poll or read returns is never written to the file. A kept request
+in a file written by an earlier version is moved to such an entry when the file
+is first read, unless it is the copy of a kept request in an entry. Entries without a kept request are removed once
 their owner process has exited, except that an entry whose request another
 client answered stays for 10 minutes, so an owner that read the entry before
 still finds the answer.

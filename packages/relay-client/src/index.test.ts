@@ -2483,6 +2483,10 @@ async function sharedLater<T>(minutes: number, work: () => Promise<T>): Promise<
   Date.now = () => now() + minutes * 60_000;
   try { return await work(); } finally { Date.now = now; }
 }
+/** Resolves once every signing-control section already in this process's line has finished, such as the section in
+ * which a client sends a due orphan after its own request. It writes nothing. */
+const sharedSettled = (config: { hqUrl: string; organizationId: string; deviceId: string }) =>
+  withDeviceSigningControl({ config }, async () => undefined);
 
 test('a stale action acknowledgement is re-signed only by its owner, in its own session (shared protocol state)', async () => {
   const f = await sharedMonotonicFixture('fabric-shared-resign-');
@@ -2579,7 +2583,7 @@ test('a kept request in an earlier single-slot file is sent once by the next ses
     ? new Response(JSON.stringify({ ok: false, error: { code: 'sequence_out_of_order', message: 'Out of order.' } }), { status: 409 })
     : sharedOk());
   await writeFile(f.statePath, JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: legacySession, nextSequence: 5,
-    pending: { method: 'POST', pathname: '/api/v1/orgs/org_a/agent-fabric/tasks/poll', body: '{"leaseSeconds":120}', headers: {
+    pending: { method: 'POST', pathname: '/api/v1/orgs/org_a/agent-fabric/workspaces', body: '{"workspaceId":"legacy"}', headers: {
       'content-type': 'application/json', 'idempotency-key': legacy, 'x-dharma-device-id': f.config.deviceId,
       'x-dharma-session-id': legacySession, 'x-dharma-message-id': legacy, 'x-dharma-timestamp': '2026-01-01T00:00:00.000Z',
       'x-dharma-nonce': 'legacy-nonce', 'x-dharma-sequence': '4', 'x-dharma-signature': 'legacy-signature' } } }));
@@ -2770,7 +2774,7 @@ test('a long-lived client sends a due orphan after its own request, without anot
   down = false;
   for (let poll = 0; poll < 20; poll++) await loop.pollTask();
   assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'not again within 10 minutes');
-  await sharedLater(11, () => loop.pollTask());
+  await sharedLater(11, async () => { await loop.pollTask(); await sharedSettled(f.config); });
   assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 2, 'a later request of the same client sends it once more');
   assert.equal(f.calls.at(-2)!.path, '/agent-fabric/tasks/poll', 'after the client\'s own request');
   await sharedLater(22, () => loop.pollTask());
@@ -2839,10 +2843,10 @@ test('one session open sends at most four orphans, stops at the first without an
   const b = await f.open();
   await sharedLater(11, () => b.openSession());
   assert.equal(orphanSends(), 5, 'at most four orphans per batch');
-  await sharedLater(11, () => b.pollTask());
-  assert.equal(orphanSends(), 9, 'the client\'s next request sends the next batch while due orphans remain');
-  await sharedLater(11, () => b.pollTask());
-  await sharedLater(11, () => b.pollTask());
+  for (let poll = 1; poll <= 6; poll++) {
+    await sharedLater(11, async () => { await b.pollTask(); await sharedSettled(f.config); });
+    assert.equal(orphanSends(), Math.min(11, 5 + poll), 'after each of its requests the client sends one more while due orphans remain');
+  }
   assert.equal(orphanSends(), 11, 'each orphan is answered once');
   assert.deepEqual(kept.map(entry => sentTimes(f.calls, orphanMessageId(entry))).sort(), [1, 1, 1, 1, 1, 1, 1, 1, 1, 2]);
   assert.deepEqual(keptMessageIds(await f.read()), []);
@@ -2869,14 +2873,15 @@ test('a file full of kept orphans refuses only a new kept request and drains onc
   assert.equal(f.calls.filter(call => !orphanIds.has(call.messageId) && call.path !== '/agent-fabric/sessions').length, 0,
     'a refused request is not sent');
   down = false;
-  await sharedLater(11, () => c.pollTask());
-  assert.equal(f.calls.filter(call => orphanIds.has(call.messageId)).length, 8,
-    'once orphans are due, a batch is sent to make room before the request and another after it');
+  await sharedLater(11, async () => { await c.pollTask(); await sharedSettled(f.config); });
+  assert.equal(f.calls.filter(call => orphanIds.has(call.messageId)).length, 5,
+    'once orphans are due, a batch is sent to make room before the request and one more after it');
   assert.equal(f.calls.filter(call => !orphanIds.has(call.messageId) && call.path === '/agent-fabric/workspaces').length, 0,
     'the refused request is not kept for a later replay');
-  const d = await f.open();
-  await sharedLater(11, () => d.openSession());
-  for (let poll = 0; poll < 70 && keptMessageIds(await f.read()).length > 0; poll++) await sharedLater(11, () => d.pollTask());
+  for (let open = 0; open < 70 && keptMessageIds(await f.read()).length > 0; open++) {
+    const d = await f.open();
+    await sharedLater(11, () => d.openSession());
+  }
   assert.deepEqual(keptMessageIds(await f.read()), []);
   assert.deepEqual(orphans.filter(entry => sentTimes(f.calls, orphanMessageId(entry)) !== 1), [], 'each orphan is sent once');
 });
@@ -2892,7 +2897,7 @@ test('a live owner whose kept request another client sent after 10 minutes never
   await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
   const kept = f.calls.at(-1)!;
   down = false;
-  await sharedLater(11, () => b.pollTask());
+  await sharedLater(11, async () => { await b.pollTask(); await sharedSettled(f.config); });
   assert.equal(sentTimes(f.calls, kept.messageId), 2, 'another client sends a request whose entry stood unchanged for 10 minutes');
   await a.pollTask();
   assert.equal(sentTimes(f.calls, kept.messageId), 2, 'its owner learns the outcome from the file and does not send it again');
@@ -2918,7 +2923,12 @@ for (const outcome of ['accepted', 'refused'] as const) {
     await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
     const kept = f.calls.at(-1)!;
     mode = 'answer';
-    await sharedLater(11, () => b.pollTask());
+    // The entry stood unchanged for 10 minutes. The answer is written in real time, so it is still in the file.
+    const state = await f.read();
+    Object.values(state.outboxes ?? {}).find(entry => entry.pending?.headers['x-dharma-message-id'] === kept.messageId)!
+      .updatedAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    await writeFile(f.statePath, JSON.stringify(state));
+    await (await f.open()).openSession();
     assert.equal(sentTimes(f.calls, kept.messageId), 2, 'another client sends a request whose entry stood unchanged for 10 minutes');
     const retry = a.registerWorkspace({ workspaceId: 'a' });
     if (outcome === 'accepted') {
@@ -3098,7 +3108,8 @@ test('no client of a process sends orphans after its requests while a task lease
     await a.postTaskEvent(taskId, 'lease_extended', { taskId });
     await b.pollTask();
     await b.pollTask();
-    assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'no orphan is sent while the task lease is held');
+    await (await f.open('relay:workspace-c')).openSession();
+    assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'no orphan is sent while the task lease is held, not even by a session open');
     await a.postTaskEvent(taskId, 'completed', {});
     await b.pollTask();
   });
@@ -3126,7 +3137,12 @@ test('an adopted answer stays in the file only for an owner that can read it, an
   await assert.rejects(a.registerWorkspace({ workspaceId: 'a' }), error => error instanceof AgentFabricRequestError && error.status === 503);
   const kept = f.calls.at(-1)!;
   down = false;
-  await sharedLater(11, async () => { await b.pollTask(); await b.pollTask(); });
+  // The owner still runs, and its entry stood unchanged for 10 minutes.
+  const state = await f.read();
+  const [ownerKey] = Object.entries(state.outboxes ?? {}).find(([, entry]) => entry.pending) ?? [];
+  state.outboxes![ownerKey!]!.updatedAt = new Date(Date.now() - 11 * 60_000).toISOString();
+  await writeFile(f.statePath, JSON.stringify(state));
+  await (await f.open()).openSession();
   assert.equal(sentTimes(f.calls, kept.messageId), 2);
   assert.match(await readFile(f.statePath, 'utf8'), /private-workspaces-canary/, 'the answer stays for its live owner');
   const c = await f.open();

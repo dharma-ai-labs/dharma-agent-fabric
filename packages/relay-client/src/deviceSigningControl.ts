@@ -32,6 +32,12 @@ export function withDeviceSigningLineSignal<T>(signal:AbortSignal,work:()=>Promi
   return lineSignals.run(signal,work);
 }
 
+/** Runs work outside any signing-control hold of its caller, so a signing-control call started in it, even one
+ * that runs after the caller's hold has settled, takes control as a root. A relay loop's line signal still applies. */
+export function outsideDeviceSigningControl<T>(work:()=>T):T{
+  return owners.exit(work);
+}
+
 /** Resolves with this root's leave() once every root ahead of it has left. A root that gives up, at the
  * deadline, when its host scope is withdrawn or when its relay loop stops, leaves at once, so the roots
  * behind it keep their order. */

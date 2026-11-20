@@ -24,7 +24,7 @@ import {HostOperationFence, type HostOperationScope} from './hostOperationScope.
 import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRecoveryJournalIO} from './signingRecoveryJournal.js';
 import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 import {planSigningRecovery} from './signingRecoveryPlan.js';
-import {withDeviceSigningControl} from './deviceSigningControl.js';
+import {outsideDeviceSigningControl,withDeviceSigningControl} from './deviceSigningControl.js';
 export {withDeviceSigningControl,withDeviceSigningLineSignal,type DeviceSigningControlLease} from './deviceSigningControl.js';
 export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 export {progressPreparedDeviceSigningRecoveryOffer,SigningRecoveryOfferClientError,
@@ -96,8 +96,9 @@ interface AdoptedOutcome {
 
 interface ProtocolState {
   schema: 'dharma.protocol-state/v1';
-  /** In memory: this client's own session, sequence and kept request. In the file these stay empty and each client's
-   * own are in outboxes, so a client of an earlier version finds no kept request to replay. */
+  /** In memory: this client's own session, sequence and kept request. In the file each client's own are in outboxes,
+   * and these hold a copy of the oldest kept request, for a session open of an earlier version to replay (see
+   * #persist). */
   sessionId: string | null;
   nextSequence: number;
   pending: PendingRequest | null;
@@ -113,8 +114,16 @@ const IDLE_OUTBOX_ENTRIES_MAX = 32;
 /** An entry whose kept request stood unchanged this long is orphaned, and another client sends an orphaned request
  * that got no definite answer again only after this interval. */
 const ORPHAN_RETRY_INTERVAL_MS = 10 * 60_000;
-/** Orphans one client sends in one signing-control section; one without a definite answer ends it sooner. */
+/** Orphans a session open sends in its signing-control section; one without a definite answer ends it sooner. After
+ * a client's own request has its answer, it sends at most one, in a section of its own. */
 const ORPHAN_SENDS_PER_SECTION = 4;
+/** Task leases held in this process, by client, until when they run unless extended. While one is held, no client of
+ * this process sends an orphan after its own request, so a lease heartbeat never waits behind such a send. */
+const taskLeases = new Map<object, number>();
+function taskLeaseHeld(now: number): boolean {
+  for (const [client, until] of taskLeases) if (until <= now) taskLeases.delete(client);
+  return taskLeases.size > 0;
+}
 const OWNER_KEY_PATTERN = /^(?:relay|cli|migrated):[A-Za-z0-9_.:-]{1,128}$/;
 /** Part of every default owner key, so a later process that gets the same pid never takes over an earlier entry. */
 const PROCESS_INSTANCE = randomBytes(9).toString('base64url');
@@ -198,12 +207,16 @@ function assertProtocolState(value: unknown): asserts value is ProtocolState {
 }
 
 /** Every outbox entry of a file. The kept request of an earlier single-slot file becomes an orphan keyed by its
- * session, sent once by the next session open; a request that is always rebuilt is dropped as before. */
+ * session, sent once by the next session open; a request that is always rebuilt is dropped as before. A top-level
+ * request that is a copy of an entry's kept request (see #persist) is that entry's, not another orphan. */
 function outboxesOf(state: ProtocolState): Record<string, OutboxEntry> {
   const outboxes: Record<string, OutboxEntry> = {};
   for (const [owner, entry] of Object.entries(state.outboxes ?? {})) outboxes[owner] = durableOutboxEntry(entry);
   const pending = state.pending;
-  if (pending && !isExplicitlyRebuiltPath(pending.pathname) && !isSessionOpen(pending)) {
+  const messageId = pending?.headers['x-dharma-message-id'];
+  const copied = !!messageId && Object.values(state.outboxes ?? {}).some(entry =>
+    entry.pending?.headers['x-dharma-message-id'] === messageId);
+  if (pending && !copied && !isExplicitlyRebuiltPath(pending.pathname) && !isSessionOpen(pending)) {
     const session = pending.headers['x-dharma-session-id'] || state.sessionId || '';
     const key = `migrated:${/^[A-Za-z0-9_-]{1,128}$/.test(session) ? session : sha256(session).slice(0, 32)}`;
     outboxes[key] ??= {sessionId: session || null, nextSequence: state.nextSequence, pending, ownerPid: 0,
@@ -230,6 +243,13 @@ function durableOutboxEntry(entry: OutboxEntry): OutboxEntry {
  * orphaned one without sending it, and a full file does not keep one. */
 function isSessionOpen(pending: PendingRequest): boolean {
   return pending.method === 'POST' && pending.pathname.endsWith('/agent-fabric/sessions');
+}
+
+/** A kept request only its owner can use: a session open, a poll, whose answer hands work or content to the owner (a
+ * task it claimed lapses with its lease), or a read. Another client drops an orphaned one without sending it, so such
+ * an answer never reaches the file, and an earlier version is never handed one to replay. */
+function isOwnerOnlyRequest(pending: PendingRequest): boolean {
+  return pending.method === 'GET' || isSessionOpen(pending) || pending.pathname.endsWith('/poll');
 }
 
 /** Whether another client may send an entry's kept request now. It is orphaned once its owner process has exited,
@@ -1425,7 +1445,8 @@ export class AgentFabricClient {
     // latest file, all in one signing-control section. It calls the sends directly: waiting on #serial while holding
     // control could deadlock. The section ends before the session POST, which takes control again through #serial.
     const replace = async () => {
-      if (this.#durable) await this.#adoptOrphans();
+      // Not while a task lease is held in this process, so the lease heartbeat of a sibling loop never waits on them.
+      if (this.#durable && !taskLeaseHeld(Date.now())) await this.#adoptOrphans();
       if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
         // Content-bearing requests require refreshed consent. Repository connect
         // requests depend on current workspace registration. Both are rebuilt by
@@ -1548,15 +1569,41 @@ export class AgentFabricClient {
   }
 
   async #signedRequestNow(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
-    return this.#withProtocolState(async () => {
-      const result = await this.#signedRequestWithSigningControl(method, route, body);
-      // A long-lived client, such as a workspace loop, also sends due orphans once its own request has its answer,
-      // so they do not wait for another session open. A session open has just done this before its own POST.
-      if (this.#durable && Date.now() >= this.#orphansDueAt && !(method === 'POST' && route === '/agent-fabric/sessions')) {
-        try { await this.#adoptOrphans(); } catch { /* A later request tries again; this caller already has its answer. */ }
-      }
-      return result;
+    const event = method === 'POST' && /^\/agent-fabric\/tasks\/[^/]+\/events$/.test(route)
+      ? (body as { eventType?: unknown } | null)?.eventType : undefined;
+    if (event === 'completed' || event === 'failed' || event === 'cancelled') taskLeases.delete(this);
+    const result = await this.#withProtocolState(() => this.#signedRequestWithSigningControl(method, route, body));
+    if (!this.#durable) return result;
+    if (route === '/agent-fabric/tasks/poll' && result.task && typeof result.task === 'object') {
+      const seconds = Number((body as { leaseSeconds?: unknown } | null)?.leaseSeconds);
+      this.#leaseMs = (Number.isFinite(seconds) && seconds > 0 ? seconds : 120) * 1000;
+      taskLeases.set(this, Date.now() + this.#leaseMs);
+    } else if (event === 'started' || event === 'lease_extended') {
+      taskLeases.set(this, Date.now() + this.#leaseMs);
+    }
+    // A long-lived client, such as a workspace loop, also sends due orphans after its own requests, so they do not wait
+    // for another session open (which has just sent them before its own POST).
+    if (!(method === 'POST' && route === '/agent-fabric/sessions')) this.#sendDueOrphansLater();
+    return result;
+  }
+
+  /** The lease length of the task this client last polled. */
+  #leaseMs = 120_000;
+  /** Whether a section that sends due orphans is waiting or running. */
+  #orphanSection = false;
+
+  /** Sends at most one due orphan in a signing-control section of its own, after the caller already has its answer. It
+   * waits in the signing-control line like any root, so this client's next request may wait for that one send, but
+   * never while a task lease is held in this process. It never runs inside the caller's hold of signing control. */
+  #sendDueOrphansLater(): void {
+    if (this.#orphanSection || Date.now() < this.#orphansDueAt || taskLeaseHeld(Date.now())) return;
+    this.#orphanSection = true;
+    const send = () => this.#withProtocolState(async () => {
+      if (!taskLeaseHeld(Date.now())) await this.#adoptOrphans(1);
     });
+    void outsideDeviceSigningControl(() => protocolStateSections.exit(send))
+      .catch(() => undefined) // A later request tries again; the caller already has its answer.
+      .finally(() => { this.#orphanSection = false; });
   }
 
   get #durable(): boolean { return !this.#readOnly && !this.#isolatedSession; }
@@ -1620,31 +1667,34 @@ export class AgentFabricClient {
   /** When this client next looks for due orphans after its own request. */
   #orphansDueAt = 0;
 
-  /** Sends the kept requests of orphaned entries (see orphanDue): at most ORPHAN_SENDS_PER_SECTION, and none after
-   * one without a definite answer. Their outcome is never this caller's and is never thrown. Each entry is marked in
-   * the file before its send, so when this client stops during the send, the next one waits ORPHAN_RETRY_INTERVAL_MS
-   * too. An answered entry keeps no request and holds the answer, so a live owner takes the outcome from the file. A
-   * request without a definite answer stays and is due again after ORPHAN_RETRY_INTERVAL_MS. A re-signed request keeps
-   * its owner's session. While more are due, this client's next request sends the next ones. */
-  async #adoptOrphans(): Promise<void> {
+  /** Sends the kept requests of orphaned entries (see orphanDue): at most limit, and none after one without a definite
+   * answer. Their outcome is never this caller's and is never thrown. Each entry is marked in the file before its
+   * send, so when this client stops during the send, the next one waits ORPHAN_RETRY_INTERVAL_MS too. An answered
+   * entry keeps no request; it holds the answer only when its owner may still read it (a workspace loop, or a process
+   * that still runs), so a live owner takes the outcome from the file, and #persist drops that answer after
+   * ORPHAN_RETRY_INTERVAL_MS. A request without a definite answer stays and is due again after
+   * ORPHAN_RETRY_INTERVAL_MS. A re-signed request keeps its owner's session. While more are due, this client's next
+   * request sends the next one. An orphaned request only its owner can use is dropped without sending. */
+  async #adoptOrphans(limit = ORPHAN_SENDS_PER_SECTION): Promise<void> {
     const now = Date.now();
     this.#orphansDueAt = now + ORPHAN_RETRY_INTERVAL_MS;
-    const due = Object.entries(this.#otherOutboxes).filter(([owner, entry]) => orphanDue(owner, entry, now))
-      .map(([, entry]) => entry);
+    const due = Object.entries(this.#otherOutboxes).filter(([owner, entry]) => orphanDue(owner, entry, now));
     let unwritten = false;
-    for (const entry of due) {
-      if (!isSessionOpen(entry.pending!)) continue;
+    for (const [, entry] of due) {
+      if (!isOwnerOnlyRequest(entry.pending!)) continue;
       entry.nextSequence += 1;
       entry.pending = null;
       entry.adoptedAt = entry.updatedAt = new Date().toISOString();
+      delete entry.adoptedOutcome;
       unwritten = true;
     }
     let sent = 0;
-    for (const entry of due) {
+    for (const [owner, entry] of due) {
       if (!entry.pending) continue;
-      if (sent === ORPHAN_SENDS_PER_SECTION) { this.#orphansDueAt = now; break; }
+      if (sent === limit) { this.#orphansDueAt = now; break; }
       sent += 1;
       const messageId = entry.pending.headers['x-dharma-message-id'] ?? '';
+      const ownerReads = owner.startsWith('relay:') || ownerProcessAlive(entry.ownerPid);
       entry.adoptedAt = new Date().toISOString();
       delete entry.adoptedOutcome;
       await this.#persist();
@@ -1653,7 +1703,7 @@ export class AgentFabricClient {
         await this.#sendPendingWithSigningControl(entry, (status, response) => {
           // Only an answer every reader accepts is kept; without one, the owner signs its retry again.
           const outcome = {messageId, status, response};
-          if (isAdoptedOutcome(outcome)) entry.adoptedOutcome = outcome;
+          if (ownerReads && isAdoptedOutcome(outcome)) entry.adoptedOutcome = outcome;
         });
       } catch { await this.#assertHostScope(); }
       entry.adoptedAt = new Date().toISOString();
@@ -2014,7 +2064,12 @@ export class AgentFabricClient {
     const idle: Array<[string, OutboxEntry]> = [];
     const now = Date.now();
     for (const [owner, read] of Object.entries(this.#otherOutboxes)) {
-      const entry = durableOutboxEntry(read);
+      let entry = durableOutboxEntry(read);
+      if (entry.adoptedOutcome && !recentlyAdopted(entry, now)) {
+        // An adopted answer stays only while its owner may still retry the call (see recentlyAdopted).
+        const {adoptedOutcome: _answer, ...rest} = entry;
+        entry = rest;
+      }
       if (entry.pending) outboxes[owner] = entry;
       else if (ownerProcessAlive(entry.ownerPid) || recentlyAdopted(entry, now)) idle.push([owner, entry]);
     }
@@ -2026,9 +2081,15 @@ export class AgentFabricClient {
     if (room > 0) { outboxes[this.#ownerKey] = own; room -= 1; }
     idle.sort(([, a], [, b]) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     for (const [owner, entry] of idle.slice(0, Math.min(IDLE_OUTBOX_ENTRIES_MAX, room))) outboxes[owner] = entry;
+    // An earlier version reads only the top-level session, sequence and kept request, and its session open replays
+    // that request and then writes a file without outboxes. So the oldest kept request, exactly as signed, also goes
+    // there: after a rollback the earlier version still sends that one, with the same message id. outboxesOf never
+    // takes this copy for another orphan.
+    const [copy] = Object.values(outboxes).filter(entry => entry.pending && !isOwnerOnlyRequest(entry.pending))
+      .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt));
     return atomicJson(this.#statePath, {
-      schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
-      recoveredTaskCompletions: this.#state.recoveredTaskCompletions ?? [], outboxes,
+      schema: 'dharma.protocol-state/v1', sessionId: copy?.sessionId ?? null, nextSequence: copy?.nextSequence ?? 1,
+      pending: copy?.pending ?? null, recoveredTaskCompletions: this.#state.recoveredTaskCompletions ?? [], outboxes,
     } satisfies ProtocolState, this.#hostFence);
   }
 }
