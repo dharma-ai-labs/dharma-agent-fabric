@@ -175,15 +175,17 @@ their owner process has exited, except that an entry whose request another
 client answered stays for 10 minutes, so an owner that read the entry before
 still finds the answer. At most 32 entries without a kept request stay, the
 newest first, in the room the kept requests leave. When the entry of an owner
-that still runs is removed after another client answered its request, the
-owner no longer knows which sequences that client signed in its session. It
-then treats the request as settled and signs nothing more in that session: its
-next call fails with `Relay session is not open.` until it opens a new session.
-It does the same when an earlier version rewrote the file while its request was
-the copy at the top level, which that version sends. When its entry is gone
-otherwise (the file was removed, or an earlier version rewrote it while another
-request was the copy), nobody sent its request: the owner keeps it and sends it
-again with the same message id.
+that still runs leaves the file while it keeps a request (the idle cap removed
+it after another client answered it, an earlier version rewrote the file, or
+the file was removed), the file no longer shows whether another client sent
+that request, nor which sequences were signed in the owner's session. The owner
+then sends its kept request again only exactly as signed, with the same message
+id, sequence and idempotency key. It drops unsent a request that could be sent
+only at a new sequence or never replayed (an action acknowledgement past its
+time window, or a content-bearing request). It signs nothing new in that
+session: once the request has an answer or is dropped, the session is closed,
+and a call that is not the kept request fails with `Relay session is not open.`
+until the owner opens a new session.
 
 The file holds at most 1,000 recovered task completions. A new completion is
 refused while that list is full, but a kept completion is still sent again,

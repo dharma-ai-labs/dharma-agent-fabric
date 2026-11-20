@@ -244,10 +244,25 @@ function outboxesOf(state: ProtocolState): Record<string, OutboxEntry> {
   return outboxes;
 }
 
-/** Whether an owner's kept request is the file's top-level copy, the one an earlier version sends (see #persist). */
-function isTopCopy(state: ProtocolState, own: OutboxEntry | undefined): boolean {
-  const id = own?.pending?.headers['x-dharma-message-id'];
-  return !!id && state.pending?.headers['x-dharma-message-id'] === id;
+const ACTION_ACKNOWLEDGEMENT_PATH = /\/agent-fabric\/decisions\/[^/]+\/enforcements$/;
+
+/** Whether an action acknowledgement time is outside the window the server accepts, so a kept acknowledgement is sent
+ * again only re-signed with a fresh time, a new message id and a new sequence. */
+function acknowledgementTimeStale(acknowledgedAt: string, now: number): boolean {
+  const at = Date.parse(acknowledgedAt);
+  return !Number.isFinite(at) || now - at > 8 * 60_000 || at > now + 5 * 60_000;
+}
+
+/** Whether a kept request can be sent again only with a new signature at a new sequence, or not at all: a
+ * content-bearing request, which is never replayed implicitly, or an action acknowledgement that is invalid or outside
+ * its time window (see #sendPendingWithSigningControl). */
+function cannotResendAsSigned(pending: PendingRequest, now: number): boolean {
+  if (isContentBearingPath(pending.pathname)) return true;
+  if (!ACTION_ACKNOWLEDGEMENT_PATH.test(pending.pathname)) return false;
+  let acknowledgement: ActionDecisionAcknowledgement;
+  try { acknowledgement = JSON.parse(pending.body) as ActionDecisionAcknowledgement; } catch { return true; }
+  return !validateActionDecisionAcknowledgementContract(acknowledgement).ok
+    || acknowledgementTimeStale(acknowledgement.acknowledgedAt, now);
 }
 
 /** Whether the process that wrote an outbox entry still runs. A migrated entry has no owner process. */
@@ -1366,9 +1381,10 @@ export class AgentFabricClient {
   #keptCompletions: RecoveredTaskCompletion[] = [];
   /** Whether this client's kept request is in its own entry in the file, as of the last read or write. */
   #keptOnDisk: boolean;
-  /** Whether this client's kept request is also the file's top-level copy (see #persist), as of the last read or write
-   * that found its entry. */
-  #topCopy: boolean;
+  /** Set when this client's entry left the file while it kept a request (see #reloadSharedState): the sequences other
+   * clients signed in this session are unknown, so its kept request is sent only as signed and nothing new is signed
+   * in this session (see #sendKeptAsSigned). */
+  #sequenceFloorLost = false;
   /** Opened with an owner key, as a workspace loop is: it also sends due orphans after its own requests. */
   readonly #longLived: boolean;
   #serial: Promise<unknown> = Promise.resolve();
@@ -1376,7 +1392,7 @@ export class AgentFabricClient {
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
     state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean; isolatedSession?: boolean;
-    ownerKey: string; longLived: boolean; otherOutboxes: Record<string, OutboxEntry>; keptOnDisk: boolean; topCopy: boolean;
+    ownerKey: string; longLived: boolean; otherOutboxes: Record<string, OutboxEntry>; keptOnDisk: boolean;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -1394,7 +1410,6 @@ export class AgentFabricClient {
     this.#longLived = input.longLived;
     this.#otherOutboxes = input.otherOutboxes;
     this.#keptOnDisk = input.keptOnDisk;
-    this.#topCopy = input.topCopy;
   }
 
   #binding() {
@@ -1453,7 +1468,7 @@ export class AgentFabricClient {
       recoveredTaskCompletions: [],
     };
     let otherOutboxes: Record<string, OutboxEntry> = {};
-    let keptOnDisk = false, topCopy = false;
+    let keptOnDisk = false;
     if (!readOnly && !isolatedSession) try {
       const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
       const parsed = JSON.parse(bytes) as unknown;
@@ -1461,7 +1476,6 @@ export class AgentFabricClient {
       const {[ownerKey]: own, ...others} = outboxesOf(parsed);
       otherOutboxes = others;
       keptOnDisk = !!own?.pending;
-      topCopy = isTopCopy(parsed, own);
       state = {
         schema: 'dharma.protocol-state/v1', sessionId: own?.sessionId ?? null, nextSequence: own?.nextSequence ?? 1,
         pending: own?.pending ?? null, recoveredTaskCompletions: parsed.recoveredTaskCompletions ?? [],
@@ -1477,7 +1491,7 @@ export class AgentFabricClient {
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
       statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession, ownerKey,
-      longLived: input.ownerKey !== undefined, otherOutboxes, keptOnDisk, topCopy,
+      longLived: input.ownerKey !== undefined, otherOutboxes, keptOnDisk,
     });
   }
 
@@ -1501,12 +1515,15 @@ export class AgentFabricClient {
         // their explicit workflows instead of replayed from stale prerequisites.
         this.#state.pending = null;
         await this.#persist();
+      } else if (this.#state.pending && this.#sequenceFloorLost) {
+        await this.#sendKeptAsSigned();
       } else if (this.#state.pending) {
         await this.#sendPendingWithSigningControl(this.#state);
       }
       this.#state.sessionId = randomUUID();
       this.#state.nextSequence = 1;
       this.#state.pending = null;
+      this.#sequenceFloorLost = false;
       await this.#persist();
     };
     if (this.#durable || this.#state.pending) await this.#withProtocolState(replace);
@@ -1729,20 +1746,15 @@ export class AgentFabricClient {
       if (waiting?.length) entry.keptCompletions = waiting; else delete entry.keptCompletions;
     }
     this.#state.recoveredTaskCompletions = merged;
-    if (own) this.#topCopy = isTopCopy(disk!, own);
-    // This client's kept request left the file. A writer of this version (the file still has outboxes) drops an entry
-    // only after another client sent its request and got a definite answer, and the idle cap then removed it; an
-    // earlier version sends the top-level copy, and may re-sign it, before it writes a file without outboxes. Either
-    // way the sequences signed in this session are unknown, so this session signs nothing more: the request is
-    // settled, and the next call needs a new session. Otherwise (the file was removed, or an earlier version rewrote
-    // it while another request was the top-level copy) nobody sent it: this client keeps it and sends it again with
-    // the same message id, and its next write puts it back in the file.
+    // This client's kept request left the file, although no write by this client drops one. Another client may have
+    // sent it, and may have re-signed it at a higher sequence in this session, before its entry was removed (by the
+    // idle cap, by an earlier version that rewrote the file without outboxes, or with the file). The file no longer
+    // shows whether anyone sent it, nor which sequences were signed in this session. So this client keeps the request
+    // and sends it again only exactly as signed, signs nothing new in this session, and then closes it (see
+    // #sendKeptAsSigned). Its next write puts the request back in the file.
     if (this.#state.pending && this.#keptOnDisk && !own) {
-      if (disk && (disk.outboxes !== undefined || this.#topCopy)) {
-        this.#state.pending = null;
-        this.#state.sessionId = null;
-        this.#adoptedOutcome = null;
-      } else this.#keptOnDisk = false;
+      this.#sequenceFloorLost = true;
+      this.#keptOnDisk = false;
     }
     // Another client sent this client's kept request after it stood unchanged (see orphanDue). The file then holds
     // its outcome: no kept request once it was answered, with the answer, or the request as last sent. When the
@@ -1834,6 +1846,15 @@ export class AgentFabricClient {
       if (adopted.status >= 200 && adopted.status < 300) return adopted.response;
       throw new AgentFabricRequestError(adopted.response, adopted.status, true);
     }
+    if (this.#sequenceFloorLost) {
+      // This client's entry left the file (see #reloadSharedState): its kept request is sent only as signed, and
+      // nothing new is signed in this session, which is then closed.
+      const kept = this.#state.pending;
+      const sameRequest = !!kept && kept.method === method && kept.pathname === pathname && kept.body === serialized;
+      const recovered = await this.#sendKeptAsSigned();
+      if (sameRequest && recovered) return recovered;
+      throw new Error('Relay session is not open.');
+    }
     if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
       // An ambiguous content delivery is never replayed implicitly. The next
       // explicit caller must rebuild the capsule after rechecking disclosure
@@ -1889,6 +1910,27 @@ export class AgentFabricClient {
     return this.#sendPendingWithSigningControl(this.#state);
   }
 
+  /** Sends this client's kept request after its entry left the file (see #reloadSharedState), only exactly as signed:
+   * the same message id, sequence and idempotency key, with at most a fresh timestamp. A request that could be sent
+   * only at a new sequence, or never replayed (see cannotResendAsSigned), is settled unsent. Once the request has a
+   * definite answer or is settled, the session is closed, so the next call needs a new session. A retryable failure
+   * keeps both the request and the session for the next call. Returns the answer when the request was sent. */
+  async #sendKeptAsSigned(): Promise<Record<string, unknown> | undefined> {
+    try {
+      const kept = this.#state.pending;
+      if (kept && !cannotResendAsSigned(kept, Date.now())) return await this.#sendPendingWithSigningControl(this.#state);
+      this.#state.pending = null;
+      return undefined;
+    } finally {
+      if (!this.#state.pending) {
+        this.#sequenceFloorLost = false;
+        this.#state.sessionId = null;
+        this.#adoptedOutcome = null;
+        await this.#persist();
+      }
+    }
+  }
+
   /** Sends the kept request of one outbox entry: this client's own, or an orphan in #adoptOrphans. answered sees a
    * definite answer before the entry is written without its request. */
   async #sendPendingWithSigningControl(slot: Pick<OutboxEntry, 'nextSequence' | 'pending'>,
@@ -1898,7 +1940,7 @@ export class AgentFabricClient {
     if (!pending) throw new Error('No pending protocol request.');
     // A kept completion is sent again even when the queue is full: the server may already have accepted it, and its
     // receipt then waits in this client's entry for room (see #recordRecoveredTaskCompletion).
-    if (/\/agent-fabric\/decisions\/[^/]+\/enforcements$/.test(pending.pathname)) {
+    if (ACTION_ACKNOWLEDGEMENT_PATH.test(pending.pathname)) {
       let acknowledgement: ActionDecisionAcknowledgement;
       try {
         acknowledgement = JSON.parse(pending.body) as ActionDecisionAcknowledgement;
@@ -1915,10 +1957,7 @@ export class AgentFabricClient {
         await this.#persist();
         throw new Error('Stale action acknowledgement is invalid and was discarded.');
       }
-      const acknowledgedAt = Date.parse(acknowledgement.acknowledgedAt);
-      if (!Number.isFinite(acknowledgedAt)
-        || Date.now() - acknowledgedAt > 8 * 60_000
-        || acknowledgedAt > Date.now() + 5 * 60_000) {
+      if (acknowledgementTimeStale(acknowledgement.acknowledgedAt, Date.now())) {
         const refreshed = refreshActionDecisionAcknowledgement(acknowledgement);
         // Above every sequence used in this session, including one another client signed when it sent this entry.
         const sequence = Math.max(Number(pending.headers['x-dharma-sequence'] || 0) + 1, slot.nextSequence);
@@ -2203,7 +2242,6 @@ export class AgentFabricClient {
     this.#unwrittenCompletions.clear();
     this.#keptCompletions = waiting;
     this.#keptOnDisk = !!outboxes[this.#ownerKey]?.pending;
-    this.#topCopy = !!copy && copy === outboxes[this.#ownerKey];
   }
 }
 
