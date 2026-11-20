@@ -2455,3 +2455,16 @@ test('the README says every protocol-state write takes device signing control (s
   assert.equal(/protocol state [^.]*under the device signing control/i.test(readme), true,
     'the README says protocol-state writes take device signing control');
 });
+
+test('a protocol-state file corrupted after open is preserved and stops the next write (shared protocol state)', async () => {
+  const f = await sharedStateFixture('fabric-shared-corrupt-', () => sharedOk());
+  const client = await f.open();
+  await client.openSession();
+  await writeFile(f.statePath, '{"schema":"dharma.protocol-state/v1","nextSequence":0}');
+  const corrupt = await readFile(f.statePath, 'utf8');
+  const sent = f.calls.length;
+  await assert.rejects(client.registerWorkspace({ workspaceId: 'w' }), /protocol state is invalid/);
+  await assert.rejects(client.openSession(), /protocol state is invalid/);
+  assert.equal(await readFile(f.statePath, 'utf8'), corrupt, 'the corrupt file is kept for recovery');
+  assert.equal(f.calls.length, sent, 'nothing is signed or sent from a state the client cannot read');
+});
