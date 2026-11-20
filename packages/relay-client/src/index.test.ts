@@ -2548,3 +2548,106 @@ test('a protocol-state file corrupted after open is preserved and stops the next
   assert.equal(await readFile(f.statePath, 'utf8'), corrupt, 'the corrupt file is kept for recovery');
   assert.equal(f.calls.length, sent, 'nothing is signed or sent from a state the client cannot read');
 });
+
+// A kept request of another client is drained before this caller signs its own. Its outcome is never this caller's:
+// a refusal of it lets the caller send its own request, and a retryable failure of it reaches the caller as
+// relay_outbox_busy, which says the caller's request was not sent.
+const isOutboxBusy = (error: Error & { code?: unknown; definitive?: unknown }) =>
+  !(error instanceof AgentFabricRequestError) && error.code === 'relay_outbox_busy' && error.definitive !== true;
+
+test('a refusal of another client\'s kept request never answers this caller, which still gets its own response (shared protocol state)', async () => {
+  const taskId = randomUUID();
+  let events = 0;
+  const f = await sharedStateFixture('fabric-shared-drain-refused-', call => {
+    if (call.path.endsWith('/events')) {
+      events += 1;
+      if (events === 1) return sharedUnavailable();
+      return new Response(JSON.stringify({ ok: false, error: { code: 'lease_expired', message: 'Lease expired.' } }), { status: 409 });
+    }
+    return sharedOk({ observed: call });
+  });
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  await b.openSession();
+  const sessionA = f.calls[0]!.sessionId, sessionB = f.calls[1]!.sessionId;
+  await assert.rejects(b.postTaskEvent(taskId, 'progress', { note: 'working' }),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const polled = await a.pollTask();
+  const own = f.calls.at(-1)!;
+  assert.deepEqual(f.calls.slice(-2).map(call => [call.path, call.sessionId]),
+    [[`/agent-fabric/tasks/${taskId}/events`, sessionB], ['/agent-fabric/tasks/poll', sessionA]],
+    'the refused request of the other client is drained, then this caller sends its own');
+  assert.deepEqual(polled.observed, own, 'the caller gets the response to its own request');
+  assert.equal((await f.read()).pending, null);
+});
+
+test('another client\'s kept request that keeps failing retryably holds the outbox for a few attempts only (shared protocol state)', async () => {
+  const highest = new Map<string, number>();
+  const f = await sharedStateFixture('fabric-shared-drain-stuck-', call => {
+    if (call.path === '/agent-fabric/workspaces') return sharedUnavailable();
+    if ((highest.get(call.sessionId) ?? 0) >= call.sequence) {
+      return new Response(JSON.stringify({ ok: false, error: { code: 'sequence_out_of_order', message: 'Out of order.' } }), { status: 409 });
+    }
+    highest.set(call.sessionId, call.sequence);
+    return sharedOk({ observed: call });
+  });
+  const a = await f.open(), b = await f.open();
+  await a.openSession();
+  await b.openSession();
+  const sessionA = f.calls[0]!.sessionId, sessionB = f.calls[1]!.sessionId;
+  await assert.rejects(b.registerWorkspace({ workspaceId: 'b' }), error => error instanceof AgentFabricRequestError && error.status === 503);
+  const stuck = f.calls.at(-1)!;
+  let polled: Record<string, unknown> | undefined, busy = 0;
+  for (let attempt = 0; attempt < 5 && !polled; attempt++) {
+    try { polled = await a.pollTask(); }
+    catch (error) { assert.ok(isOutboxBusy(error as Error), `attempt ${attempt + 1} reports a busy outbox, not the other request's outcome`); busy += 1; }
+  }
+  assert.ok(polled, 'the caller sends its own request after a few attempts');
+  assert.ok(busy >= 1 && busy <= 3, `the stuck request held the outbox for ${busy} attempts`);
+  assert.deepEqual([f.calls.at(-1)!.path, f.calls.at(-1)!.sessionId], ['/agent-fabric/tasks/poll', sessionA]);
+  assert.deepEqual(polled.observed, f.calls.at(-1));
+  assert.equal(f.calls.filter(call => call.messageId === stuck.messageId).length, busy + 2,
+    'the stuck request is sent by its owner and once per attempt, then set aside');
+  assert.equal((await f.read()).pending, null, 'the stuck request no longer holds the outbox');
+  await a.pollTask();
+  await b.pollTask();
+  const next = f.calls.at(-1)!;
+  assert.deepEqual([next.path, next.sessionId], ['/agent-fabric/tasks/poll', sessionB]);
+  assert.ok(next.sequence > stuck.sequence, 'the owner signs above the sequence of its request that was set aside');
+});
+
+test('an acknowledgement never waits on this client\'s queue behind a request that already holds signing control (shared protocol state)', async () => {
+  const taskId = randomUUID(), receiptHash = `sha256:${'b'.repeat(64)}`;
+  const f = await sharedStateFixture('fabric-shared-ack-line-', () => sharedOk());
+  await writeFile(f.statePath, JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+    recoveredTaskCompletions: [{ taskId, trajectoryCapsuleHash: `sha256:${'a'.repeat(64)}`, receiptHash,
+      recoveredAt: new Date().toISOString() }] }));
+  const client = await f.open();
+  await client.openSession();
+  const held = sharedGate(), released = sharedGate();
+  const sibling = withDeviceSigningControl({ config: f.config }, async () => { held.open(); await released.promise; });
+  await held.promise;
+  // An admitted request takes signing control first and then enters the client's queue, as the CLI does.
+  const heartbeat = withDeviceSigningControl({ config: f.config }, () => client.pollTask()).then(() => 'heartbeat');
+  await sharedDelay(50);
+  const acknowledging = client.acknowledgeRecoveredTaskCompletion(taskId, receiptHash).then(() => 'acknowledged');
+  await sharedDelay(50);
+  released.open();
+  await sibling;
+  let timer: NodeJS.Timeout | undefined;
+  const stalled = new Promise<string>(accept => { timer = setTimeout(() => accept('stalled'), 5_000); });
+  try {
+    assert.equal(await Promise.race([Promise.all([heartbeat, acknowledging]).then(done => done.join(',')), stalled]),
+      'heartbeat,acknowledged', 'both settle once the sibling releases signing control');
+  } finally { clearTimeout(timer); }
+  assert.deepEqual((await f.read()).recoveredTaskCompletions, []);
+});
+
+test('the README limits the shared protocol-state guarantee to one client version on the device (shared protocol state)', async () => {
+  const readme = (await readFile(new URL('../README.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  assert.equal(/clients on one device never overwrite each other's kept requests or completions\./.test(readme), false,
+    'the guarantee is not stated without its version condition');
+  assert.equal(/every process on the device runs this version/i.test(readme), true,
+    'the README says the guarantee needs every process on the device to run this version');
+  assert.equal(/upgrade stops the relay before/i.test(readme), true, 'the README says the relay upgrade stops the relay first');
+});
