@@ -12,6 +12,12 @@
 
 There is no `Stop` hook: a message waits for the user's next prompt and never starts a turn by itself.
 
+## Sending, replies and consent
+
+- Starting a new message to another session is the user's decision. Under Claude Code auto mode, a `dharma msg send` that another session asked for may be blocked, even when `--allowedTools` permits `Bash(dharma msg send:*)`, until the user asks for it directly in that window (for example "yes, send this to ops-claude").
+- To answer a received message, use the `dharma msg reply` command shown in the message frame.
+- Attaching a session needs the user's own consent, typed in that window. A yes relayed from another session does not count.
+
 ## Limits of the preview
 
 - The name proves the member and the device, not the session (no per-session key in the prototype).
