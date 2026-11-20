@@ -384,6 +384,17 @@ test('the relay acknowledgement timeout reports its own code', async () => {
   assert.doesNotMatch(JSON.stringify(events), /timed out/);
 });
 
+// #512: a relay connection that never opens fails at the connect limit with its own code; nothing was sent.
+test('the relay connect timeout reaches the observation and the failure history', async () => {
+  const events = await observedEvents(() => Object.assign(Error('Relay connection timed out before the request was sent.'),
+    { code: 'relay_connect_timeout' }));
+  assert.deepEqual(events.map(event => (event as { errorCode?: string }).errorCode), ['relay_connect_timeout']);
+  assert.doesNotMatch(JSON.stringify(events), /timed out/);
+  const record = historyOf(events as Record<string, unknown>[]) as { entries: unknown[] };
+  assert.deepEqual(record.entries, [{ at: new Date(1_790_000_000_000).toISOString(), stage: 'task_poll',
+    errorCode: 'relay_connect_timeout' }]);
+});
+
 test('unsafe status and code values are dropped, and free text never becomes a code', async () => {
   for (const error of [Error('plain_lowercase_words'), Error('sk_live_token_value'),
     Object.assign(Error('x'), { code: 'C:/Users/someone/.secret' }), Object.assign(Error('x'), { code: 'has space' }),
