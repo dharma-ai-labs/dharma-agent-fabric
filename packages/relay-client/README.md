@@ -119,13 +119,31 @@ answers its calls. A workspace loop that restarts finds its entry and sends its
 kept request again, with the same message id, when it opens its session.
 
 When the owner process has exited, as with an ad hoc command that stopped
-during an outage, the next session open on the device sends the kept request
-of that entry once. The outcome never answers that session open and is never
-raised to its caller. An accepted or refused request leaves the file. A
-request without a definite answer stays in the file, and a later session open
-sends it again after at least 10 minutes. A kept request in a file written by
-an earlier version is moved to such an entry when the file is first read.
-Entries without a kept request are removed once their owner process has exited.
+during an outage, another client sends the kept request of that entry: the
+next session open on the device, or a long-lived client such as a workspace
+loop after one of its own requests has its answer. So does a kept request that
+stood unchanged for 10 minutes, even when its process id still answers (it may
+have been reused or belong to another account) or when it belongs to a
+workspace loop that never ran again; a workspace loop that restarts sooner
+replays its own request first. The outcome never answers the client that sent
+it and is never raised to its caller. An accepted or refused request leaves
+the file, and an owner that still runs takes that outcome from the file
+instead of sending the request again. A request without a definite answer
+stays in the file and is sent again after at least 10 minutes. One client
+sends at most 4 such requests in one signing-control section and stops at the
+first without a definite answer; while more are due, its next request sends
+the next ones. A kept session open matters only to its owner: another client
+removes an orphaned one without sending it. A kept request in a file written
+by an earlier version is moved to such an entry
+when the file is first read. Entries without a kept request are removed once
+their owner process has exited.
+
+The file holds at most 256 kept requests. A client without a kept request
+still opens its session in a full file; that session open is not kept in the
+file. Before a request that would add a
+kept request to a full file, the client sends due requests of other entries to
+make room; when none is due yet, the request is refused with
+`relay_protocol_state_outbox_full`.
 
 A signed request that is kept in the outbox may be sent again: see the two
 cases below.
