@@ -75,7 +75,12 @@ interface ProtocolState {
   nextSequence: number;
   pending: PendingRequest | null;
   recoveredTaskCompletions?: RecoveredTaskCompletion[];
+  /** Highest sequence a client re-signed in each session, so the client that owns a session never signs at or below
+   * it again. Device-wide, like the outbox slot. */
+  resignedSequences?: Record<string, number>;
 }
+
+const RESIGNED_SEQUENCE_SESSIONS_MAX = 64;
 
 // Several durable clients share one protocol-state file: one per relay workspace loop, plus ad hoc commands. Each
 // read-modify-write of it runs inside one device signing-control section that starts by reloading the shared
@@ -106,6 +111,7 @@ function assertProtocolState(value: unknown): asserts value is ProtocolState {
   const state = value as Record<string, unknown>;
   const recovered = state.recoveredTaskCompletions;
   const pending = state.pending as Record<string, unknown> | null;
+  const resigned = state.resignedSequences;
   const pendingValid = pending === null || (
     typeof pending === 'object' && !Array.isArray(pending)
     && (pending.method === 'POST' || pending.method === 'GET')
@@ -119,6 +125,11 @@ function assertProtocolState(value: unknown): asserts value is ProtocolState {
     || !(state.sessionId === null || typeof state.sessionId === 'string')
     || !Number.isSafeInteger(state.nextSequence) || Number(state.nextSequence) < 1
     || !pendingValid
+    || (resigned !== undefined && (!resigned || typeof resigned !== 'object' || Array.isArray(resigned)
+      || Object.keys(resigned).length > RESIGNED_SEQUENCE_SESSIONS_MAX
+      || Object.entries(resigned as Record<string, unknown>)
+        .some(([session, sequence]) => !UUID_PATTERN.test(session)
+          || !Number.isSafeInteger(sequence) || Number(sequence) < 1)))
     || (recovered !== undefined && (!Array.isArray(recovered)
       || recovered.length > 1_000
       || recovered.some((item) => !isRecoveredTaskCompletion(item))))) {
@@ -1293,6 +1304,7 @@ export class AgentFabricClient {
       this.#state = {
         schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null,
         recoveredTaskCompletions: this.#state.recoveredTaskCompletions || [],
+        ...(this.#state.resignedSequences ? {resignedSequences: this.#state.resignedSequences} : {}),
       };
       await this.#persist();
     };
@@ -1425,10 +1437,10 @@ export class AgentFabricClient {
     });
   }
 
-  /** The file wins for the device-wide fields: the outbox slot and the recovered completion queue. The session and
-   * its sequence stay this client's own and are never reloaded. */
+  /** The file wins for the device-wide fields: the outbox slot, the recovered completion queue and the re-signed
+   * sequences. The session and its sequence stay this client's own and are never reloaded, only moved forward. */
   async #reloadSharedState(): Promise<void> {
-    let disk: Pick<ProtocolState, 'pending' | 'recoveredTaskCompletions'>;
+    let disk: Pick<ProtocolState, 'pending' | 'recoveredTaskCompletions' | 'resignedSequences'>;
     try {
       const bytes = this.#hostFence ? await this.#hostFence.step(() => readFile(this.#statePath, 'utf8'))
         : await readFile(this.#statePath, 'utf8');
@@ -1449,8 +1461,22 @@ export class AgentFabricClient {
       // dropped it, or it was never kept (a rebuilt request). Never sign at its sequence again.
       this.#state.nextSequence = Math.max(this.#state.nextSequence, Number(own.headers['x-dharma-sequence'] || 0) + 1);
     }
+    // Another client may have re-signed this client's request in this client's session, once or more.
+    const resigned = this.#state.sessionId ? disk.resignedSequences?.[this.#state.sessionId] : undefined;
+    if (resigned !== undefined) this.#state.nextSequence = Math.max(this.#state.nextSequence, resigned + 1);
     this.#state.pending = disk.pending;
     this.#state.recoveredTaskCompletions = disk.recoveredTaskCompletions ?? [];
+    this.#state.resignedSequences = disk.resignedSequences;
+  }
+
+  /** Records a re-signed sequence for the client that owns the session. The oldest sessions are dropped first. */
+  #recordResignedSequence(sessionId: string, sequence: number): void {
+    const resigned = {...this.#state.resignedSequences};
+    const highest = Math.max(sequence, resigned[sessionId] ?? 0);
+    delete resigned[sessionId];
+    resigned[sessionId] = highest;
+    for (const session of Object.keys(resigned).slice(0, -RESIGNED_SEQUENCE_SESSIONS_MAX)) delete resigned[session];
+    this.#state.resignedSequences = resigned;
   }
 
   async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
@@ -1572,8 +1598,11 @@ export class AgentFabricClient {
         pending.headers['x-dharma-signature'] = sign(
           null, signingPayload, { key: this.#privateJwk, format: 'jwk' },
         ).toString('base64url');
-        // A drained request of another client keeps its own session; this client's sequence is unrelated to it.
+        // A drained request of another client keeps its own session; this client's sequence is unrelated to it. The
+        // file records the sequence, so the client that owns the session moves past it on its next reload.
         if (pending.headers['x-dharma-session-id'] === this.#state.sessionId) this.#state.nextSequence = sequence;
+        const session = pending.headers['x-dharma-session-id'] || '';
+        if (UUID_PATTERN.test(session)) this.#recordResignedSequence(session, sequence);
         await this.#persist();
       }
     }

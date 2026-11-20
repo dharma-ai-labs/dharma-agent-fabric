@@ -2455,6 +2455,19 @@ test('a client never reuses a sequence after its stale action acknowledgement wa
   assert.ok(next.sequence > resigned.sequence, 'the owner signs above every sequence other clients re-signed in its session');
 });
 
+test('a protocol-state file with an invalid re-signed sequence record is refused and kept (shared protocol state)', async () => {
+  const f = await sharedStateFixture('fabric-shared-resigned-invalid-', () => sharedOk());
+  for (const resignedSequences of [{ 'not-a-session': 2 }, { [randomUUID()]: 0 }, [], Object.fromEntries(
+    Array.from({ length: 65 }, () => [randomUUID(), 1]))]) {
+    const content = JSON.stringify({ schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+      resignedSequences });
+    await writeFile(f.statePath, content);
+    await assert.rejects(f.open(), /protocol state is invalid/);
+    assert.equal(await readFile(f.statePath, 'utf8'), content);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
 test('protocol state is not written while another process holds device signing control (shared protocol state)', async () => {
   const taskId = randomUUID(), receiptHash = `sha256:${'b'.repeat(64)}`;
   const f = await sharedStateFixture('fabric-shared-cross-process-', () => sharedOk());
