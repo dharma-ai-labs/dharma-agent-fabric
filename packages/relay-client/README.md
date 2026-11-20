@@ -122,15 +122,19 @@ unknown.
 Each client keeps its own outbox entry in the protocol-state file: its
 session, its next sequence and at most one kept request. A relay workspace
 loop uses one entry per workspace, and every other client gets an entry of its
-own. A client signs, sends and replays only the kept request in its own entry,
-in its own session, so another client's kept request never delays, fails or
-answers its calls. A workspace loop that restarts finds its entry and sends its
+own. A client signs and replays the kept request in its own entry, in its own
+session, so another client's kept request never delays, fails or answers its
+calls. Another client sends that request only in the cases below: once its
+owner process has exited, or once its entry has stood unchanged for 10
+minutes, even while its owner still runs. A workspace loop that restarts finds its entry and sends its
 kept request again, with the same message id, when it opens its session.
 
 When the owner process has exited, as with an ad hoc command that stopped
 during an outage, another client sends the kept request of that entry: the
-next session open on the device, or a long-lived client such as a workspace
-loop after one of its own requests. That client sends it in a signing-control
+next session open on the device, or a client opened with an owner key, such
+as a workspace loop, after one of its own requests. A one-shot command sends
+such a request only when it opens its session, so it exits once its last call
+returns. That client sends it in a signing-control
 section of its own, which starts only once the request has returned its
 answer, sends one kept request at most, and does not start while any client of
 the process holds a task lease. So does a kept request that
@@ -156,8 +160,8 @@ one whose sender stopped during the send, stays in the file and is sent again
 after at least 10 minutes. A session open sends at most one such request in
 its signing-control section, and none when it replays its own kept request
 there, so another process that waits for signing control waits for at most
-one such send; while more are due, each next request of that client sends one
-more. A kept session open, poll or read matters only to its
+one such send; while more are due, each next request of a client opened with
+an owner key sends one more. A kept session open, poll or read matters only to its
 owner: another client removes an orphaned one without sending it, so the task
 or content a poll or read returns is never written to the file. A kept request
 in a file written by an earlier version is moved to such an entry when the file

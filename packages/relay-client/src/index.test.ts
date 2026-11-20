@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID, verify, type JsonWebKey } from 'node:crypto';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
@@ -2230,7 +2230,8 @@ test('device keyset telemetry reports a keyset-less device as null and rejects m
 // One relay process runs a durable client per workspace loop, and ad hoc commands open their own, all on the same
 // protocol-state file. Each client keeps its own outbox entry in that file. Every read-modify-write of the file happens
 // under device signing control and starts from the file, so one client's write never drops another client's kept
-// request or recovered task completion, and no client sends, fails on or answers for another live client's request.
+// request or recovered task completion. No client sends, fails on or answers for another live client's request until
+// that request's entry has stood unchanged for 10 minutes.
 type SharedStateCall = { path: string; body: string; messageId: string; idempotencyKey: string | null; sessionId: string;
   sequence: number };
 type SharedOutboxEntry = { sessionId: string | null; nextSequence: number; ownerPid: number; updatedAt: string;
@@ -2824,8 +2825,8 @@ test('a kept request whose entry stood unchanged for 10 minutes is sent when its
     await a.pollTask();
     assert.deepEqual([sentTimes(f.calls, orphanMessageId(reused)), sentTimes(f.calls, orphanMessageId(removed))], [0, 0],
       'a fresh entry is left to its owner, and a workspace loop that restarts promptly replays its own');
-    const b = await f.open();
-    // One orphan per hold of signing control: the session open sends one, the client's next request the other.
+    const b = await f.open('relay:workspace-b');
+    // One orphan per hold of signing control: the session open sends one, the loop's next request the other.
     await sharedLater(11, async () => { await b.openSession(); await b.pollTask(); await sharedSettled(f.config); });
     assert.deepEqual([sentTimes(f.calls, orphanMessageId(reused)), sentTimes(f.calls, orphanMessageId(removed))], [1, 1]);
     assert.deepEqual(keptMessageIds(await f.read()), []);
@@ -2871,12 +2872,12 @@ test('one session open sends at most one orphan, none after one without an answe
   assert.deepEqual(keptMessageIds(await f.read()).sort(), kept.map(orphanMessageId).sort(),
     'the session opens left the file and the other orphans stay');
   down = false;
-  const b = await f.open();
+  const b = await f.open('relay:workspace-b');
   await sharedLater(11, () => b.openSession());
   assert.equal(orphanSends(), 2, 'at most one orphan per session open');
   for (let poll = 1; poll <= 9; poll++) {
     await sharedLater(11, async () => { await b.pollTask(); await sharedSettled(f.config); });
-    assert.equal(orphanSends(), Math.min(11, 2 + poll), 'after each of its requests the client sends one more while due orphans remain');
+    assert.equal(orphanSends(), Math.min(11, 2 + poll), 'after each of its requests the loop sends one more while due orphans remain');
   }
   assert.equal(orphanSends(), 11, 'each orphan is answered once');
   assert.deepEqual(kept.map(entry => sentTimes(f.calls, orphanMessageId(entry))).sort(), [1, 1, 1, 1, 1, 1, 1, 1, 1, 2]);
@@ -2896,7 +2897,7 @@ test('a file full of kept orphans refuses only a new kept request and drains one
     assert.equal((await (await f.open()).openSession()).ok, true, 'a client without a kept request opens its session in a full file');
   }
   assert.equal(f.calls.filter(call => orphanIds.has(call.messageId)).length, 0, 'no orphan is due yet');
-  const c = await f.open();
+  const c = await f.open('relay:workspace-c');
   await c.openSession();
   down = true;
   await assert.rejects(c.registerWorkspace({ workspaceId: 'w' }), /relay_protocol_state_outbox_full/);
@@ -3396,4 +3397,50 @@ test('a new kept request an earlier version left at the top level of a full file
   assert.equal(sentTimes(f.calls, legacy.headers['x-dharma-message-id']), 2);
   assert.notEqual(after.pending?.headers['x-dharma-message-id'], legacy.headers['x-dharma-message-id']);
   assert.equal(Object.keys(after.outboxes ?? {}).length, 256);
+});
+
+// Convergence review round 3: a recorded completion whose state write failed, and orphan sends after a one-shot call.
+test('a task completion the server accepted survives a failed state write and reaches the file on the next request (shared protocol state)', async () => {
+  const taskId = randomUUID(), trajectoryCapsuleHash = `sha256:${'a'.repeat(64)}`, receiptHash = `sha256:${'b'.repeat(64)}`;
+  let blockNextWrite = false, saved = '';
+  const f = await sharedStateFixture('fabric-shared-completion-write-', async call => {
+    if (call.path.endsWith('/events') && blockNextWrite) {
+      // The server accepts the completion; the client's state write after it then fails once.
+      blockNextWrite = false;
+      saved = await readFile(f.statePath, 'utf8');
+      await rm(f.statePath, { force: true });
+      await mkdir(resolve(f.statePath, 'blocker'), { recursive: true });
+    }
+    return sharedOk(call.path.endsWith('/events') ? { receipt: { hash: receiptHash } } : {});
+  });
+  const a = await f.open('relay:workspace-a');
+  await a.openSession();
+  blockNextWrite = true;
+  await assert.rejects(a.postTaskEvent(taskId, 'completed', { trajectoryCapsuleHash }));
+  await rm(f.statePath, { recursive: true, force: true });
+  await writeFile(f.statePath, saved);
+  await a.pollTask();
+  assert.deepEqual(a.listRecoveredTaskCompletions().map(item => item.taskId), [taskId], 'the receipt stays in memory');
+  assert.deepEqual((await f.read()).recoveredTaskCompletions?.map(item => item.taskId), [taskId],
+    'and the next successful write puts it in the file');
+  await a.acknowledgeRecoveredTaskCompletion(taskId, receiptHash);
+  await a.pollTask();
+  assert.deepEqual((await f.read()).recoveredTaskCompletions, [], 'an acknowledged receipt does not come back');
+});
+
+test('a client opened without an owner key sends due orphans only when it opens its session (shared protocol state)', async () => {
+  const f = await sharedStateFixture('fabric-shared-orphan-one-shot-', () => sharedOk());
+  const dead = await exitedPid();
+  const orphans = [sharedOrphan(f.config.deviceId, dead), sharedOrphan(f.config.deviceId, dead)];
+  await writeSharedOutboxes(f.statePath, { [`cli:${dead}:x:1`]: orphans[0], [`cli:${dead}:x:2`]: orphans[1] });
+  const command = await f.open();
+  await command.openSession();
+  await command.pollTask();
+  await sharedSettled(f.config);
+  assert.deepEqual(orphans.map(entry => sentTimes(f.calls, orphanMessageId(entry))).sort(), [0, 1],
+    'its session open sends one; no section after its call keeps the command running');
+  assert.equal(f.calls.at(-1)!.path, '/agent-fabric/tasks/poll');
+  const loop = await f.open('relay:workspace-a');
+  await loop.openSession();
+  assert.deepEqual(orphans.map(entry => sentTimes(f.calls, orphanMessageId(entry))), [1, 1], 'the next session open sends the other');
 });

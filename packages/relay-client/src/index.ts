@@ -1345,12 +1345,17 @@ export class AgentFabricClient {
   /** The definite answer another client got for this client's kept request, with the request as this client signed
    * it. Only the next call can take it, and only when it is the same call. */
   #adoptedOutcome: (Pick<PendingRequest, 'method' | 'pathname' | 'body'> & Pick<AdoptedOutcome, 'status' | 'response'>) | null = null;
+  /** Completions this client recorded that no state write has stored yet, such as when the write after the server's
+   * answer failed. A reload of the file keeps them until a write succeeds. */
+  #unwrittenCompletions = new Map<string, RecoveredTaskCompletion>();
+  /** Opened with an owner key, as a workspace loop is: it also sends due orphans after its own requests. */
+  readonly #longLived: boolean;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
     state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean; isolatedSession?: boolean;
-    ownerKey: string; otherOutboxes: Record<string, OutboxEntry>;
+    ownerKey: string; longLived: boolean; otherOutboxes: Record<string, OutboxEntry>;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -1365,6 +1370,7 @@ export class AgentFabricClient {
     this.#readOnly = input.readOnly === true;
     this.#isolatedSession = input.isolatedSession === true;
     this.#ownerKey = input.ownerKey;
+    this.#longLived = input.longLived;
     this.#otherOutboxes = input.otherOutboxes;
   }
 
@@ -1389,7 +1395,9 @@ export class AgentFabricClient {
     /** Fresh in-memory protocol state for an explicit workflow; application requests retain their normal authorization. */
     isolatedSession?: boolean;
     /** The owner of this client's outbox entry: 'relay:<workspaceId>' for a workspace loop, so a restarted loop finds
-     * its own kept request and replays it. Omitted, the client gets an entry of its own, unique to this process. */
+     * its own kept request and replays it. Such a client also sends due orphans after its own requests. Omitted, the
+     * client gets an entry of its own, unique to this process, and sends due orphans only when it opens its session,
+     * so a one-shot command exits once its last call returns. */
     ownerKey?: string }) {
     const {configPath, statePath, store: suppliedStore, fetcher, hostScope, readOnly, isolatedSession} = input;
     if (readOnly !== undefined && typeof readOnly !== 'boolean') throw new Error('relay_read_only_option_invalid');
@@ -1442,7 +1450,8 @@ export class AgentFabricClient {
     await fence?.assert();
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
-      statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession, ownerKey, otherOutboxes,
+      statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession, ownerKey,
+      longLived: input.ownerKey !== undefined, otherOutboxes,
     });
   }
 
@@ -1527,6 +1536,7 @@ export class AgentFabricClient {
       if (!matching) return;
       if (matching.receiptHash !== receiptHash) throw new Error('Recovered task completion receipt does not match.');
       this.#state.recoveredTaskCompletions = current.filter((item) => item.taskId !== taskId);
+      this.#unwrittenCompletions.delete(taskId);
       await this.#persist();
     };
     if (this.#durable) {
@@ -1595,8 +1605,9 @@ export class AgentFabricClient {
       taskLeases.set(this, Date.now() + this.#leaseMs);
     }
     // A long-lived client, such as a workspace loop, also sends due orphans after its own requests, so they do not wait
-    // for another session open (which has just sent them before its own POST).
-    if (!(method === 'POST' && route === '/agent-fabric/sessions')) this.#sendDueOrphansLater();
+    // for another session open (which has just sent them before its own POST). A one-shot command does not: a send
+    // after its last call would keep its process running after it has its answer.
+    if (this.#longLived && !(method === 'POST' && route === '/agent-fabric/sessions')) this.#sendDueOrphansLater();
     return result;
   }
 
@@ -1642,8 +1653,9 @@ export class AgentFabricClient {
     });
   }
 
-  /** The file wins for every other client's entry and for the recovered completion queue. This client's own entry is
-   * written only by this client, so it is never reloaded. */
+  /** The file wins for every other client's entry and for the recovered completion queue, except for a completion this
+   * client recorded and no write has stored yet, which it keeps. This client's own entry is written only by this
+   * client, so it is never reloaded. */
   async #reloadSharedState(): Promise<void> {
     let disk: ProtocolState | null = null;
     try {
@@ -1662,7 +1674,9 @@ export class AgentFabricClient {
     const own = others[this.#ownerKey];
     delete others[this.#ownerKey];
     this.#otherOutboxes = others;
-    this.#state.recoveredTaskCompletions = disk?.recoveredTaskCompletions ?? [];
+    const stored = disk?.recoveredTaskCompletions ?? [];
+    this.#state.recoveredTaskCompletions = [...stored, ...[...this.#unwrittenCompletions.values()]
+      .filter(item => !stored.some(other => other.taskId === item.taskId))];
     // Another client sent this client's kept request after it stood unchanged (see orphanDue). The file then holds
     // its outcome: no kept request once it was answered, with the answer, or the request as last sent. When the
     // answer is not there (never kept, or removed after ORPHAN_RETRY_INTERVAL_MS), this client keeps its signed
@@ -1984,10 +1998,9 @@ export class AgentFabricClient {
       return;
     }
     if (current.length >= 1_000) throw new Error('Recovered task completion queue is full.');
-    this.#state.recoveredTaskCompletions = [
-      ...current,
-      { taskId, trajectoryCapsuleHash, receiptHash, recoveredAt: new Date().toISOString() },
-    ];
+    const completion = { taskId, trajectoryCapsuleHash, receiptHash, recoveredAt: new Date().toISOString() };
+    this.#state.recoveredTaskCompletions = [...current, completion];
+    this.#unwrittenCompletions.set(taskId, completion);
   }
 
   #assertRecoveredTaskCompletionCapacity(pending: PendingRequest): void {
@@ -2114,10 +2127,11 @@ export class AgentFabricClient {
     const [copy] = leftover ? [leftover] : Object.values(outboxes)
       .filter(entry => entry.pending && !isOwnerOnlyRequest(entry.pending))
       .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt));
-    return atomicJson(this.#statePath, {
+    await atomicJson(this.#statePath, {
       schema: 'dharma.protocol-state/v1', sessionId: copy?.sessionId ?? null, nextSequence: copy?.nextSequence ?? 1,
       pending: copy?.pending ?? null, recoveredTaskCompletions: this.#state.recoveredTaskCompletions ?? [], outboxes,
     } satisfies ProtocolState, this.#hostFence);
+    this.#unwrittenCompletions.clear();
   }
 }
 
