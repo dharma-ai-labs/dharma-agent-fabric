@@ -1423,6 +1423,9 @@ export class AgentFabricClient {
   /** Whether the server accepted this client's latest session open. Until it did, a client with a deferred
    * acknowledgement signs no other call (see #signedRequestWithSigningControl). */
   #sessionAccepted = false;
+  /** Whether the section that signs the deferred acknowledgement again waits for its caller's hold to end (see
+   * openSession). Until it ran, no other call of this client is signed or sent (see #signedRequestWithSigningControl). */
+  #reissueWaiting = false;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
@@ -1596,7 +1599,10 @@ export class AgentFabricClient {
       if (callerHold) {
         // Never in the caller's hold: in a hold of its own once that hold ends. It is not awaited, and not queued in
         // #serial, since it waits for the caller's hold to end, and the caller's next call in that hold must not wait on it.
-        void outsideDeviceSigningControl(() => protocolStateSections.exit(send)).catch(() => undefined);
+        // Until it ran, another call of this client fails with relay_retry_after_recovery, unsent (owner review 3).
+        this.#reissueWaiting = true;
+        void outsideDeviceSigningControl(() => protocolStateSections.exit(send)).catch(() => undefined)
+          .finally(() => { this.#reissueWaiting = false; });
       } else {
         const reissue = this.#serial.then(send);
         this.#serial = reissue.catch(() => undefined);
@@ -1944,6 +1950,15 @@ export class AgentFabricClient {
     // this client's entry: the session is open only once the server accepted it, and the next openSession opens it.
     if (this.#deferredAcknowledgement && !this.#sessionAccepted && !(method === 'POST' && route === '/agent-fabric/sessions')) {
       throw new Error('Relay session is not open.');
+    }
+    if (this.#deferredAcknowledgement && !(method === 'POST' && route === '/agent-fabric/sessions')) {
+      // Once the session is accepted, the acknowledgement still keeps its place in this client's entry until it has had a
+      // hold of its own. While its own section waits for the caller's hold to end, another call is neither signed nor
+      // sent, so it never takes that place: it fails with relay_retry_after_recovery, and a retry signs it once that
+      // section ran. Otherwise the acknowledgement is this client's earlier kept call, sent first, as below.
+      if (this.#reissueWaiting) throw new Error('relay_retry_after_recovery');
+      this.#state.pending = this.#deferredAcknowledgement;
+      this.#deferredAcknowledgement = null;
     }
     if (this.#readOnly) {
       if (this.#state.pending) throw new Error('relay_read_only_pending_request');

@@ -122,7 +122,10 @@ entry's request there; after it sends its own earlier kept call there, a
 `withSigningControlPerSend` hold is handed back and the session opens in a
 fresh hold, and in any other hold the session open fails with
 `relay_retry_after_recovery`; and a taken-over action acknowledgement that it
-signs again is sent after that hold ends, in a hold of its own. Such a hold makes
+signs again is sent after that hold ends, in a hold of its own. Until then,
+another call on that client is neither signed nor sent and fails with
+`relay_retry_after_recovery`, so it never takes the acknowledgement's place in
+the client's outbox entry; a retry after that hold signs and sends it. Such a hold makes
 one send for each signed call its caller makes in it, so a caller that holds
 signing control across several calls holds it across several sends. The CLI
 takes no such hold around a protocol-state request: the named session
