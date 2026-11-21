@@ -43,6 +43,8 @@
     "privacyPolicyURL": "https://www.dharma-ai.io/privacy",
     "termsOfServiceURL": "https://www.dharma-ai.io/terms",
     "brandColor": "#2057E8",
+    "composerIcon": "./assets/composer-icon.png",
+    "logo": "./assets/logo.png",
     "screenshots": []
   }
 }

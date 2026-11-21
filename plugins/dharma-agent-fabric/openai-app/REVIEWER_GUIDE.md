@@ -34,20 +34,20 @@ private review channel. They are never committed to this repository.
   including the organization control agent. No submitted case writes, so the
   submitted cases give the same results in any order among themselves. A
   declared write tool called before them does not change their results
-  either: TC-3 and TC-6 say in their expected outputs which extra rows a
+  either: TC-3 and TC-5 say in their expected outputs which extra rows a
   write adds and allow them. Fields not named in an expected output
   (timestamps, correlation IDs) can differ between runs.
 
 ## Run order
 
-1. Run the six submitted cases and the three negative cases on ChatGPT web,
+1. Run the five submitted cases and the three negative cases on ChatGPT web,
    then on ChatGPT mobile. Their order among themselves does not matter.
 2. Call a declared write tool (`fabric_dispatch_task`,
    `fabric_control_agent_create_session` or
    `fabric_control_agent_send_message`) only after both the web and the
    mobile runs are complete. This keeps the seed clean, not the results: a
    control-agent message records a new trajectory above T5 in TC-3, and a
-   conversation you create appears in TC-6. Both cases allow that.
+   conversation you create appears in TC-5. Both cases allow that.
 3. Before the next review round, Dharma rebuilds the seed if any write ran
    (see Reset in `REVIEWER_SEED_PLAN.md`) and sends the new values through the
    private review channel.
@@ -112,18 +112,7 @@ you do not need to call them in the reviewer organization.
   hash `{{REVIEWER_T1_CAPSULE_HASH}}`, a redacted capsule summary and an empty
   `validation_results` list. No raw transcript, local path or credential.
 
-### TC-5 Workspace listing is refused for a developer
-
-- Tool: `fabric_list_workspaces` (read, needs device administration scope).
-- Seed: reviewer role `developer`.
-- Prompt: In Dharma organization `{{REVIEWER_ORG_ID}}`, list the registered
-  workspaces.
-- Expected: the tool returns an error with code `insufficient_scope`, because
-  listing workspaces needs device administration scope, which a developer
-  member does not hold. Nothing changes, so the result is the same on every
-  run.
-
-### TC-6 Own control-agent conversations
+### TC-5 Own control-agent conversations
 
 - Tool: `fabric_control_agent_list_sessions` (read).
 - Seed: the reviewer account has created no conversation. The operator's

@@ -1,7 +1,8 @@
 # OpenAI Publication Checklist
 
-Evidence snapshot: 2026-08-05. Checked items are release-candidate evidence,
-not an assertion that OpenAI has approved or published the plugin.
+Evidence snapshot: 2026-11-10. Checked items are release-candidate evidence,
+not an assertion that OpenAI has approved or published the plugin. ChatGPT and
+Codex share one plugin directory, so one plugin ZIP submission covers both.
 
 - [x] Current Codex plugin manifest verified with the plugin validator.
 - [x] Embedded Dharma Agent Fabric Skill verified with the Skill validator.
@@ -27,6 +28,14 @@ not an assertion that OpenAI has approved or published the plugin.
 - [x] Mutation tools return audit correlation IDs.
 - [x] Public description matches the bounded Codex and Claude adapter support.
 - [x] Reviewer OAuth installation and staging reviewer script recorded; production proof is the post-deploy gate.
+- [x] Plugin ZIP layout: root `plugin.json` with `extensions["com.openai"]`, root `mcp.json`, skills, no hooks and no `.app.json`, built and validated by `node scripts/openai-plugin-package.mjs` (`npm run plugin:openai-package:check`).
+- [x] Exactly five positive and three negative review cases in `chatgpt-app-submission.json`, carried into `plugin.json` `review.test_cases` by the packager.
+- [x] `logo` and `composerIcon` declared and shipped under `assets/` (square PNG, 512 pixels).
+- [ ] Owner confirms the Dharma mark used for `logo` and `composerIcon`, or supplies the final brand asset (Brand OS lists the mark as proposed).
+- [ ] Video walkthrough of the five cases and the plugin recorded, its reviewer-accessible URL passed as `--demo-recording-url`.
+- [ ] Reviewer test account works with no MFA and no email code, and its password is entered in the portal's Review details form, not in the ZIP.
+- [ ] The five positive and three negative cases also observed in Codex in the ChatGPT desktop app, if OpenAI review covers Codex surfaces for this plugin.
+- [ ] Plugin ZIP built from the substituted copy, without `--allow-placeholders`, and uploaded at the OpenAI plugin portal.
 - [ ] OpenAI directory submission accepted.
 
 The items left unchecked above were added after the second OpenAI review
@@ -46,4 +55,5 @@ recorded.
 - Claude Sonnet 5 remains a deferred provider capability until non-zero Vertex
   AI pay-as-you-go quota is granted. The initial listing and production canary
   claim Codex support only.
-- OpenAI Plugin Directory publication remains subject to OpenAI review.
+- OpenAI plugin directory publication (ChatGPT and Codex) remains subject to
+  OpenAI review, and the owner chooses when to publish after approval.
