@@ -115,3 +115,102 @@ test('local names that shadow an import, unrelated exec methods and type positio
 test('a file without child_process imports is not reported', () => {
   assert.deepEqual(lines("function spawn() {}\nspawn('git');", 'fixture.js'), []);
 });
+
+test('a fallback around a property read on a dynamic import is checked where it is called', () => {
+  const source = [
+    "type Probe = (command: string, argv: string[], options: object) => unknown;",
+    'export async function version(probe?: Probe) {',
+    "  const run = probe || (await import('node:child_process')).spawnSync;",
+    "  run('codex', ['--version'], { encoding: 'utf8', timeout: 5_000 });",
+    "  const hidden = probe ?? (await import('node:child_process')).spawnSync;",
+    "  hidden('codex', ['--version'], { encoding: 'utf8', windowsHide: true });",
+    "  const either = probe ? probe : require('node:child_process').execFileSync;",
+    "  either('codex', ['--version']);",
+    '}',
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.ts'), ['4:call:spawnSync', '8:call:execFileSync']);
+});
+
+test('property and element reads on a load expression or a namespace are process functions', () => {
+  const source = [
+    "import * as childProcess from 'node:child_process';",
+    "require('node:child_process').execSync('ver');",
+    "(await import('child_process')).spawn('git');",
+    "childProcess['spawn']('git');",
+    "childProcess[\"execFileSync\"]('git', [], { windowsHide: true });",
+    "require('node:child_process')['fork']('worker.js');",
+    "(fast ? childProcess.spawnSync : require('node:child_process').spawnSync)('git');",
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.ts'), [
+    '2:call:execSync', '3:call:spawn', '4:call:spawn', '6:call:fork', '7:call:spawnSync',
+  ]);
+});
+
+test('names destructured from a namespace are process functions', () => {
+  const source = [
+    "import * as childProcess from 'node:child_process';",
+    'const { spawn, execFile: run, ChildProcess } = childProcess;',
+    "spawn('git');",
+    "run('git', [], { windowsHide: true });",
+    'const loaded = require("node:child_process");',
+    'const { execSync } = loaded;',
+    "execSync('ver');",
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.ts'), ['3:call:spawn', '7:call:execSync']);
+});
+
+test('a namespace or a load expression used as a value is reported', () => {
+  const source = [
+    "import * as childProcess from 'node:child_process';",
+    'const cp = childProcess;',
+    'register(childProcess);',
+    'register({ childProcess });',
+    "register(require('node:child_process'));",
+    'export default childProcess;',
+    'const kind: typeof childProcess.ChildProcess = childProcess.ChildProcess;',
+    "t.mock.method(childProcess, 'spawn', (command: string) => childProcess.spawn(command, { windowsHide: true }));",
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.ts'), [
+    '2:reference:child_process', '3:reference:child_process', '4:reference:child_process',
+    '5:reference:child_process', '6:reference:child_process',
+  ]);
+});
+
+test('re-exported process functions and modules are reported', () => {
+  const source = [
+    "export { spawn } from 'node:child_process';",
+    "export { execFile as run, ChildProcess } from 'child_process';",
+    "export * from 'node:child_process';",
+    "export * as childProcess from 'node:child_process';",
+    "import { fork } from 'node:child_process';",
+    'export { fork };',
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.ts'), [
+    '1:reference:spawn', '2:reference:execFile', '3:reference:child_process', '4:reference:child_process',
+    '6:reference:fork',
+  ]);
+});
+
+test('createRequire bound to any name loads child_process', () => {
+  const source = [
+    "import { createRequire } from 'node:module';",
+    'const load = createRequire(import.meta.url);',
+    "const cp = load('node:child_process');",
+    "cp.spawnSync('git');",
+    "createRequire(import.meta.url)('child_process').execSync('ver');",
+    "const { exec } = load('child_process');",
+    "exec('dir', { windowsHide: true });",
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.mjs'), ['4:call:spawnSync', '5:call:execSync']);
+});
+
+test('windowsHide passes only when no later spread or property can override it', () => {
+  const source = [
+    "import { spawn } from 'node:child_process';",
+    "spawn('git', [], { windowsHide: true, ...options });",
+    "spawn('git', [], { ...options, windowsHide: true, stdio: 'ignore' });",
+    "spawn('git', [], { windowsHide: true, ...{ windowsHide: false } });",
+    "spawn('git', [], { ...first, windowsHide: true, cwd: '.', });",
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.mjs'), ['2:call:spawn', '4:call:spawn']);
+});
