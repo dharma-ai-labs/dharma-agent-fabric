@@ -191,6 +191,46 @@ test('re-exported process functions and modules are reported', () => {
   ]);
 });
 
+test('process functions and modules exported through a variable declaration are reported', () => {
+  const source = [
+    "import { execFile } from 'node:child_process';",
+    "import * as cp from 'node:child_process';",
+    "import { promisify } from 'node:util';",
+    'export const run = promisify(execFile);',
+    'export const start = cp.spawn;',
+    'export const { spawn } = cp;',
+    "export const loaded = await import('node:child_process');",
+    "export const required = require('node:child_process');",
+    'export let named = cp.default;',
+    'const local = promisify(execFile);',
+    "await local('git', [], { windowsHide: true });",
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.ts'), [
+    '4:reference:execFile', '5:reference:spawn', '6:reference:child_process', '7:reference:child_process',
+    '8:reference:child_process', '9:reference:child_process',
+  ]);
+});
+
+test('then on a load, import-equals, getBuiltinModule and module.require are all checked', () => {
+  const source = [
+    "import('node:child_process').then(({ spawn }) => spawn('git'));",
+    "import('node:child_process').then((m) => m.spawn('git'));",
+    "import cp = require('node:child_process');",
+    "cp.spawn('git');",
+    "cp.execFile('git', [], { windowsHide: true }, () => {});",
+    "process.getBuiltinModule('node:child_process').spawn('git');",
+    "module.require('child_process').execSync('ver');",
+    "const builtin = process.getBuiltinModule('node:child_process');",
+    "builtin.fork('worker.js');",
+    'cp.then(() => {});',
+    "export import exported = require('node:child_process');",
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.ts'), [
+    '1:reference:child_process', '2:reference:child_process', '4:call:spawn', '6:call:spawn', '7:call:execSync',
+    '9:call:fork', '10:reference:child_process', '11:reference:child_process',
+  ]);
+});
+
 test('createRequire bound to any name loads child_process', () => {
   const source = [
     "import { createRequire } from 'node:module';",
