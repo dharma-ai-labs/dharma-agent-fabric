@@ -238,6 +238,55 @@ for (const {site, perSend, hold} of callerHolds) {
   });
 }
 
+// A session open is a path too: an SDK caller may take a hold itself around one. Its client adds no send of its own to
+// that hold: it sends no orphan there, and after it sends its own earlier kept call there, a hold taken perSend is
+// handed back and the session opens in a fresh hold, while any other hold's session open fails with
+// relay_retry_after_recovery and opens on retry, in a hold of its own.
+for (const {site, perSend, hold} of callerHolds) {
+  test(`a caller-held hold around a session open makes at most one network send while another client waits, own recovery and a due orphan: ${site}`, async t => {
+    const d = await device(t);
+    let down = false;
+    let other: ReturnType<typeof waitingClient> | undefined;
+    const fabric = admitSignedRequests(await AgentFabricClient.open({configPath: d.configPath, statePath: d.statePath, store: d.store,
+      ownerKey: 'relay:workspace-a', fetcher: async url => {
+        await other?.send();
+        return down && String(url).endsWith('/agent-fabric/workspaces')
+          ? new Response(JSON.stringify({ok: false, error: {code: 'upstream_unavailable', message: 'Try again.'}}), {status: 503})
+          : new Response(JSON.stringify({ok: true}), {status: 201});
+      }}));
+    const waiter = waitingClient(d.config);
+    other = waiter;
+    const sessionOpenInHold = async (name: string) => {
+      const from = waiter.behind.length;
+      const outcome = await hold(d.config, () => fabric.openSession())
+        .then(() => 'answered', (error: unknown) => error instanceof Error ? error.message : String(error));
+      await withDeviceSigningControl({config: d.config}, async () => undefined);
+      const behind = waiter.behind.slice(from);
+      assert.deepEqual(behind, behind.map(() => 0), `${name}: no send shares its hold with an earlier one`);
+      return {outcome, sends: behind.length};
+    };
+    try {
+      await fabric.openSession();
+      // A kept call of this client: its earlier registerWorkspace got no answer.
+      down = true;
+      await assert.rejects(fabric.registerWorkspace({workspaceId: 'a'}), error => error instanceof AgentFabricRequestError && error.status === 503);
+      down = false;
+      if (perSend) assert.deepEqual(await sessionOpenInHold('own recovery'), {outcome: 'answered', sends: 2});
+      else {
+        assert.deepEqual(await sessionOpenInHold('own recovery'), {outcome: 'relay_retry_after_recovery', sends: 1},
+          'own recovery: only the kept call is sent in the caller\'s hold');
+        assert.deepEqual(await sessionOpenInHold('retry after recovery'), {outcome: 'answered', sends: 1});
+      }
+      // A kept request that a command which exited just now left: due, in a file with room.
+      const dead = await exitedPid();
+      await fs.writeFile(d.statePath, JSON.stringify({schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+        outboxes: {[`cli:${dead}:x:0`]: orphan(d.config.deviceId, dead)}}));
+      assert.deepEqual(await sessionOpenInHold('due orphan'), {outcome: 'answered', sends: 1},
+        'due orphan: only the session open is sent in the caller\'s hold');
+    } finally { await waiter.stop(); }
+  });
+}
+
 test('every hold of signing control the CLI takes itself is one the caller-held hold test covers', async () => {
   const dir = new URL('../src/', import.meta.url);
   const sites: string[] = [];
