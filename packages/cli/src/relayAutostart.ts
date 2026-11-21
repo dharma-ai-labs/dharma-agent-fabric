@@ -222,7 +222,9 @@ const LEGACY_WINDOWS_TASK_EXECUTE = 'powershell.exe';
 function legacyWindowsTaskArguments(home: string) { return `-NoProfile -NonInteractive -File "${scriptPath(home)}"`; }
 // The first release whose ownership guards accept the headless actions of the Windows
 // task and the WSL host task. Earlier releases own only the PowerShell actions, so a
-// rollback to one registers those actions again.
+// rollback to one registers those actions again. scripts/verify-headless-task-gate.mjs
+// fails when this differs from the first release that carries the guard: set it to the
+// version of the release that first includes this code.
 const WINDOWS_HEADLESS_TASK_SINCE = [0, 2, 226];
 function windowsHeadlessTaskOwned(version: string) {
   const numbers = version.split('-')[0]!.split('.').map(Number);
