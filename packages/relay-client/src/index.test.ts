@@ -4265,11 +4265,10 @@ test('the relay client that v0.2.225 ships sends nothing in this version\'s sess
   const kept = f.calls.at(-1)!;
   assert.equal((await f.read()).pending, null, 'neither a fresh request nor an acknowledgement is copied');
   await opens('after both owners kept a request');
-  // Both entries stood unchanged for 10 minutes; the next write copies the due request that is not an acknowledgement.
+  // The workspace owner's entry stood unchanged for 10 minutes; the next write copies that due request. The
+  // acknowledgement owner's entry is not due, so the workspace loop does not send it after its own request.
   const state = await f.read();
-  for (const entry of Object.values(state.outboxes ?? {})) {
-    if (entry.pending) entry.updatedAt = new Date(Date.now() - 11 * 60_000).toISOString();
-  }
+  state.outboxes!['relay:a']!.updatedAt = new Date(Date.now() - 11 * 60_000).toISOString();
   await writeFile(f.statePath, JSON.stringify(state));
   await c.pollTask();
   assert.equal((await f.read()).pending?.headers['x-dharma-message-id'], kept.messageId, 'only the due request is copied');
