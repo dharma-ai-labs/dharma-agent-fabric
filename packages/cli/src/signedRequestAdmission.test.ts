@@ -170,3 +170,84 @@ test('the workspace policy sync takes signing control so that its hold makes at 
   assert.match(order, /withClientSigningControl\(\{ config: fabric\.config, hostScope: currentBootstrapHostScope\(\) \},\s*\(\) => withWorkspacePolicyRefreshLock\(workspaceId, operation\), \{ perSend: true \}\)/,
     'the sync holds control around one call per hold, and takes the refresh lock inside it again after a hand-back');
 });
+
+// Owner review: the total send count per hold of signing control is at most 1, including recovery and capacity
+// pressure, on every path. These are the holds the CLI takes itself around signed calls. The workspace policy sync
+// takes its hold perSend, so its work runs again in a fresh hold for its own call. A hold taken without perSend (the
+// named session activation boundary, and any hold taken with withDeviceSigningControl) keeps its work in that one
+// hold, so the client adds no send of its own to it: after it sends its own earlier kept call, the caller's call
+// fails with relay_retry_after_recovery and is sent on retry, in a hold of its own; in a full file it sends no orphan
+// to make room, and the full file refuses the caller's call, as before.
+const callerHolds: ReadonlyArray<{site: string; perSend: boolean;
+  hold: (config: DeviceConfig, work: () => Promise<unknown>) => Promise<unknown>}> = [
+  {site: 'workspace policy sync (withClientSigningControl, perSend)', perSend: true,
+    hold: (config, work) => withClientSigningControl({config}, work, {perSend: true})},
+  {site: 'named session activation boundary (withClientSigningControl)', perSend: false,
+    hold: (config, work) => withClientSigningControl({config}, work)},
+  {site: 'a hold taken with withDeviceSigningControl (device signing maintenance)', perSend: false,
+    hold: (config, work) => withDeviceSigningControl({config}, work)},
+];
+
+for (const {site, perSend, hold} of callerHolds) {
+  test(`a caller-held hold around one signed call makes at most one network send while another client waits, own recovery and a full file: ${site}`, async t => {
+    const d = await device(t);
+    let down = false;
+    let other: ReturnType<typeof waitingClient> | undefined;
+    const fabric = admitSignedRequests(await AgentFabricClient.open({configPath: d.configPath, statePath: d.statePath, store: d.store,
+      ownerKey: 'relay:workspace-a', fetcher: async url => {
+        await other?.send();
+        return down && String(url).endsWith('/agent-fabric/workspaces')
+          ? new Response(JSON.stringify({ok: false, error: {code: 'upstream_unavailable', message: 'Try again.'}}), {status: 503})
+          : new Response(JSON.stringify({ok: true}), {status: 201});
+      }}));
+    const waiter = waitingClient(d.config);
+    other = waiter;
+    const inHold = async (name: string, workspaceId: string) => {
+      const from = waiter.behind.length;
+      const outcome = await hold(d.config, () => fabric.registerWorkspace({workspaceId}))
+        .then(() => 'answered', (error: unknown) => error instanceof Error ? error.message : String(error));
+      await withDeviceSigningControl({config: d.config}, async () => undefined);
+      const behind = waiter.behind.slice(from);
+      assert.deepEqual(behind, behind.map(() => 0), `${name}: no send shares its hold with an earlier one`);
+      return {outcome, sends: behind.length};
+    };
+    try {
+      await fabric.openSession();
+      // A kept call of this client: its earlier registerWorkspace got no answer. The caller's call is another call.
+      down = true;
+      await assert.rejects(fabric.registerWorkspace({workspaceId: 'a'}), error => error instanceof AgentFabricRequestError && error.status === 503);
+      down = false;
+      if (perSend) assert.deepEqual(await inHold('own recovery', 'b'), {outcome: 'answered', sends: 2});
+      else {
+        assert.deepEqual(await inHold('own recovery', 'b'), {outcome: 'relay_retry_after_recovery', sends: 1},
+          'own recovery: only the kept call is sent in the caller\'s hold');
+        assert.deepEqual(await inHold('retry after recovery', 'b'), {outcome: 'answered', sends: 1});
+      }
+      // A full file of kept requests that commands which exited just now left, one of them due.
+      const dead = await exitedPid();
+      await fs.writeFile(d.statePath, JSON.stringify({schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+        outboxes: Object.fromEntries(Array.from({length: 256}, (_, index) => [`cli:${dead}:x:${index}`, orphan(d.config.deviceId, dead)]))}));
+      // perSend: an orphan makes room in a hold of its own, then the caller's call, then the loop sends one more after
+      // its call, in a section of its own. Otherwise no orphan is sent in the caller's hold and the full file refuses.
+      assert.deepEqual(await inHold('full file', 'c'), perSend ? {outcome: 'answered', sends: 3}
+        : {outcome: 'relay_protocol_state_outbox_full', sends: 0});
+    } finally { await waiter.stop(); }
+  });
+}
+
+test('every hold of signing control the CLI takes itself is one the caller-held hold test covers', async () => {
+  const dir = new URL('../src/', import.meta.url);
+  const sites: string[] = [];
+  for (const name of (await fs.readdir(dir)).filter(item => item.endsWith('.ts') && !item.endsWith('.test.ts')).sort()) {
+    const text = await fs.readFile(new URL(name, dir), 'utf8');
+    for (const match of text.matchAll(/\bwith(Client|Device)SigningControl\(/g)) {
+      const call = text.slice(match.index, text.indexOf('\n\n', match.index));
+      sites.push(`${name} ${match[0].slice(0, -1)}${/\{ ?perSend: true ?\}/.test(call.slice(0, 400)) ? ' perSend' : ''}`);
+    }
+  }
+  assert.deepEqual(sites, [
+    'deviceSigningMaintenanceController.ts withDeviceSigningControl',
+    'index.ts withClientSigningControl',
+    'index.ts withClientSigningControl perSend',
+  ], 'a new hold of signing control needs a decision: perSend, or covered by the client\'s rule for a caller\'s own hold');
+});
