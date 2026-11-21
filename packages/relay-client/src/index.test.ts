@@ -4144,6 +4144,52 @@ test('an inherited stale acknowledgement stays in the owner\'s entry while its n
   for (const session of new Set(f.calls.map(call => call.sessionId))) assertNoSequenceSignedTwice(f.calls, session);
 });
 
+test('a client whose session open the server refused signs no other call while a taken-over acknowledgement waits for its new session (shared protocol state)', async () => {
+  const f = await sharedMonotonicFixture('fabric-shared-restart-acknowledgement-open-refused-');
+  const o = await f.open('relay:o');
+  await o.openSession();
+  f.failNext();
+  await assert.rejects(o.postActionEnforcement(simplifiedDecision, sharedAcknowledgement()),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  // 9 minutes later a restarted process with the same key takes it over, and the server refuses its session open.
+  f.refuse.add('/agent-fabric/sessions');
+  const restarted = await f.open('relay:o');
+  await assert.rejects(sharedLater(9, () => restarted.openSession()),
+    error => error instanceof AgentFabricRequestError && error.status === 409);
+  f.refuse.clear();
+  const sent = f.calls.length;
+  f.down.add('/agent-fabric/tasks/poll');
+  assert.equal(await sharedLater(9, () => sharedOutcome(restarted.pollTask())), 'Relay session is not open.');
+  f.down.clear();
+  assert.equal(f.calls.length, sent, 'no call is signed or sent in the session the server refused');
+  const held = Object.values((await f.read()).outboxes ?? {}).flatMap(entry => entry.pending ? [entry.pending.pathname] : []);
+  assert.deepEqual(held, [`/api/v1/orgs/org_a${kept.path}`], 'the owner\'s entry still holds the acknowledgement');
+  // Its next session open re-issues it in the new session.
+  assert.equal(await sharedLater(10, () => sharedOutcome(restarted.openSession())), 'accepted');
+  const [opened, reissued] = f.calls.slice(-2) as [SharedStateCall, SharedStateCall];
+  assert.equal(opened.path, '/agent-fabric/sessions');
+  assert.deepEqual([reissued.path, reissued.sessionId, reissued.sequence, reissued.idempotencyKey],
+    [kept.path, opened.sessionId, opened.sequence + 1, kept.idempotencyKey],
+    'it is sent once more, in the new session, with the original idempotency key');
+  assert.equal(await sharedLater(10, () => sharedOutcome(restarted.pollTask())), 'accepted', 'the opened session signs calls');
+  assert.deepEqual(keptMessageIds(await f.read()), [], 'the answered acknowledgement leaves the file');
+  for (const session of new Set(f.calls.map(call => call.sessionId))) assertNoSequenceSignedTwice(f.calls, session);
+});
+
+test('a workspace loop sends a kept request that an exited command left after the loop opened its session, after the loop\'s next request (shared protocol state)', async () => {
+  const f = await sharedStateFixture('fabric-shared-orphan-after-open-', () => sharedOk());
+  const loop = await f.open('relay:workspace-loop');
+  await loop.openSession();
+  // A minute later a command that exited during an outage left its kept request in its own entry.
+  const orphan = sharedOrphan(f.config.deviceId, await exitedPid());
+  await writeSharedOutboxes(f.statePath, { 'cli:1:orphan:1': orphan });
+  await sharedLater(1, async () => { await loop.pollTask(); await sharedSettled(f.config); });
+  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'the loop sends it without waiting 10 minutes');
+  assert.equal(f.calls.at(-2)!.path, '/agent-fabric/tasks/poll', 'after the loop\'s own request');
+  assert.deepEqual(keptMessageIds(await f.read()), []);
+});
+
 test('five answers another client kept survive 35 newer idle entries, and their owners take them from the file instead of sending again (shared protocol state)', async () => {
   let down = false;
   const f = await sharedStateFixture('fabric-shared-adopted-survive-', call =>
