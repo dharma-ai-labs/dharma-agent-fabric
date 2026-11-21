@@ -20,7 +20,9 @@ const STEPS = 8;
 const DECISION = '33333333-3333-4333-8333-333333333333';
 const ACKNOWLEDGEMENT = /\/agent-fabric\/decisions\/[^/]+\/enforcements$/;
 
-type Call = { by: string; path: string; body: string; messageId: string; sessionId: string; sequence: number };
+type Call = { by: string; path: string; body: string; messageId: string; sessionId: string; sequence: number;
+  /** The method, path, every header and the body, for a byte-for-byte comparison. */
+  envelope: string };
 type Pending = { method: 'GET' | 'POST'; pathname: string; body: string; headers: Record<string, string> };
 type Entry = { pending: Pending | null; keptCompletions?: Array<{ taskId: string }> };
 type State = { schema: string; sessionId: string | null; nextSequence: number; pending: Pending | null;
@@ -105,7 +107,8 @@ test('a seeded model of owners, other clients, the earlier version, idle evictio
       const headers = new Headers(init?.headers);
       const call: Call = { by, path: new URL(String(url)).pathname.replace('/api/v1/orgs/org_a', ''), body: String(init?.body ?? ''),
         messageId: headers.get('x-dharma-message-id')!, sessionId: headers.get('x-dharma-session-id')!,
-        sequence: Number(headers.get('x-dharma-sequence')) };
+        sequence: Number(headers.get('x-dharma-sequence')),
+        envelope: JSON.stringify([init?.method ?? 'GET', String(url), [...headers.entries()], String(init?.body ?? '')]) };
       calls.push(call);
       return call;
     };
@@ -319,15 +322,26 @@ test('a seeded model of owners, other clients, the earlier version, idle evictio
       assert.equal(slots.get(slot) ?? call.messageId, call.messageId, `${where('end')}: sequence ${slot} is signed twice`);
       slots.set(slot, call.messageId);
     }
-    // Only the process that opened a session signs in it; every other party sends there only exactly as signed.
+    // Only the process that opened a session signs in it; every other party sends there only exactly as signed: the
+    // signed headers and the body byte for byte as its owner last signed them. A process with the same owner key (a
+    // restarted workspace loop) is that owner. The earlier version is checked by I1 only.
     const opener = new Map<string, string>(), first = new Map<string, Call>();
+    const owner = (by: string) => by.startsWith('relay:') ? by.slice(0, by.indexOf('#')) : by;
+    const signedByOwner = new Map<string, Set<string>>();
     for (const call of calls) {
       if (call.path === '/agent-fabric/sessions' && !opener.has(call.sessionId)) opener.set(call.sessionId, call.by);
       const earliest = first.get(call.messageId);
       if (earliest) {
         assert.deepEqual([call.sessionId, call.sequence], [earliest.sessionId, earliest.sequence],
           `${where('end')}: ${call.by} sends another party's request only exactly as signed`);
+        if (call.by === 'earlier') continue;
+        if (owner(call.by) === owner(earliest.by)) signedByOwner.get(call.messageId)!.add(call.envelope);
+        else {
+          assert.ok(signedByOwner.get(call.messageId)!.has(call.envelope),
+            `${where('end')}: ${call.by} sends ${earliest.by}'s request ${call.path} byte for byte as its owner signed it`);
+        }
       } else {
+        signedByOwner.set(call.messageId, new Set([call.envelope]));
         assert.equal(opener.get(call.sessionId), call.by, `${where('end')}: ${call.by} signs only in a session it opened`);
         first.set(call.messageId, call);
       }
