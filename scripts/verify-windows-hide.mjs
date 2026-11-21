@@ -5,10 +5,11 @@
 //
 // A call passes when one of its arguments is an object literal in which
 // `windowsHide: true` comes after every spread that could set the flag. A child_process function used
-// as a value (passed as a dependency, stored, or re-exported) cannot be checked
+// as a value (passed as a dependency, stored, or exported in any form) cannot be checked
 // statically and is reported too; wrap it in a function that adds the option
-// instead. The same holds for the module itself, including its default export: it
-// may be read from, destructured or loaded into a name, and any other use is reported.
+// instead. The same holds for the module itself, including its default export: its
+// process functions may be read, it may be destructured or loaded into a local name,
+// and any other use is reported.
 import { readdirSync, readFileSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +20,9 @@ const sourceExtensions = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', 
 const skippedDirectories = new Set(['node_modules', 'dist', 'coverage', '.dharma-test']);
 const childProcessModules = new Set(['child_process', 'node:child_process']);
 const processFunctions = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']);
+// Members of the module that may be read from it. Any other read, such as `.then`
+// on a dynamic import, passes the module on unchecked.
+const moduleMembers = new Set([...processFunctions, 'default', 'ChildProcess']);
 
 // Release publishers whose exact text is pinned by SHA-256 in the publication
 // workflows. They run only on Linux release runners, where windowsHide has no
@@ -76,6 +80,17 @@ const singleFileProgram = (realName, sourceText) => {
 };
 
 const isChildProcessSpecifier = (node) => Boolean(node) && ts.isStringLiteralLike(node) && childProcessModules.has(node.text);
+
+// `import cp = require('node:child_process')` in TypeScript.
+const isChildProcessImportEquals = (node) => ts.isImportEqualsDeclaration(node)
+  && ts.isExternalModuleReference(node.moduleReference) && isChildProcessSpecifier(node.moduleReference.expression);
+
+const hasExportModifier = (node) => Boolean(node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword));
+// A declaration in `export const ...`, `export let ...` or `export var ...`.
+const isExportedVariable = (declaration) => {
+  const statement = declaration.parent?.parent;
+  return Boolean(statement) && ts.isVariableStatement(statement) && hasExportModifier(statement);
+};
 
 const isWrapper = (node) => ts.isAwaitExpression(node) || ts.isParenthesizedExpression(node)
   || ts.isAsExpression(node) || ts.isNonNullExpression(node);
@@ -143,6 +158,7 @@ const isDeclarationSite = (node) => {
   const parent = node.parent;
   if (!parent) return false;
   if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent)) return true;
+  if (ts.isImportEqualsDeclaration(parent) && parent.name === node) return true;
   if (ts.isBindingElement(parent)) return true;
   if (ts.isVariableDeclaration(parent) && parent.name === node) return true;
   if (ts.isParameter(parent) && parent.name === node) return true;
@@ -171,11 +187,16 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
     if (symbol) namespaceSymbols.add(symbol);
   };
 
-  // `require`, a name bound to `createRequire(...)`, or `createRequire(...)` itself.
+  // `require`, a name bound to `createRequire(...)`, `createRequire(...)` itself,
+  // `process.getBuiltinModule` or `module.require`.
   const isRequire = (callee) => {
     const expression = unwrap(callee);
     if (!expression) return false;
     if (ts.isIdentifier(expression)) return expression.text === 'require' || requireSymbols.has(symbolOf(expression));
+    if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
+      const owner = expression.expression.text, member = expression.name.text;
+      return (owner === 'process' && member === 'getBuiltinModule') || (owner === 'module' && member === 'require');
+    }
     return ts.isCallExpression(expression) && isCreateRequire(expression.expression);
   };
   // `require('node:child_process')` or `await import('node:child_process')`.
@@ -236,6 +257,7 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
         }
       }
     }
+    if (isChildProcessImportEquals(node)) bindNamespace(node.name);
     if (ts.isVariableDeclaration(node) && node.initializer && isChildProcessLoad(node.initializer)) {
       if (ts.isIdentifier(node.name)) bindNamespace(node.name);
       else if (ts.isObjectBindingPattern(node.name)) bindPattern(node.name);
@@ -296,14 +318,21 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
     findings.push({ line: line + 1, name, kind, text: node.getText(source).split('\n')[0].trim().slice(0, 120) });
   };
 
-  // The module may be read from (`childProcess.spawn`), destructured, or loaded
-  // into a name. Any other use passes it on to code whose calls cannot be checked.
+  // A member may be read from the module (`childProcess.spawn`), and the module may be
+  // destructured or loaded into a local name. Any other use, an exported declaration
+  // included, passes it on to code whose calls cannot be checked.
   const isCheckedModuleUse = (node, allowNamedBinding) => {
     const outer = outermost(node);
     const parent = outer.parent;
     if (!parent) return false;
-    if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === outer) return true;
+    if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === outer) {
+      // A computed key is checked as a process function where it is read.
+      const key = ts.isPropertyAccessExpression(parent) ? parent.name.text
+        : ts.isStringLiteralLike(parent.argumentExpression) ? parent.argumentExpression.text : undefined;
+      return key === undefined || moduleMembers.has(key);
+    }
     if (ts.isVariableDeclaration(parent) && parent.initializer === outer) {
+      if (isExportedVariable(parent)) return false;
       return ts.isObjectBindingPattern(parent.name) || (allowNamedBinding && ts.isIdentifier(parent.name));
     }
     return isMockMethodTarget(outer);
@@ -331,7 +360,16 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
   };
 
   const visit = (node) => {
-    if (ts.isTypeNode(node) || isAliasDeclaration(node)) return;
+    if (ts.isTypeNode(node)) return;
+    if (isAliasDeclaration(node)) {
+      // An exported alias passes the function on to modules that never name child_process.
+      if (isExportedVariable(node)) report(node, processFunctionOf(node.initializer), 'reference');
+      return;
+    }
+    if (ts.isImportEqualsDeclaration(node)) {
+      if (isChildProcessImportEquals(node) && hasExportModifier(node)) report(node, 'child_process', 'reference');
+      return;
+    }
     if (ts.isExportDeclaration(node)) {
       visitExport(node);
       return;
