@@ -4116,6 +4116,34 @@ for (const answer of ['accepted', 'refused'] as const) {
   });
 }
 
+test('an inherited stale acknowledgement stays in the owner\'s entry while its new session opens, so a failed session open leaves it for the next process (shared protocol state)', async () => {
+  const f = await sharedMonotonicFixture('fabric-shared-restart-acknowledgement-open-fails-');
+  const o = await f.open('relay:o');
+  await o.openSession();
+  f.failNext();
+  await assert.rejects(o.postActionEnforcement(simplifiedDecision, sharedAcknowledgement()),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  const kept = f.calls.at(-1)!;
+  // 9 minutes later a restarted process with the same key takes it over, and its session open gets no definite answer.
+  f.down.add('/agent-fabric/sessions');
+  const restarted = await f.open('relay:o');
+  await assert.rejects(sharedLater(9, () => restarted.openSession()),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  f.down.clear();
+  const held = Object.values((await f.read()).outboxes ?? {}).flatMap(entry => entry.pending ? [entry.pending.pathname] : []);
+  assert.deepEqual(held,[`/api/v1/orgs/org_a${kept.path}`], 'the owner\'s entry still holds the acknowledgement');
+  // The outage ends and the next process with the same key re-issues it in its own new session.
+  const next = await f.open('relay:o');
+  assert.equal(await sharedLater(10, () => sharedOutcome(next.openSession())), 'accepted');
+  const [opened, reissued] = f.calls.slice(-2) as [SharedStateCall, SharedStateCall];
+  assert.equal(opened.path, '/agent-fabric/sessions');
+  assert.deepEqual([reissued.path, reissued.sessionId, reissued.sequence, reissued.idempotencyKey],
+    [kept.path, opened.sessionId, opened.sequence + 1, kept.idempotencyKey],
+    'it is sent once more, in the new session, with the original idempotency key');
+  assert.deepEqual(keptMessageIds(await f.read()), [], 'the answered acknowledgement leaves the file');
+  for (const session of new Set(f.calls.map(call => call.sessionId))) assertNoSequenceSignedTwice(f.calls, session);
+});
+
 test('five answers another client kept survive 35 newer idle entries, and their owners take them from the file instead of sending again (shared protocol state)', async () => {
   let down = false;
   const f = await sharedStateFixture('fabric-shared-adopted-survive-', call =>
