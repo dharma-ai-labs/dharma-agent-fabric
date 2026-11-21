@@ -217,3 +217,27 @@ test('windowsHide passes only when no later spread or property can override it',
   ].join('\n');
   assert.deepEqual(lines(source, 'fixture.mjs'), ['2:call:spawn', '4:call:spawn', '7:call:spawn', '8:call:spawn']);
 });
+
+test('the default export of child_process is the module itself', () => {
+  const source = [
+    "import { default as cp } from 'node:child_process';",
+    "cp.spawn('git');",
+    "cp.spawn('git', { windowsHide: true });",
+    'async function late() {',
+    "  const { default: loaded } = await import('node:child_process');",
+    "  loaded.execSync('ver');",
+    "  (await import('node:child_process')).default.spawn('git');",
+    "  require('node:child_process')['default'].fork('worker.js');",
+    '  const named = cp.default;',
+    "  named.exec('dir');",
+    '}',
+    'register(cp);',
+    "register((await import('node:child_process')).default);",
+    "export { default } from 'node:child_process';",
+    "export { default as childProcess } from 'child_process';",
+  ].join('\n');
+  assert.deepEqual(lines(source, 'fixture.ts'), [
+    '2:call:spawn', '6:call:execSync', '7:call:spawn', '8:call:fork', '10:call:exec',
+    '12:reference:child_process', '13:reference:child_process', '14:reference:child_process', '15:reference:child_process',
+  ]);
+});
