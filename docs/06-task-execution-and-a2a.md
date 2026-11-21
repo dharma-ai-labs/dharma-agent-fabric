@@ -93,7 +93,7 @@ It may not by default:
 6. Record base commit, worktree path, provider version, policy revision, and skill bundle.
 7. Start the provider through its task adapter.
 8. Stream normalized events and bounded progress.
-9. Run acceptance commands after the provider stops.
+9. Run acceptance commands after the provider stops. Until command isolation exists, the task runner refuses any task that names registered commands (`authority.commands` or `acceptance.commands`) before step 1, with the code `registered_commands_refused`. The local relay applies the same check right after it polls the task: it posts one terminal `failed` event with `{phase: 'preflight', code: 'registered_commands_refused'}`, never posts `started`, and keeps polling.
 10. Commit only when policy and task require it.
 11. Push only the task branch.
 12. Preserve or delete the worktree according to result and retention policy.
