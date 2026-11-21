@@ -3,8 +3,8 @@
 // git, node) started by a process that has no console of its own opens a
 // visible terminal window on Windows and takes focus.
 //
-// A call passes when one of its arguments is an object literal whose last spread
-// or `windowsHide` member is `windowsHide: true`. A child_process function used
+// A call passes when one of its arguments is an object literal in which
+// `windowsHide: true` comes after every spread that could set the flag. A child_process function used
 // as a value (passed as a dependency, stored, or re-exported) cannot be checked
 // statically and is reported too; wrap it in a function that adds the option
 // instead. The same holds for the module itself: it may be read from,
@@ -95,6 +95,18 @@ const outermost = (node) => {
 
 const propertyName = (name) => (name && (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) ? name.text : undefined);
 
+// A spread can set windowsHide unless it is a literal, or a conditional between
+// literals, with no windowsHide member and no spread of its own.
+const spreadCanSetWindowsHide = (node) => {
+  const expression = unwrap(node);
+  if (expression && ts.isConditionalExpression(expression)) {
+    return spreadCanSetWindowsHide(expression.whenTrue) || spreadCanSetWindowsHide(expression.whenFalse);
+  }
+  if (!expression || !ts.isObjectLiteralExpression(expression)) return true;
+  return expression.properties.some((property) => ts.isSpreadAssignment(property)
+    || propertyName(property.name) === 'windowsHide');
+};
+
 // The last spread or `windowsHide` member of the literal decides: a spread or a
 // duplicate after `windowsHide: true` can set the flag back to false.
 const hasWindowsHide = (argument) => {
@@ -103,8 +115,8 @@ const hasWindowsHide = (argument) => {
     return hasWindowsHide(expression.whenTrue) && hasWindowsHide(expression.whenFalse);
   }
   if (!expression || !ts.isObjectLiteralExpression(expression)) return false;
-  const deciding = expression.properties.filter((property) => ts.isSpreadAssignment(property)
-    || propertyName(property.name) === 'windowsHide').at(-1);
+  const deciding = expression.properties.filter((property) => (ts.isSpreadAssignment(property)
+    && spreadCanSetWindowsHide(property.expression)) || propertyName(property.name) === 'windowsHide').at(-1);
   return Boolean(deciding) && ts.isPropertyAssignment(deciding)
     && unwrap(deciding.initializer)?.kind === ts.SyntaxKind.TrueKeyword;
 };
