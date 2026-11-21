@@ -3316,7 +3316,8 @@ test('the README says what a rollback to an earlier version keeps (shared protoc
   const readme = (await readFile(new URL('../README.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
   assert.equal(/rollback to an earlier version/i.test(readme), true, 'the README describes a rollback');
   assert.equal(/oldest kept request that is already due/i.test(readme), true, 'the README names the one kept request an earlier version replays');
-  assert.equal(/only the process that opened a session signs in it/i.test(readme), true, 'the README says who signs in a session');
+  assert.equal(/only the owner of a session — the process that opened it, or a restarted process with the same owner key for its own kept request only — signs in it/i.test(readme),
+    true, 'the README says who signs in a session, with the restarted owner exception in the rule itself');
   assert.equal(/sends a kept request only exactly as signed/i.test(readme), true, 'the README says every other client resends as signed');
   assert.equal(/action acknowledgement are never copied/i.test(readme), true, 'the README says no acknowledgement is copied');
   assert.equal(/a rollback loses at most/i.test(readme), true, 'the README bounds what a rollback loses');

@@ -108,9 +108,14 @@ hold, after every caller that waited meanwhile. The relay workspace loops'
 admission line hands its hold back in the same way, and so does a caller that
 holds signing control itself around one signed call (the CLI's workspace policy
 sync) when it takes it with `withSigningControlPerSend`: that caller's work then
-runs again in a fresh hold before its own request is signed. Only a caller that
-holds signing control itself across several calls, such as a work turn, keeps it
-across their sends. Every write of the local
+runs again in a fresh hold before its own request is signed. A caller that
+holds signing control itself without `withSigningControlPerSend`, such as a work
+turn across several calls, keeps its work in that hold, so the client adds no
+send of its own to it: it sends no other entry's request there to make room, and
+a full file refuses the caller's request (`relay_protocol_state_outbox_full`), as
+before; after it sends its own earlier kept call there, the caller's request
+fails with `relay_retry_after_recovery`, unsent, and a retry signs and sends it
+in a hold of its own. Every write of the local
 protocol state (the outbox, the session and recovered task completions)
 happens under the device signing control and starts from the latest file, so
 clients on one device never overwrite each other's kept requests or
@@ -120,9 +125,11 @@ read the per-client outbox entries described below. The relay upgrade stops
 the relay before it switches versions, but a command of the earlier version
 that is still running can overwrite the file until it exits.
 
-Only the process that opened a session signs in it, from the sequence it holds
-in memory: no client reads another's session or sequence from the file, and a
-restarted process with the same owner key opens a session of its own. Every
+Only the owner of a session — the process that opened it, or a restarted
+process with the same owner key for its own kept request only — signs in it,
+from the sequence it holds in memory: no client reads another's session or
+sequence from the file, and a restarted process with the same owner key opens a
+session of its own for every other request. Every
 other client sends a kept request only exactly as signed: every signed header
 (message id, session, sequence, idempotency key, time, nonce and signature) and
 the body byte for byte. The server refuses a signature older than 5 minutes, so
