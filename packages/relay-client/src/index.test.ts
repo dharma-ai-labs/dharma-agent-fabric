@@ -3325,6 +3325,20 @@ test('the README says what a rollback to an earlier version keeps (shared protoc
     'no closed session, idle cap or as-signed marker is described');
 });
 
+// Owner review: the total send count per hold of signing control is at most 1, including recovery and capacity
+// pressure, on every path. The README says which holds that covers and does not offer a hold across several calls as
+// one that keeps it.
+test('the README says a hold its caller takes makes one send per signed call in it, and the CLI takes none across several (owner review)', async () => {
+  const readme = (await readFile(new URL('../README.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  const start = readme.indexOf('## How long one signed relay request holds device signing control');
+  const section = readme.slice(start, readme.indexOf(' ## ', start + 1));
+  assert.doesNotMatch(section, /Each hold makes at most one network send/, 'the rule names the holds it covers');
+  assert.doesNotMatch(section, /work turn across several calls/, 'a hold across several calls is not offered as one that keeps the rule');
+  assert.match(section, /each hold that the client or the admission line takes makes at most one network send/i);
+  assert.match(section, /makes one send for each signed call its caller makes in it/);
+  assert.match(section, /named session activation boundary takes only the workspace skill activation lock/);
+});
+
 // Convergence review round 2: an expired answer never becomes a new signature, one orphan send per hold of signing
 // control, orphan sections of admitted clients and of a lease taken while queued, and a re-signed top-level copy.
 test('a live owner whose adopted answer has left the file sends its own signed request again, never a new signature of the call (shared protocol state)', async () => {

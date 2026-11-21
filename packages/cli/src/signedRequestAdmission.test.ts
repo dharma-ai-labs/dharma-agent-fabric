@@ -8,6 +8,8 @@ import test from 'node:test';
 import {AgentFabricClient, AgentFabricRequestError, loadOrCreateDeviceIdentity, saveDeviceConfig, saveDeviceEnrollmentAnchor,
   withDeviceSigningControl, type DeviceConfig} from '@dharma-ai-labs/agent-fabric-relay-client';
 import type {SecureSecretStore} from '@dharma-ai-labs/agent-fabric-secure-store';
+import * as cli from './index.js';
+import {createProviderSessionChannel} from './providerSessionChannel.js';
 import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmission.js';
 
 // Owner re-review: a relay workspace loop's requests go through the admission line, so each one runs inside a hold of
@@ -172,19 +174,20 @@ test('the workspace policy sync takes signing control so that its hold makes at 
 });
 
 // Owner review: the total send count per hold of signing control is at most 1, including recovery and capacity
-// pressure, on every path. These are the holds the CLI takes itself around signed calls. The workspace policy sync
-// takes its hold perSend, so its work runs again in a fresh hold for its own call. A hold taken without perSend (the
-// named session activation boundary, and any hold taken with withDeviceSigningControl) keeps its work in that one
-// hold, so the client adds no send of its own to it: after it sends its own earlier kept call, the caller's call
-// fails with relay_retry_after_recovery and is sent on retry, in a hold of its own; in a full file it sends no orphan
-// to make room, and the full file refuses the caller's call, as before.
+// pressure, on every path. These are the holds a caller takes itself around one signed call. The workspace policy sync
+// takes its hold perSend, so its work runs again in a fresh hold for its own call. A hold taken without perSend keeps
+// its work in that one hold, so the client adds no send of its own to it: after it sends its own earlier kept call, the
+// caller's call fails with relay_retry_after_recovery and is sent on retry, in a hold of its own; in a full file it
+// sends no orphan to make room, and the full file refuses the caller's call, as before. The CLI takes no such hold
+// around a protocol-state request: the named session activation boundary takes none (see the tests below), and the
+// device signing maintenance hold sends only its own maintenance requests, never a protocol-state request.
 const callerHolds: ReadonlyArray<{site: string; perSend: boolean;
   hold: (config: DeviceConfig, work: () => Promise<unknown>) => Promise<unknown>}> = [
   {site: 'workspace policy sync (withClientSigningControl, perSend)', perSend: true,
     hold: (config, work) => withClientSigningControl({config}, work, {perSend: true})},
-  {site: 'named session activation boundary (withClientSigningControl)', perSend: false,
+  {site: 'a hold taken with withClientSigningControl without perSend', perSend: false,
     hold: (config, work) => withClientSigningControl({config}, work)},
-  {site: 'a hold taken with withDeviceSigningControl (device signing maintenance)', perSend: false,
+  {site: 'a hold taken with withDeviceSigningControl', perSend: false,
     hold: (config, work) => withDeviceSigningControl({config}, work)},
 ];
 
@@ -250,4 +253,149 @@ test('every hold of signing control the CLI takes itself is one the caller-held 
     'index.ts withClientSigningControl',
     'index.ts withClientSigningControl perSend',
   ], 'a new hold of signing control needs a decision: perSend, or covered by the client\'s rule for a caller\'s own hold');
+});
+
+// Owner review: the total send count per hold of signing control is at most 1, including recovery and capacity
+// pressure, on every path. A named session's work turn, readiness check and inbox poll run in its activation boundary
+// and make several signed calls there. The boundary takes only the workspace skill activation lock, never a hold of
+// signing control, so each signed call in it takes a hold of its own: the policy sync perSend, every other call through
+// the admission line. A kept call or a full file is then sent in a hold of its own, and no call fails because of it.
+type ActivationBoundary = <T>(workspaceId: string, operation: () => Promise<T>) => Promise<T>;
+function activationBoundary(): ActivationBoundary {
+  const value = (cli as unknown as Record<string, unknown>).withNamedSessionActivationBoundary;
+  assert.equal(typeof value, 'function', 'the named session activation boundary is the exported withNamedSessionActivationBoundary');
+  return value as ActivationBoundary;
+}
+
+async function namedSessionHome(t: {after(fn: () => Promise<void>): void}) {
+  const home = await fs.mkdtemp(resolve(tmpdir(), 'dharma-admission-named-home-'));
+  const previous = process.env.DHARMA_HOME;
+  process.env.DHARMA_HOME = home;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.DHARMA_HOME; else process.env.DHARMA_HOME = previous;
+    await fs.rm(home, {recursive: true, force: true});
+  });
+}
+
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status});
+
+test('the named session activation boundary is withNamedSessionActivationBoundary, which takes no hold of signing control', async () => {
+  const text = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.match(text, /withActivationBoundary: \(operation, work\) => withNamedSessionActivationBoundary\(workspaceId, async \(\) => \{/,
+    'the named session service runs its turns in the exported boundary');
+  const start = text.indexOf('export function withNamedSessionActivationBoundary<T>(');
+  assert.ok(start >= 0, 'the boundary is exported from index.ts');
+  const boundary = text.slice(start, text.indexOf('\n}\n', start));
+  assert.doesNotMatch(boundary, /SigningControl/, 'the boundary takes no hold of signing control');
+  assert.match(boundary, /withWorkspaceSkillActivationLock\(workspaceId, 'codex', operation\)/);
+});
+
+test('a named session work turn in its activation boundary makes at most one network send per hold while another client waits: own recovery and a full file', async t => {
+  const boundary = activationBoundary();
+  const d = await device(t);
+  await namedSessionHome(t);
+  let down = false;
+  let other: ReturnType<typeof waitingClient> | undefined;
+  const fabric = admitSignedRequests(await AgentFabricClient.open({configPath: d.configPath, statePath: d.statePath, store: d.store,
+    ownerKey: 'relay:workspace-a', fetcher: async url => {
+      await other?.send();
+      return down && String(url).endsWith('/agent-fabric/workspaces')
+        ? json({ok: false, error: {code: 'upstream_unavailable', message: 'Try again.'}}, 503) : json({ok: true}, 201);
+    }}));
+  const workspaceId = randomUUID();
+  // The shape of a repository-bound work turn: the lifetime check, the authority the repository context loads (the
+  // policy sync in its own perSend hold, then the source policy), the work authorization, then a channel call.
+  const workTurn = () => boundary(workspaceId, async () => {
+    await fabric.signedPost('/agent-fabric/provider-sessions', {action: 'inspect'});
+    await withClientSigningControl({config: d.config}, () => fabric.registerWorkspace({workspaceId}), {perSend: true});
+    await fabric.signedGet('/agent-fabric/repository-source-authorization');
+    await fabric.registerWorkspace({workspaceId});
+    await fabric.signedPost('/agent-fabric/provider-session-questions', {action: 'reply'});
+    return 'answered';
+  });
+  const waiter = waitingClient(d.config);
+  other = waiter;
+  const turn = async (name: string) => {
+    const from = waiter.behind.length;
+    const outcome = await workTurn().catch((error: unknown) => error instanceof Error ? error.message : String(error));
+    await withDeviceSigningControl({config: d.config}, async () => undefined);
+    const behind = waiter.behind.slice(from);
+    assert.deepEqual(behind, behind.map(() => 0), `${name}: no send shares its hold with an earlier one`);
+    return {outcome, sends: behind.length};
+  };
+  try {
+    await fabric.openSession();
+    // A kept call of this client: an earlier work authorization got no answer.
+    down = true;
+    await assert.rejects(fabric.registerWorkspace({workspaceId}), error => error instanceof AgentFabricRequestError && error.status === 503);
+    down = false;
+    assert.deepEqual(await turn('own recovery'), {outcome: 'answered', sends: 6}, 'own recovery: the kept call, then the five calls');
+    assert.deepEqual(await turn('next turn'), {outcome: 'answered', sends: 5});
+    // A full file of kept requests that commands which exited just now left, one of them due.
+    const dead = await exitedPid();
+    await fs.writeFile(d.statePath, JSON.stringify({schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+      outboxes: Object.fromEntries(Array.from({length: 256}, (_, index) => [`cli:${dead}:x:${index}`, orphan(d.config.deviceId, dead)]))}));
+    const full = await turn('full file');
+    assert.equal(full.outcome, 'answered', 'full file: an orphan makes room in a hold of its own and every call is answered');
+    assert.ok(full.sends >= 6, 'full file: the orphan sent to make room, then the five calls');
+  } finally { await waiter.stop(); }
+});
+
+test('a kept call does not stop a named session: its inbox poll in the activation boundary is answered, in a hold of its own, and so is the next one', async t => {
+  const boundary = activationBoundary();
+  const d = await device(t);
+  await namedSessionHome(t);
+  let down = false;
+  let other: ReturnType<typeof waitingClient> | undefined;
+  const scope = {organizationId: d.config.organizationId, repositoryBindingId: randomUUID(), workspaceId: randomUUID(),
+    endpointId: randomUUID(), membershipId: randomUUID(), deviceId: d.config.deviceId, bindingId: randomUUID(),
+    provider: 'codex' as const, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), maximumProviderCostCents: 0};
+  const {expiresAt: _expiresAt, maximumProviderCostCents: _cost, organizationId: _organizationId, ...registered} = scope;
+  const fabric = admitSignedRequests(await AgentFabricClient.open({configPath: d.configPath, statePath: d.statePath, store: d.store,
+    ownerKey: 'relay:workspace-a', fetcher: async url => {
+      await other?.send();
+      const path = String(url);
+      if (path.endsWith('/agent-fabric/workspaces')) {
+        return down ? json({ok: false, error: {code: 'upstream_unavailable', message: 'Try again.'}}, 503) : json({ok: true}, 201);
+      }
+      if (path.endsWith('/agent-fabric/provider-sessions')) {
+        return json({ok: true, organizationId: scope.organizationId, correlationId: randomUUID(), registration: {...registered,
+          mode: 'bridge_owned', revision: 1, state: 'attached', leaseUntil: new Date(Date.now() + 60_000).toISOString(), replay: false}});
+      }
+      if (path.endsWith('/agent-fabric/provider-session-questions')) {
+        return json({ok: true, organizationId: scope.organizationId, correlationId: randomUUID(), result: {offers: []}});
+      }
+      return json({ok: true}, 201);
+    }}));
+  const channel = createProviderSessionChannel({transport: fabric, scope, mode: 'bridge_owned', expectedRevision: 0,
+    assertOwner: async () => true, verifier: {resolvePublicKey: () => null}, authorizeContent: async () => true});
+  const waiter = waitingClient(d.config);
+  other = waiter;
+  const poll = async (name: string) => {
+    const from = waiter.behind.length;
+    const outcome = await boundary(scope.workspaceId, () => channel.inbox())
+      .then(offers => offers.length === 0 ? 'answered' : 'offers', (error: unknown) => error instanceof Error ? error.message : String(error));
+    await withDeviceSigningControl({config: d.config}, async () => undefined);
+    const behind = waiter.behind.slice(from);
+    assert.deepEqual(behind, behind.map(() => 0), `${name}: no send shares its hold with an earlier one`);
+    return {outcome, sends: behind.length};
+  };
+  try {
+    await fabric.openSession();
+    await channel.attach();
+    // A kept call of this client: a work authorization outside the boundary got no answer, and that work failed.
+    down = true;
+    await assert.rejects(fabric.registerWorkspace({workspaceId: scope.workspaceId}),
+      error => error instanceof AgentFabricRequestError && error.status === 503);
+    down = false;
+    assert.deepEqual(await poll('inbox after a kept call'), {outcome: 'answered', sends: 2},
+      'the kept call is sent in a hold of its own, then the inbox poll in another');
+    assert.deepEqual(await poll('next inbox'), {outcome: 'answered', sends: 1}, 'the channel stays open for the next iteration');
+    // A full file of kept requests that commands which exited just now left, one of them due.
+    const dead = await exitedPid();
+    await fs.writeFile(d.statePath, JSON.stringify({schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
+      outboxes: Object.fromEntries(Array.from({length: 256}, (_, index) => [`cli:${dead}:x:${index}`, orphan(d.config.deviceId, dead)]))}));
+    assert.equal((await poll('inbox in a full file')).outcome, 'answered');
+    assert.equal((await poll('next inbox after a full file')).outcome, 'answered');
+  } finally { await waiter.stop(); }
 });
