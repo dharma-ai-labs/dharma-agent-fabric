@@ -111,7 +111,7 @@ for (const interruption of ['normal release', 'process death'] as const) {
         provider:'codex', assertCurrent:()=>{}}, async()=>{
           console.log('locked'); await new Promise(resolve=>process.stdin.once('data',resolve));
         });`;
-    const child = spawn(process.execPath, ['--input-type=module', '-e', script, home], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, home], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const abortChild = () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); };
     context.signal.addEventListener('abort', abortChild, { once: true });
     let stderr = '', output = '', timer: NodeJS.Timeout | undefined;

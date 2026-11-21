@@ -37,7 +37,7 @@ async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string
   await mkdir(workspace);
   for (const argv of [['init', '-q'], ['config', 'user.email', 'test@dharma.ai'],
     ['config', 'user.name', 'Artifact Fixture'], ['commit', '--allow-empty', '-qm', 'initial']]) {
-    assert.equal(spawnSync('git', argv, { cwd: workspace }).status, 0);
+    assert.equal(spawnSync('git', argv, { cwd: workspace, windowsHide: true }).status, 0);
   }
   const policy: OrganizationPolicy = {
     schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
@@ -207,9 +207,9 @@ test('required artifact review v10: incomplete Git streams fail closed', async (
       const patch = child.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
         if (command === 'git' && gitSubcommand(argv) === (stream === 'untracked-overflow' ? 'ls-files' : 'diff')) {
           intercepted++;
-          return originalSpawn(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]));', outputPath], options);
+          return originalSpawn(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]));', outputPath], { ...options, windowsHide: true });
         }
-        return originalSpawn(command, argv, options);
+        return originalSpawn(command, argv, { ...options, windowsHide: true });
       });
       syncBuiltinESMExports();
       try {
@@ -229,8 +229,8 @@ test('required artifact review v10: incomplete Git streams fail closed', async (
 test('required artifact review v10: ignored outputs require signed write authority', async (t) => {
   const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
   await writeFile(resolve(fixture.workspace, '.gitignore'), 'reports/result.json\n');
-  assert.equal(spawnSync('git', ['add', '.gitignore'], { cwd: fixture.workspace }).status, 0);
-  assert.equal(spawnSync('git', ['commit', '-qm', 'ignore output'], { cwd: fixture.workspace }).status, 0);
+  assert.equal(spawnSync('git', ['add', '.gitignore'], { cwd: fixture.workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '-qm', 'ignore output'], { cwd: fixture.workspace, windowsHide: true }).status, 0);
   fixture.unsigned.authority.writePaths = ['reports/allowed/**'];
   let calls = 0;
   const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
@@ -251,8 +251,8 @@ test('required artifact review v10: existing read-only artifacts remain unchange
       const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
       await mkdir(resolve(fixture.workspace, 'reports'));
       await writeFile(resolve(fixture.workspace, 'reports/result.json'), 'private-read-only-sentinel');
-      assert.equal(spawnSync('git', ['add', 'reports/result.json'], { cwd: fixture.workspace }).status, 0);
-      assert.equal(spawnSync('git', ['commit', '-qm', 'existing output'], { cwd: fixture.workspace }).status, 0);
+      assert.equal(spawnSync('git', ['add', 'reports/result.json'], { cwd: fixture.workspace, windowsHide: true }).status, 0);
+      assert.equal(spawnSync('git', ['commit', '-qm', 'existing output'], { cwd: fixture.workspace, windowsHide: true }).status, 0);
       fixture.unsigned.authority.writePaths = ['reports/allowed/**'];
       if (mutate) {
         fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e',
@@ -272,8 +272,8 @@ test('required artifact review v10: existing read-only artifacts remain unchange
 test('required artifact review v10: ignored write-authorized outputs remain supported', async (t) => {
   const fixture = await requiredArtifactFixture(t, ['reports/result.json']);
   await writeFile(resolve(fixture.workspace, '.gitignore'), 'reports/result.json\n');
-  assert.equal(spawnSync('git', ['add', '.gitignore'], { cwd: fixture.workspace }).status, 0);
-  assert.equal(spawnSync('git', ['commit', '-qm', 'ignore output'], { cwd: fixture.workspace }).status, 0);
+  assert.equal(spawnSync('git', ['add', '.gitignore'], { cwd: fixture.workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '-qm', 'ignore output'], { cwd: fixture.workspace, windowsHide: true }).status, 0);
   const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async ({ workspace }) => {
     await mkdir(resolve(workspace, 'reports'));
     await writeFile(resolve(workspace, 'reports/result.json'), '{}');
@@ -468,7 +468,7 @@ test('task cancellation without artifacts is checked again after final Git inspe
   const originalSpawn = childProcess.spawn;
   let inspections = 0;
   const patch = t.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
-    const child = originalSpawn(command, argv, options);
+    const child = originalSpawn(command, argv, { ...options, windowsHide: true });
     if (command === 'git' && gitSubcommand(argv) === 'ls-files') {
       inspections++;
       child.once('close', () => controller.abort(new Error('private-cancellation-sentinel')));
@@ -632,7 +632,7 @@ test('required artifact review v4: Git preserves Unicode paths in tracked and un
         providerExecutor: async ({ workspace }) => {
           await mkdir(resolve(workspace, 'reports'));
           await writeFile(resolve(workspace, artifact), '{}');
-          if (tracked) assert.equal(spawnSync('git', ['add', '--', artifact], { cwd: workspace }).status, 0);
+          if (tracked) assert.equal(spawnSync('git', ['add', '--', artifact], { cwd: workspace, windowsHide: true }).status, 0);
           return fixture.providerResult;
         } });
       assert.equal(receipt.status, 'completed');
@@ -721,10 +721,10 @@ test('signed task runs only a registered command in a relay-owned worktree and d
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-runner-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
-  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace, windowsHide: true }).status, 0);
   const policy: OrganizationPolicy = {
     schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
     evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1, maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
@@ -790,10 +790,10 @@ test('Claude tasks read required skills from installed files because safe mode d
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-skill-file-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
-  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace, windowsHide: true }).status, 0);
   const policy: OrganizationPolicy = {
     schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
     evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1, maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
@@ -849,10 +849,10 @@ test('read-only signed tasks receive only matching verified knowledge and remove
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-knowledge-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
-  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace, windowsHide: true }).status, 0);
   const policy: OrganizationPolicy = {
     schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
     evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1, maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
@@ -1023,11 +1023,11 @@ test('provider changes outside signed write paths fail even when untracked or co
   await mkdir(resolve(workspace, 'src'), { recursive: true });
   await writeFile(resolve(workspace, 'src', 'allowed.ts'), 'export const allowed = true;\n');
   await writeFile(resolve(workspace, 'outside.txt'), 'protected\n');
-  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['add', '.'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['commit', '-qm', 'initial'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['add', '.'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '-qm', 'initial'], { cwd: workspace, windowsHide: true }).status, 0);
   const policy: OrganizationPolicy = {
     schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
     evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1, maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
@@ -1069,8 +1069,8 @@ test('provider changes outside signed write paths fail even when untracked or co
     serverPublicKey: publicKey, receiptStore: new FileTaskReceiptStore(resolve(root, 'committed-receipts')),
     providerExecutor: async ({ workspace: worktree }) => {
       await writeFile(resolve(worktree, 'outside.txt'), 'changed outside scope\n');
-      assert.equal(spawnSync('git', ['add', 'outside.txt'], { cwd: worktree }).status, 0);
-      assert.equal(spawnSync('git', ['commit', '-qm', 'unauthorized change'], { cwd: worktree }).status, 0);
+      assert.equal(spawnSync('git', ['add', 'outside.txt'], { cwd: worktree, windowsHide: true }).status, 0);
+      assert.equal(spawnSync('git', ['commit', '-qm', 'unauthorized change'], { cwd: worktree, windowsHide: true }).status, 0);
       return providerResult;
     },
   });
@@ -1084,8 +1084,8 @@ test('acceptance commands cannot expand signed write scope or run a later comman
       const fixture = await requiredArtifactFixture(child, []);
       const forbiddenPath = 'private-scope-canary.txt';
       await writeFile(resolve(fixture.workspace, forbiddenPath), 'original');
-      assert.equal(spawnSync('git', ['add', forbiddenPath], { cwd: fixture.workspace }).status, 0);
-      assert.equal(spawnSync('git', ['commit', '-qm', 'protected fixture'], { cwd: fixture.workspace }).status, 0);
+      assert.equal(spawnSync('git', ['add', forbiddenPath], { cwd: fixture.workspace, windowsHide: true }).status, 0);
+      assert.equal(spawnSync('git', ['commit', '-qm', 'protected fixture'], { cwd: fixture.workspace, windowsHide: true }).status, 0);
       const target = variant === 'untracked' || variant === 'receipt-required' ? 'untracked-scope-canary.txt' : forbiddenPath;
       const script = `require('node:fs').writeFileSync(${JSON.stringify(target)}, 'private-content-canary');`
         + (variant === 'committed'
@@ -1244,10 +1244,10 @@ test('receipt-required task fails closed before provider execution without an em
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-action-decision-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
-  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace, windowsHide: true }).status, 0);
   const policy: OrganizationPolicy = {
     schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
     evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1, maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
@@ -1282,10 +1282,10 @@ test('receipt-required task executes only a KMS-signed release and acknowledges 
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-action-release-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
-  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace, windowsHide: true }).status, 0);
   const policy: OrganizationPolicy = {
     schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
     evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1, maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
@@ -1526,10 +1526,10 @@ test(`one embedded ${outcome} receipt contains the task without a protected effe
   await mkdir(workspace);
   const protectedPath = resolve(workspace, 'protected.txt');
   await writeFile(protectedPath, 'original protected content\n');
-  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace }).status, 0);
-  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace }).status, 0);
+  assert.equal(spawnSync('git', ['init', '-q'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.email', 'test@dharma-ai.io'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['config', 'user.name', 'Dharma Test'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: workspace, windowsHide: true }).status, 0);
   const policy: OrganizationPolicy = {
     schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',
     evidence: { defaultMode: 'deep', registeredWorkspaceOnly: true, excludePaths: [], maximumCapsuleBytes: 1, maximumDailyUploadBytes: 1, maximumExpansionBytes: 1 },
@@ -1721,7 +1721,7 @@ test('decision-bound acceptance variables come only from the verified decision r
     await mkdir(workspace);
     for (const argv of [['init', '-q'], ['config', 'user.email', 'test@dharma-ai.io'],
       ['config', 'user.name', 'Dharma Test'], ['commit', '--allow-empty', '-qm', 'initial']]) {
-      assert.equal(spawnSync('git', argv, { cwd: workspace }).status, 0);
+      assert.equal(spawnSync('git', argv, { cwd: workspace, windowsHide: true }).status, 0);
     }
     const policy: OrganizationPolicy = {
       schema: 'dharma.organization-policy/v1', organizationId: 'org_test', revision: '1',

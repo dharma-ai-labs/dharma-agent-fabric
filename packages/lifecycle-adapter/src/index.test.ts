@@ -310,7 +310,7 @@ test('actual SDK and SQLite replay after process exit produce one logical local-
       await adapter.run({organizationId:client.organizationId,dispatchHandoff:async(input,options)=>{
         await client.dispatchHandoff(input,options); process.exit(23); }});`;
     const child = spawn(process.execPath, ['--input-type=module', '-e', script], { cwd: process.cwd(),
-      env: { ...process.env, FIXTURE_INPUT: JSON.stringify(f.input), FIXTURE_URL: baseUrl }, stdio: 'ignore' });
+      env: { ...process.env, FIXTURE_INPUT: JSON.stringify(f.input), FIXTURE_URL: baseUrl }, stdio: 'ignore', windowsHide: true });
     const [code] = await once(child, 'close'); assert.equal(code, 23);
     const adapter = await SqliteLifecycleAdapter.open(f.input);
     try {
@@ -386,7 +386,7 @@ test('default reference runner is metadata-only dry-run and never initializes st
       input.authorize=async()=>({approved:true,policyRevision:'policy-1'});
       input.createClient=()=>{throw new Error('dry-run must not create a client');}; export default input;`);
     const child = spawn(process.execPath, [fileURLToPath(new URL('../bin/run.mjs', import.meta.url)),
-      '--config', config], { stdio: ['ignore', 'pipe', 'pipe'] });
+      '--config', config], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = ''; let stderr = '';
     child.stdout.on('data', b => { stdout += b; }); child.stderr.on('data', b => { stderr += b; });
     const [code] = await once(child, 'close'); assert.equal(code, 0, stderr);

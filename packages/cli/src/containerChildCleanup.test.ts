@@ -53,7 +53,7 @@ async function fixture() {
   const start = (spawned?: (child: ChildProcess) => void) => run({home, uid: 1000, signal: abort.signal,
     containerRuntime: {runtimeVersion: '0.2.153'}, consumerStoreReady: async () => true,
     spawnRelay: () => {
-      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'ignore'});
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'ignore', windowsHide: true});
       children.push(child); spawned?.(child); return child;
     }, pollMs: 1, restartDelayMs: 0});
   return {start, children, records, abort,

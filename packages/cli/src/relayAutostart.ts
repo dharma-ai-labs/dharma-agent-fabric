@@ -56,7 +56,7 @@ export type RelayAutostartState = {
 };
 
 const defaultRunner: Runner = async (file, args) => {
-  const { stdout } = await execFileAsync(file, args, { timeout: 15_000, maxBuffer: 64 * 1024 });
+  const { stdout } = await execFileAsync(file, args, { timeout: 15_000, maxBuffer: 64 * 1024, windowsHide: true });
   return { stdout };
 };
 

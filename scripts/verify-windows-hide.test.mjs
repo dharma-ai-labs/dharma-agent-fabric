@@ -52,8 +52,10 @@ test('calls that pass windowsHide: true in an options literal pass, including sp
     "execFile('git', ['status'], options, () => {});",
     "spawn('git', [], { windowsHide: false });",
     "spawn('git', [], { windowsHide: process.platform === 'win32' });",
+    "spawn('git', [], fast ? { timeout: 1, windowsHide: true } : { windowsHide: true });",
+    "spawn('git', [], fast ? { timeout: 1, windowsHide: true } : { timeout: 2 });",
   ].join('\n');
-  assert.deepEqual(lines(source, 'fixture.mjs'), ['6:call:execFile', '7:call:spawn', '8:call:spawn']);
+  assert.deepEqual(lines(source, 'fixture.mjs'), ['6:call:execFile', '7:call:spawn', '8:call:spawn', '10:call:spawn']);
 });
 
 test('promisified and aliased process functions are checked where they are called', () => {

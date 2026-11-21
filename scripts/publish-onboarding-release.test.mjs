@@ -115,7 +115,7 @@ test('CLI209 keeps all seven dependency packages immutable', () => {
 
 function releaseSnapshot() {
   const root = join(import.meta.dirname, '..');
-  const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8'}).trim();
+  const git = (...args) => execFileSync('git', args, {cwd: root, encoding: 'utf8', windowsHide: true}).trim();
   const baseline = 'cc470925d23f925cf5df3ef70f77b633e1cff7d9';
   const reviewed = baseline;
   assert.equal(git('rev-parse', `${reviewed}^{tree}`), '199d9e1d2409d2e15951d2b0c9b7859cbdca1894');
@@ -145,12 +145,12 @@ function releaseSnapshot() {
   }
   lock.packages['packages/lifecycle-adapter'].dependencies['@dharma-ai-labs/agent-fabric-evidence-reduction'] = '0.2.35';
   const baselineCliSource = execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`],
-    {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
+    {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, windowsHide: true});
   // Historical guard fixtures must use their qualified artifact source, not
   // whichever unpublished CLI is currently being prepared in this checkout.
   const qualified209 = 'beda0e1416e7f965101618486a48f4a289cb4d7f';
   const historical = path => execFileSync('git', ['show', `${qualified209}:${path}`],
-    {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024});
+    {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, windowsHide: true});
   const cliSource = historical('packages/cli/src/index.ts');
   // Exercise committed candidate metadata, not a claim of clean release eligibility.
   const snapshot = {head: reviewed, ref: 'refs/heads/main', tree: git('rev-parse', `${baseline}^{tree}`),
@@ -218,7 +218,7 @@ test('runtime admission rejects altered dependencies, added manifests and old ne
 
 test('npm bin linking leaves a tracked executable launcher clean on Linux', { skip: process.platform !== 'linux' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'dharma-bin-mode-'));
-  const run = (file, args, cwd) => execFileSync(file, args, { cwd, encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const run = (file, args, cwd) => execFileSync(file, args, { cwd, encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }).trim();
   try {
     for (const mode of [0o644, 0o755]) {
       const cwd = join(root, String(mode));

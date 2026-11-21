@@ -408,7 +408,7 @@ test('macOS generated plist passes the native property-list parser', { skip: pro
   const root = await mkdtemp(join(tmpdir(), 'dharma-native-plist-'));
   const file = join(root, 'test.plist');
   await writeFile(file, macRelayLaunchAgent('/bin/true', '/Users/test/Policy & "quote"', '/Users/test/Repo Space', root));
-  const result = spawnSync('/usr/bin/plutil', ['-lint', file], { encoding: 'utf8', timeout: 15_000 });
+  const result = spawnSync('/usr/bin/plutil', ['-lint', file], { encoding: 'utf8', timeout: 15_000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
@@ -424,14 +424,14 @@ test('Linux startup invokes only the pinned launcher and canonical policy', () =
 });
 
 test('Linux generated unit passes the actual systemd parser with spaces and literal specifiers', {
-  skip: process.platform !== 'linux' || spawnSync('systemd-analyze', ['--version']).status !== 0,
+  skip: process.platform !== 'linux' || spawnSync('systemd-analyze', ['--version'], { windowsHide: true }).status !== 0,
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-unit-parser-'));
   const workspace = join(root, 'repo space % quote"');
   await mkdir(workspace);
   const file = join(root, 'dharma-parser-test.service');
   await writeFile(file, linuxRelayUnit('/bin/true', null, workspace, join(root, 'private home'), join(root, 'selected Codex%home')));
-  const result = spawnSync('systemd-analyze', ['--user', 'verify', file], { encoding: 'utf8', timeout: 15_000 });
+  const result = spawnSync('systemd-analyze', ['--user', 'verify', file], { encoding: 'utf8', timeout: 15_000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr || String(result.error));
 });
 

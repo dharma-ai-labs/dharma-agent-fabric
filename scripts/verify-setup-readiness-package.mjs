@@ -16,7 +16,7 @@ if (cli.dependencies[manifest.name] !== manifest.version
 const parent = await realpath(tmpdir()), temporary = await mkdtemp(resolve(parent, 'dharma-readiness-pack-'));
 try {
   const {stdout} = await execute(process.execPath, [npm, 'pack', '--workspace', 'packages/local-vault',
-    '--ignore-scripts', '--pack-destination', temporary, '--json'], {cwd: root, timeout: 60_000, maxBuffer: 4 * 1024 * 1024});
+    '--ignore-scripts', '--pack-destination', temporary, '--json'], {cwd: root, timeout: 60_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true});
   const packed = JSON.parse(stdout);
   if (packed.length !== 1 || packed[0].name !== manifest.name || packed[0].version !== manifest.version
     || dirname(packed[0].filename) !== '.' || !/^[A-Za-z0-9._-]+\.tgz$/.test(packed[0].filename)) {
@@ -36,7 +36,7 @@ try {
   await execute('tar', ['-xf', resolve(temporary, packed[0].filename), '-C', target, '--strip-components', '1',
     'package/package.json', 'package/dist/setupReadiness.js', 'package/dist/setupReadiness.d.ts',
     'package/dist/setupSessionHandoff.js', 'package/dist/setupSessionHandoff.d.ts'],
-  {cwd: temporary, timeout: 30_000, maxBuffer: 1024 * 1024});
+  {cwd: temporary, timeout: 30_000, maxBuffer: 1024 * 1024, windowsHide: true});
   const consumer = `import assert from 'node:assert/strict';
     import {parseLocalCodexSetupReadiness} from '@dharma-ai-labs/agent-fabric-local-vault/setup-readiness';
     import {parseLocalCodexSetupSessionRequest, parseLocalCodexSetupSessionResult}
@@ -49,7 +49,7 @@ try {
     assert.throws(() => parseLocalCodexSetupSessionResult({}), {message: 'setup_session_invalid'});
     process.stdout.write('pure-readiness-and-session-exports-ok');`;
   const result = await execute(process.execPath, ['--input-type=module', '-e', consumer],
-    {cwd: temporary, timeout: 30_000, maxBuffer: 1024 * 1024});
+    {cwd: temporary, timeout: 30_000, maxBuffer: 1024 * 1024, windowsHide: true});
   if (result.stdout !== 'pure-readiness-and-session-exports-ok' || result.stderr !== '') throw new Error('setup_readiness_package_import_unclean');
   process.stdout.write(`${JSON.stringify({ok: true, package: manifest.name, version: manifest.version,
     integrity, tarballSha256: createHash('sha256').update(tarball).digest('hex'),

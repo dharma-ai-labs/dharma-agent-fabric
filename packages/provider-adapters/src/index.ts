@@ -1165,7 +1165,7 @@ export const hermesAdapter: ProviderAdapter = {
     const { stdout } = await execFileAsync(launch.command, launch.argv, {
       timeout: 60_000,
       maxBuffer: 67_108_864,
-      env,
+      env, windowsHide: true,
     });
     return parseHermesSessionExport(String(stdout), request.workspace, request);
   },

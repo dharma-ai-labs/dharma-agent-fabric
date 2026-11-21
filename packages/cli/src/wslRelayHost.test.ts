@@ -16,7 +16,10 @@ type PowerShellFixtureLaunch = (file: string, args: string[], options: {
   input?: string; encoding: 'utf8'; timeout: number; windowsHide: boolean; maxBuffer: number;
 }) => {error?: Error; status: number | null; stdout: string; stderr: string};
 
-function runPowerShellFixture(script: string, input?: string, launch: PowerShellFixtureLaunch = spawnSync): string {
+const launchPowerShellFixture: PowerShellFixtureLaunch = (file, args, options) =>
+  spawnSync(file, args, {...options, windowsHide: true});
+
+function runPowerShellFixture(script: string, input?: string, launch: PowerShellFixtureLaunch = launchPowerShellFixture): string {
   // Cold CI fixture hosts need a separate budget; production interop stays at 15s.
   const result = launch('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
     Buffer.from(script, 'utf16le').toString('base64')], {

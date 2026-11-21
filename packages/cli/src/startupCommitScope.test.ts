@@ -60,7 +60,7 @@ async function fixture(phase?: Phase, failure: 'withdraw' | 'identity' | 'expire
   if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('startup_commit_baseline_invalid');
   const declaration = async (file: string, name: string) => {
     const source = baseline ? (await promisify(execFile)('git', ['show', `${baseline}:packages/cli/src/${file}`],
-      {cwd: resolve(import.meta.dirname, '../../..'), maxBuffer: 1024 * 1024})).stdout
+      {cwd: resolve(import.meta.dirname, '../../..'), maxBuffer: 1024 * 1024, windowsHide: true})).stdout
       : await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8');
     const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
     const nodes = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);

@@ -88,6 +88,9 @@ const propertyName = (name) => (name && (ts.isIdentifier(name) || ts.isStringLit
 
 const hasWindowsHide = (argument) => {
   const expression = unwrap(argument);
+  if (expression && ts.isConditionalExpression(expression)) {
+    return hasWindowsHide(expression.whenTrue) && hasWindowsHide(expression.whenFalse);
+  }
   if (!expression || !ts.isObjectLiteralExpression(expression)) return false;
   return expression.properties.some((property) => ts.isPropertyAssignment(property)
     && propertyName(property.name) === 'windowsHide'

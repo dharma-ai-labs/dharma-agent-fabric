@@ -51,7 +51,7 @@ export async function packHistoricalSecurityStore(item,root,directory,git) {
   const integrity='sha512-'+createHash('sha512').update(bytes).digest('base64');
   assert.equal(integrity,item.integrity,'historical secure-store integrity mismatch');
   const file=join(directory,filename);writeFileSync(file,bytes,{mode:0o600,flag:'wx'});
-  const tar=(...args)=>execFileSync('tar',args,{timeout:15000,maxBuffer:4194304,stdio:['ignore','pipe','pipe']});
+  const tar=(...args)=>execFileSync('tar',args,{timeout:15000,maxBuffer:4194304,stdio:['ignore','pipe','pipe'], windowsHide: true});
   const entries=tar('-tzf',file).toString('utf8').trim().split(/\r?\n/);
   assert.ok(entries.length>0&&entries.length<1000&&new Set(entries).size===entries.length,'bounded unique secure-store entries required');
   assert.ok(entries.every(p=>p.startsWith('package/')&&!p.includes('\\')&&!p.split('/').includes('..')&&!p.includes('\0')),'unsafe secure-store entry');
@@ -205,17 +205,17 @@ if(process.argv[1] && pathToFileURL(resolve(process.argv[1])).href===import.meta
   const root=resolve(import.meta.dirname,'..'),text=path=>readFileSync(join(root,path),'utf8');
   const git=(...args)=>{
     try{return execFileSync('git',args,{cwd:root,encoding:'utf8',timeout:30_000,maxBuffer:8*1024*1024,
-      stdio:['ignore','pipe','pipe']}).trim();}catch{throw new Error('security_git_read_unavailable');}
+      stdio:['ignore','pipe','pipe'], windowsHide: true}).trim();}catch{throw new Error('security_git_read_unavailable');}
   };
   const gitText=path=>{
     try{return execFileSync('git',['show',securityRelease.baseline.commit+':'+path],{cwd:root,encoding:'utf8',
-      timeout:30_000,maxBuffer:8*1024*1024,stdio:['ignore','pipe','pipe']});}
+      timeout:30_000,maxBuffer:8*1024*1024,stdio:['ignore','pipe','pipe'], windowsHide: true});}
     catch{throw new Error('security_baseline_read_unavailable');}
   };
   const npm=(...args)=>{
     assert.ok(process.env.npm_execpath,'normal npm execution required');
     try{return execFileSync(process.execPath,[process.env.npm_execpath,...args],{cwd:root,encoding:'utf8',
-      timeout:120_000,maxBuffer:8*1024*1024,stdio:['ignore','pipe','pipe']});}
+      timeout:120_000,maxBuffer:8*1024*1024,stdio:['ignore','pipe','pipe'], windowsHide: true});}
     catch(error){throw securityNpmFailure(args[0],error);}
   };
   let directory;
