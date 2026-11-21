@@ -1650,6 +1650,7 @@ export class AgentFabricClient {
       const finish = (callback: () => void, closeSocket = true) => {
         if (settled) return;
         settled = true;
+        clearTimeout(connectTimeout);
         clearTimeout(timeout);
         this.#hostFence?.signal.removeEventListener('abort', abort);
         callback();
@@ -1659,10 +1660,19 @@ export class AgentFabricClient {
         () => finish(() => reject(Object.assign(new Error('Relay response timed out.'), {code: 'relay_response_timeout'}))),
         RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS,
       );
+      // #512: before the socket opens this attempt has sent nothing, so this limit fails it cleanly. The kept signed
+      // request is sent on the next attempt, exactly as after any other failure that keeps it (an earlier attempt
+      // may already have sent it). It never shortens the window after send.
+      const connectTimeout = setTimeout(
+        () => finish(() => reject(Object.assign(
+          new Error('Relay connection timed out before the request was sent.'), {code: 'relay_connect_timeout'}))),
+        RELAY_CONNECT_TIMEOUT_MS,
+      );
       const abort = () => finish(() => reject(new Error('relay_host_scope_unavailable')));
       this.#hostFence?.signal.addEventListener('abort', abort, {once: true});
       if (this.#hostFence?.signal.aborted) abort();
       socket.addEventListener('open', () => {
+        clearTimeout(connectTimeout);
         const send = () => {if (!settled) socket.send(JSON.stringify({
           requestId: pending.headers['x-dharma-message-id'], method: pending.method,
           pathname: pending.pathname, headers: pending.headers, body: pending.body,
@@ -1702,6 +1712,8 @@ export class AgentFabricClient {
 }
 
 export const RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS = 90_000;
+/** Limit for the relay connection to open. Nothing is sent before it opens; the acknowledgement window is unchanged. */
+export const RELAY_CONNECT_TIMEOUT_MS = 30_000;
 
 /** schemas/device-keyset-telemetry.schema.json. Reported for lag alerts only; the server never authorizes on it. */
 export type DeviceKeysetTelemetry = {

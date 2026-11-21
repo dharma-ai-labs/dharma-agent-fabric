@@ -27,7 +27,9 @@ import {
   loadOrganizationApiToken,
   saveOrganizationApiToken,
   deviceKeysetTelemetry,
+  withDeviceSigningControl,
 } from './index.js';
+import * as relayClientModule from './index.js';
 import {
   signCanonicalObject,
   type TrustedServerSigningKeyset,
@@ -1788,6 +1790,222 @@ test('a relay that never acknowledges fails with the stable relay_response_timeo
     t.mock.timers.reset();
     Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: originalWebSocket, writable: true });
   }
+});
+
+// #512: one signed relay request holds device signing control until it is acknowledged. The connect phase has its
+// own, shorter limit: before the socket opens this attempt has sent nothing, so failing there is a clean failure and
+// the kept request is sent on the next attempt, as after any other failure that keeps it. After the request is sent
+// the 90 s acknowledgement window is unchanged.
+function relayConnectTimeoutMs() {
+  const value = (relayClientModule as unknown as { RELAY_CONNECT_TIMEOUT_MS?: unknown }).RELAY_CONNECT_TIMEOUT_MS;
+  assert.equal(typeof value, 'number', 'the relay connect phase has no time limit of its own');
+  return value as number;
+}
+
+type ScriptedSocket = {
+  readonly sent: string[];
+  closeCalls: number;
+  open(): void;
+  answer(status: number, body: unknown): void;
+};
+
+// A WebSocket double the test drives: onCreate runs after the client has set its timers, onSend after each send.
+function scriptedRelay(script: { onCreate?: (socket: ScriptedSocket, index: number) => void;
+  onSend?: (socket: ScriptedSocket, serialized: string) => void }) {
+  const sockets: ScriptedSocket[] = [];
+  class Socket implements ScriptedSocket {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    readyState = Socket.CONNECTING;
+    readonly sent: string[] = [];
+    closeCalls = 0;
+    readonly #listeners = new Map<string, Array<(event: object) => void>>();
+    constructor(_url: string | URL) {
+      const index = sockets.push(this) - 1;
+      queueMicrotask(() => script.onCreate?.(this, index));
+    }
+    addEventListener(type: string, listener: (event: object) => void) {
+      this.#listeners.set(type, [...(this.#listeners.get(type) || []), listener]);
+    }
+    #emit(type: string, event: object) { for (const listener of this.#listeners.get(type) || []) listener(event); }
+    open() { this.readyState = Socket.OPEN; this.#emit('open', {}); }
+    answer(status: number, body: unknown) {
+      const request = JSON.parse(this.sent.at(-1)!) as { requestId: string };
+      this.#emit('message', { data: JSON.stringify({ requestId: request.requestId, status, body: JSON.stringify(body) }) });
+    }
+    send(serialized: string) { this.sent.push(serialized); queueMicrotask(() => script.onSend?.(this, serialized)); }
+    close(_code?: number) { this.closeCalls += 1; this.readyState = Socket.CLOSED; }
+  }
+  return { Socket, sockets };
+}
+
+async function relayConnectFixture(prefix: string) {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), prefix));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json'), statePath = resolve(root, 'state.json');
+  const config = {
+    schema: 'dharma.device-config/v1' as const, hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux' as const,
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  };
+  await saveDeviceConfig(configPath, config);
+  await anchorConfig(configPath, store);
+  return { store, configPath, statePath, config };
+}
+
+async function withRelaySocket<T>(Socket: unknown, work: () => Promise<T>) {
+  const originalWebSocket = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: Socket, writable: true });
+  try { return await work(); }
+  finally { Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: originalWebSocket, writable: true }); }
+}
+
+type StoredPending = { pathname: string; body: string; headers: Record<string, string> };
+async function storedPending(statePath: string) {
+  return (JSON.parse(await readFile(statePath, 'utf8')) as { pending: StoredPending | null }).pending;
+}
+
+function isConnectTimeout(error: Error & { code?: unknown }) {
+  assert.equal(error.code, 'relay_connect_timeout');
+  assert.equal(error.message, 'Relay connection timed out before the request was sent.');
+  return true;
+}
+
+test('the relay connect limit is 30 s and shorter than the acknowledgement window', () => {
+  assert.equal(relayConnectTimeoutMs(), 30_000);
+  assert.ok(relayConnectTimeoutMs() < RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS);
+  assert.equal(RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS, 90_000);
+});
+
+test('a relay that never accepts the connection fails at the connect limit, sends nothing and frees signing control', async (t) => {
+  const limit = relayConnectTimeoutMs();
+  const f = await relayConnectFixture('fabric-relay-connect-timeout-');
+  const relay = scriptedRelay({ onCreate: () => t.mock.timers.tick(limit) });
+  await withRelaySocket(relay.Socket, async () => {
+    const client = await AgentFabricClient.open({ configPath: f.configPath, statePath: f.statePath, store: f.store });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await assert.rejects(client.openSession(), isConnectTimeout);
+    } finally { t.mock.timers.reset(); }
+  });
+  assert.equal(relay.sockets.length, 1);
+  assert.equal(relay.sockets[0]!.sent.length, 0, 'a connect timeout means the request was never sent');
+  assert.equal(relay.sockets[0]!.closeCalls, 1);
+  const pending = await storedPending(f.statePath);
+  assert.match(pending?.pathname ?? '', /\/agent-fabric\/sessions$/, 'the signed request is kept for the next attempt');
+  const started = Date.now();
+  assert.equal(await withDeviceSigningControl({ config: f.config, timeoutMs: 1_000 }, async () => 'free'), 'free');
+  assert.ok(Date.now() - started < 1_000, 'signing control is free once the connect limit fails the request');
+});
+
+test('a connection accepted just inside the limit keeps the full acknowledgement window', async (t) => {
+  const limit = relayConnectTimeoutMs();
+  const f = await relayConnectFixture('fabric-relay-connect-late-open-');
+  const relay = scriptedRelay({
+    onCreate: socket => { t.mock.timers.tick(limit - 1); socket.open(); },
+    // Answers at 89 999 ms after the connection started: 1 ms before the unchanged acknowledgement deadline.
+    onSend: socket => { t.mock.timers.tick(RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS - limit); socket.answer(201, { ok: true }); },
+  });
+  await withRelaySocket(relay.Socket, async () => {
+    const client = await AgentFabricClient.open({ configPath: f.configPath, statePath: f.statePath, store: f.store });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      assert.deepEqual(await client.openSession(), { ok: true });
+    } finally { t.mock.timers.reset(); }
+  });
+  assert.equal(relay.sockets[0]!.sent.length, 1);
+  assert.equal(await storedPending(f.statePath), null);
+});
+
+test('a socket that opens after the connect limit never sends the request', async (t) => {
+  const limit = relayConnectTimeoutMs();
+  const f = await relayConnectFixture('fabric-relay-connect-open-after-');
+  const relay = scriptedRelay({ onCreate: () => t.mock.timers.tick(limit) });
+  await withRelaySocket(relay.Socket, async () => {
+    const client = await AgentFabricClient.open({ configPath: f.configPath, statePath: f.statePath, store: f.store });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await assert.rejects(client.openSession(), isConnectTimeout);
+    } finally { t.mock.timers.reset(); }
+  });
+  relay.sockets[0]!.open();
+  await new Promise(accept => setImmediate(accept));
+  assert.equal(relay.sockets[0]!.sent.length, 0);
+});
+
+test('retrying a request that hit the connect limit sends the original signed request exactly once', async (t) => {
+  const limit = relayConnectTimeoutMs();
+  const f = await relayConnectFixture('fabric-relay-connect-retry-');
+  const relay = scriptedRelay({
+    onCreate: (socket, index) => { if (index === 0) t.mock.timers.tick(limit); else socket.open(); },
+    onSend: socket => socket.answer(201, { ok: true }),
+  });
+  await withRelaySocket(relay.Socket, async () => {
+    const client = await AgentFabricClient.open({ configPath: f.configPath, statePath: f.statePath, store: f.store });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await assert.rejects(client.openSession(), isConnectTimeout);
+    } finally { t.mock.timers.reset(); }
+    const pending = await storedPending(f.statePath);
+    assert.ok(pending, 'the signed request is kept after a connect timeout');
+    assert.deepEqual(await client.signedPost('/agent-fabric/sessions', JSON.parse(pending.body)), { ok: true });
+    const sends = relay.sockets.flatMap(socket => socket.sent)
+      .map(serialized => JSON.parse(serialized) as { requestId: string; headers: Record<string, string> });
+    assert.equal(sends.length, 1, 'the retry is the first and only send');
+    assert.equal(sends[0]!.requestId, pending.headers['x-dharma-message-id']);
+    assert.equal(sends[0]!.headers['x-dharma-message-id'], pending.headers['x-dharma-message-id']);
+    assert.equal(sends[0]!.headers['x-dharma-nonce'], pending.headers['x-dharma-nonce']);
+    assert.equal(sends[0]!.headers['x-dharma-signature'], pending.headers['x-dharma-signature']);
+  });
+  assert.equal(await storedPending(f.statePath), null);
+});
+
+test('a kept request already sent before a connect timeout is sent again unchanged on retry', async (t) => {
+  const limit = relayConnectTimeoutMs();
+  const f = await relayConnectFixture('fabric-relay-connect-resend-');
+  const relay = scriptedRelay({
+    onCreate: (socket, index) => { if (index === 1) t.mock.timers.tick(limit); else socket.open(); },
+    onSend: socket => {
+      if (socket === relay.sockets[0]) t.mock.timers.tick(RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS);
+      else socket.answer(201, { ok: true });
+    },
+  });
+  await withRelaySocket(relay.Socket, async () => {
+    const client = await AgentFabricClient.open({ configPath: f.configPath, statePath: f.statePath, store: f.store });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await assert.rejects(client.openSession(), (error: Error & { code?: unknown }) => error.code === 'relay_response_timeout');
+    } finally { t.mock.timers.reset(); }
+    const pending = (await storedPending(f.statePath))!;
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await assert.rejects(client.signedPost('/agent-fabric/sessions', JSON.parse(pending.body)), isConnectTimeout);
+    } finally { t.mock.timers.reset(); }
+    assert.deepEqual(await client.signedPost('/agent-fabric/sessions', JSON.parse(pending.body)), { ok: true });
+    const sends = relay.sockets.flatMap(socket => socket.sent)
+      .map(serialized => JSON.parse(serialized) as { headers: Record<string, string> });
+    assert.equal(relay.sockets[1]!.sent.length, 0, 'the connect-timeout attempt sent nothing');
+    assert.equal(sends.length, 2, 'the retry is the second send of a request first sent before the response timeout');
+    for (const header of ['x-dharma-message-id', 'x-dharma-nonce', 'x-dharma-signature']) {
+      assert.equal(sends[1]!.headers[header], sends[0]!.headers[header], header);
+    }
+  });
+  assert.equal(await storedPending(f.statePath), null);
+});
+
+test('the README describes only the signing-control guarantees the client provides (#512 review)', async () => {
+  const readme = (await readFile(new URL('../README.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  const start = readme.indexOf('## How long one signed relay request holds device signing control');
+  assert.ok(start >= 0, 'the #512 README section exists');
+  const end = readme.indexOf(' ## ', start + 1);
+  const section = readme.slice(start, end === -1 ? undefined : end);
+  assert.doesNotMatch(section, /never in flight twice/, 'a kept request can be sent again after relay_response_timeout');
+  assert.doesNotMatch(section, /first send/, 'a kept request may already have been sent by an earlier attempt');
+  assert.match(section, /may be sent again/, 'the README says a kept signed request may be sent again');
 });
 
 test('missing-anchor restoration preserves current, legacy, corrupt, cached and unavailable protected state', async () => {
