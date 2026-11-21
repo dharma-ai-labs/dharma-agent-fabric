@@ -12,6 +12,6 @@ test('actual CLI dispatcher version agrees with its published package manifest',
 test('official CLI bin reports the same exact version before setup preparation', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('./bin.js', import.meta.url)), '--version'],
-    {encoding: 'utf8', timeout: 15000});
+    {encoding: 'utf8', timeout: 15000, windowsHide: true});
   assert.equal(result.status, 0); assert.deepEqual(JSON.parse(result.stdout), {version: manifest.version});
 });

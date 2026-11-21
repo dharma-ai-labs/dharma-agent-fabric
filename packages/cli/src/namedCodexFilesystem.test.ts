@@ -39,7 +39,7 @@ test('worker PATH selects the exact exposed Node rather than an unexposed prepar
       privateRoots: [join(f.root, 'private')], writeRoots: [], nodeExecutable: f.node });
     const mapped = result as typeof result & { environment: NodeJS.ProcessEnv };
     assert.ok(mapped.environment, 'verified runtime environment missing');
-    const execution = await promisify(execFile)('node', [], { env: mapped.environment });
+    const execution = await promisify(execFile)('node', [], { env: mapped.environment, windowsHide: true });
     assert.equal(execution.stdout, 'trusted-node');
     assert.equal(result.providerExecutable, join(f.code, 'bin/codex.js'));
     assert.equal(result.additionalFilesystemRules[join(f.root, 'public-node', 'codex')], undefined);

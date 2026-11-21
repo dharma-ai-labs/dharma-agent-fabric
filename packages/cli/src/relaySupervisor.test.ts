@@ -22,15 +22,15 @@ test('Demo-only supervisor consumes registrations without a standard device or s
   const workspace = join(root, 'repo');
   await mkdir(home);
   await mkdir(workspace);
-  await execFileAsync('git', ['init', workspace]);
-  await execFileAsync('git', ['-C', workspace, 'remote', 'add', 'origin', 'https://github.com/example/repo']);
+  await execFileAsync('git', ['init', workspace], { windowsHide: true });
+  await execFileAsync('git', ['-C', workspace, 'remote', 'add', 'origin', 'https://github.com/example/repo'], { windowsHide: true });
   await registerDemoWatch(home, { schema: 'dharma.demo-watch/v1', hqUrl: 'https://example.com',
     organizationId: 'org_test', repositoryId: '00000000-0000-4000-8000-000000000000',
     normalizedRepository: 'github.com/example/repo', provider: 'codex', workspace });
   const env = { ...process.env, DHARMA_HOME: home };
   const bin = fileURLToPath(new URL('./bin.js', import.meta.url));
   const child = spawn(process.execPath, [bin, 'relay', 'supervise', '--demo-only'], {
-    env, stdio: ['ignore', 'ignore', 'pipe'], detached: true,
+    env, stdio: ['ignore', 'ignore', 'pipe'], detached: true, windowsHide: true,
   });
   let observations = '';
   child.stderr!.on('data', (chunk: Buffer) => { observations = (observations + chunk.toString()).slice(-4096); });
@@ -68,7 +68,7 @@ test('Demo-only supervisor consumes registrations without a standard device or s
     assert.equal(observations.includes(home), false);
     assert.equal(observations.includes('device.json'), false);
     await assert.rejects(readFile(join(home, 'relay', 'relay.pid')), { code: 'ENOENT' });
-    const { stdout } = await execFileAsync(process.execPath, [bin, 'relay', 'stop'], { env, timeout: 10_000 });
+    const { stdout } = await execFileAsync(process.execPath, [bin, 'relay', 'stop'], { env, timeout: 10_000, windowsHide: true });
     assert.deepEqual(JSON.parse(stdout), { ok: true, stopped: true, vaultPreserved: true });
     await assert.rejects(readFile(join(home, 'relay', 'supervisor-workspace.json')), { code: 'ENOENT' });
     assert.equal((await listDemoWatchRegistrations(home))[0]?.normalizedRepository, 'github.com/example/repo');
@@ -85,10 +85,10 @@ test('Demo-only supervision fails closed without registrations and rejects a sta
   try {
     const bin = fileURLToPath(new URL('./bin.js', import.meta.url));
     const env = { ...process.env, DHARMA_HOME: root };
-    await assert.rejects(execFileAsync(process.execPath, [bin, 'relay', 'supervise', '--demo-only'], { env }),
+    await assert.rejects(execFileAsync(process.execPath, [bin, 'relay', 'supervise', '--demo-only'], { env, windowsHide: true }),
       error => /registered Demo repository/.test(String((error as { stderr: string }).stderr)));
     await assert.rejects(execFileAsync(process.execPath,
-      [bin, 'relay', 'supervise', '--demo-only', '--policy', '/tmp/private-policy'], { env }),
+      [bin, 'relay', 'supervise', '--demo-only', '--policy', '/tmp/private-policy'], { env, windowsHide: true }),
       error => /cannot select a standard policy/.test(String((error as { stderr: string }).stderr)));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -188,7 +188,7 @@ test('a detached supervisor records its workspace and relay stop shuts it down',
   const env = { ...process.env, DHARMA_HOME: home };
   const bin = fileURLToPath(new URL('./bin.js', import.meta.url));
   const child = spawn(process.execPath, [bin, 'relay', 'supervise', '--policy', policyPath], {
-    env, stdio: 'ignore', detached: true,
+    env, stdio: 'ignore', detached: true, windowsHide: true,
   });
   try {
     let binding: { workspaceId: string; policyPath: string } | null = null;
@@ -201,9 +201,9 @@ test('a detached supervisor records its workspace and relay stop shuts it down',
     assert.deepEqual(binding && { workspaceId: binding.workspaceId, policyPath: binding.policyPath }, {
       workspaceId, policyPath,
     });
-    const { stdout } = await execFileAsync(process.execPath, [bin, 'relay', 'stop'], { env, timeout: 10_000 });
+    const { stdout } = await execFileAsync(process.execPath, [bin, 'relay', 'stop'], { env, timeout: 10_000, windowsHide: true });
     assert.deepEqual(JSON.parse(stdout), { ok: true, stopped: true, vaultPreserved: true });
-    const status = await execFileAsync(process.execPath, [bin, 'status'], { env, timeout: 10_000 });
+    const status = await execFileAsync(process.execPath, [bin, 'status'], { env, timeout: 10_000, windowsHide: true });
     assert.equal(JSON.parse(status.stdout).supervisor, 'stopped');
   } finally {
     if (child.exitCode === null) child.kill('SIGTERM');
@@ -217,10 +217,10 @@ test('relay stop terminates an orphaned receiver after the supervisor exits', as
   const relayDir = join(home, 'relay');
   await mkdir(relayDir, { recursive: true });
   const supervisor = spawn(process.execPath, ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'], {
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
   });
   const receiver = spawn(process.execPath, ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'], {
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
   });
   try {
     assert.ok(supervisor.pid);
@@ -230,7 +230,7 @@ test('relay stop terminates an orphaned receiver after the supervisor exits', as
     await writeFile(join(relayDir, 'relay.pid'), `${receiver.pid}\n`);
     const bin = fileURLToPath(new URL('./bin.js', import.meta.url));
     const { stdout } = await execFileAsync(process.execPath, [bin, 'relay', 'stop'], {
-      env: { ...process.env, DHARMA_HOME: home }, timeout: 10_000,
+      env: { ...process.env, DHARMA_HOME: home }, timeout: 10_000, windowsHide: true,
     });
     assert.deepEqual(JSON.parse(stdout), { ok: true, stopped: true, vaultPreserved: true });
     assert.equal(supervisor.exitCode !== null || supervisor.signalCode !== null, true);

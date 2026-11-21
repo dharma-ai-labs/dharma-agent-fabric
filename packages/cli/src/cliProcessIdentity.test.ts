@@ -104,7 +104,7 @@ test('real npm-style child requires matching verifier bytes across independent p
     const alias = join(root, '.bin', 'dharma');
     await mkdir(join(root, '.bin')); await symlink(join(candidate, 'dist', 'bin.js'), alias);
     const child = spawn(process.execPath, [alias, 'relay', 'supervise', '--policy', join(root, 'policy.json')],
-      {argv0: 'node', stdio: ['ignore', 'ignore', 'ignore', 'ipc']});
+      {argv0: 'node', stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true});
     t.after(async () => {
       if (child.exitCode === null && child.signalCode === null) {
         const exited = once(child, 'exit'); child.send('stop'); await exited;

@@ -355,7 +355,7 @@ test('sender and actual standing owner share one encrypted request and a fresh c
       assert.equal(await consumeCodexSetupSessions({vault: f.vault, owner, signal: f.signal, authorize: async () => true,
         start: scope => scope.step(async () => {
           starts++;
-          const child = await owner.spawn(scope.request.name, () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore'}));
+          const child = await owner.spawn(scope.request.name, () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore', windowsHide: true}));
           return {state: 'started', bindingId: uuid(9), sessionId: 'synthetic', sessionPid: child.pid!,
             supervisorPid: process.pid, sessionStartTicks: '1', supervisorStartTicks: '1'};
         })}), 1);
@@ -527,11 +527,11 @@ test('failed accepted startup drains only its new owned child and preserves a li
     f.vault.stageCodexSetupSession(f.leaseId, digest, f.request);
     const owner = createNamedSessionChildOwner(f.signal);
     await owner.run(async () => {
-      const sibling = await owner.spawn('implementer', () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore'}));
+      const sibling = await owner.spawn('implementer', () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore', windowsHide: true}));
       let failedChild: ReturnType<typeof spawn> | undefined;
       await consumeCodexSetupSessions({vault: f.vault, owner, signal: f.signal, authorize: async () => true,
         start: async scope => {
-          failedChild = await owner.spawn(scope.request.name, () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore'}));
+          failedChild = await owner.spawn(scope.request.name, () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore', windowsHide: true}));
           throw new Error('private-canary');
         }});
       assert.ok(failedChild); assert.ok(failedChild.exitCode !== null || failedChild.signalCode !== null);
@@ -546,7 +546,7 @@ test('checkpoint cleanup does not stop a child that predates the request', async
   await fixture(async f => {
     const owner = createNamedSessionChildOwner(f.signal);
     await owner.run(async () => {
-      const child = await owner.spawn('reviewer', () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore'}));
+      const child = await owner.spawn('reviewer', () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore', windowsHide: true}));
       const checkpoint = owner.checkpoint('reviewer');
       await checkpoint.stopFresh(); assert.equal(owner.ownedPid('reviewer'), child.pid);
       assert.equal(child.exitCode, null); assert.equal(child.signalCode, null);

@@ -368,7 +368,7 @@ test('a recovery control refusing a busy named session cannot pause, reconfigure
 test('published command boundary identifies missing enrollment rather than an unknown command', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dharma-upgrade-empty-'));
   const result = spawnSync(process.execPath, [join(import.meta.dirname, 'index.js'), 'relay', 'upgrade', '--dry-run'],
-    { encoding: 'utf8', env: { ...process.env, DHARMA_HOME: home } });
+    { encoding: 'utf8', env: { ...process.env, DHARMA_HOME: home }, windowsHide: true });
   assert.match(result.stderr, /relay_upgrade_enrollment_required/);
 });
 

@@ -140,7 +140,7 @@ test('standing sender uses the exact fresh IPC child, not a copied handle with i
   const f = await fixture(t), owner = createNamedSessionChildOwner(f.controller.signal);
   await owner.run(async () => {
     const child = await owner.spawn(f.request.name, () => spawn(process.execPath,
-      ['-e', 'process.on("message", value => {process.send({received: value});});'], {stdio: ['ignore', 'ignore', 'ignore', 'ipc']}));
+      ['-e', 'process.on("message", value => {process.send({received: value});});'], {stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true}));
     const receipt = new Promise<unknown>(done => child.once('message', done));
     const scope = {request: f.request, async step<T>(operation: () => Promise<T>) {return operation();}};
     await assert.rejects(sendCodexSetupChildStart({owner, child: {...child} as typeof child, scope}), /owner_unavailable/);

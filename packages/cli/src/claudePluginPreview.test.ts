@@ -97,12 +97,12 @@ test('hook commands need no POSIX shell: no &&, command -v or /dev/null, and the
   try {
     for (const [action, command] of Object.entries(commands)) {
       // The launcher itself, with no shell at all.
-      const direct = spawnSync(process.execPath, [launcher, action], { encoding: 'utf8', input: '{}', env: env(missing) });
+      const direct = spawnSync(process.execPath, [launcher, action], { encoding: 'utf8', input: '{}', env: env(missing), windowsHide: true });
       assert.deepEqual([direct.status, direct.stdout, direct.stderr], [0, '', ''], `${action} launcher without the CLI`);
       for (const [shellName, shell] of shells) {
         for (const [cliName, cliDirectory] of [['missing', missing], ['older', older], ['not attached', notAttached]] as const) {
           const [file, args] = shell(command.replaceAll('${CLAUDE_PLUGIN_ROOT}', pluginRoot));
-          const result = spawnSync(file, args, { encoding: 'utf8', input: '{}', env: env(cliDirectory) });
+          const result = spawnSync(file, args, { encoding: 'utf8', input: '{}', env: env(cliDirectory), windowsHide: true });
           assert.deepEqual([result.status, result.stdout, result.stderr], [0, '', ''], `${action} via ${shellName}, CLI ${cliName}`);
         }
       }
@@ -111,7 +111,7 @@ test('hook commands need no POSIX shell: no &&, command -v or /dev/null, and the
     const attached = fakeCli(0, '{"hookSpecificOutput":{}}');
     try {
       for (const [action, expected] of [['inbox', '{"hookSpecificOutput":{}}'], ['session-start', '']]) {
-        const result = spawnSync(process.execPath, [launcher, action!], { encoding: 'utf8', input: '{}', env: env(attached) });
+        const result = spawnSync(process.execPath, [launcher, action!], { encoding: 'utf8', input: '{}', env: env(attached), windowsHide: true });
         assert.deepEqual([result.status, result.stdout.trim(), result.stderr], [0, expected, ''], `${action} attached`);
       }
     } finally { rmSync(attached, { recursive: true, force: true }); }

@@ -95,7 +95,7 @@ test('Git source preflight cancellation reaches only the owned synthetic child',
   const run = promisify(execFile);
   const git = await caller(async (_command, _args, options) => {
     signal = options.signal;
-    const child = run(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], options);
+    const child = run(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { ...options, windowsHide: true });
     closed = new Promise(resolve => child.child.once('close', () => resolve()));
     await child; return {stdout: ''};
   });

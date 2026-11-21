@@ -294,8 +294,8 @@ test('context reader accepts JSON and rejects empty, HTML and oversized files wi
 
 test('both actual CLI commands expose a grant-free dry-run and enforce the current Git remote', async () => {
   const workspace = await mkdtemp(resolve(tmpdir(), 'demo-signing-command-'));
-  execFileSync('git', ['init', workspace], { stdio: 'ignore' });
-  execFileSync('git', ['-C', workspace, 'remote', 'add', 'origin', 'https://github.com/example/private.git']);
+  execFileSync('git', ['init', workspace], { stdio: 'ignore', windowsHide: true });
+  execFileSync('git', ['-C', workspace, 'remote', 'add', 'origin', 'https://github.com/example/private.git'], { windowsHide: true });
   const flags = ['--organization-id', 'org_fixture', '--repository-id', repositoryId,
     '--normalized-repository', 'github.com/example/private', '--workspace', workspace, '--dry-run'];
   for (const command of ['signing-client-proof', 'signing-owner-proof']) {
