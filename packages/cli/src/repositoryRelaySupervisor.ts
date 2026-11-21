@@ -1,4 +1,5 @@
 import { isAbsolute, resolve, win32 } from 'node:path';
+import { withDeviceSigningLineSignal } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { selectDeviceWorkspace, type OnboardingWorkspaceRecord } from './onboardingWorkspace.js';
 import { RELAY_OPEN_FAILURE_CODES, relayOpenFailureCode } from './relayOpenFailure.js';
 import { relayRestartDelayMs } from './relaySupervisor.js';
@@ -19,8 +20,12 @@ const DEVICE_CREDENTIAL_FAILURES: ReadonlySet<string> = new Set(['connection_ide
   'connection_identity_store_unavailable']);
 const DEVICE_CREDENTIAL_FAILURE_LIMIT = 5;
 const DEVICE_CREDENTIAL_RETRY_MS = 600_000;
+// A loop that ran this long before it failed starts its restart backoff again from the first step.
+export const REPOSITORY_RELAY_HEALTHY_RUN_MS = 10 * 60_000;
 interface Observation { workspaceId: string | null; code: string; stage?: RepositoryRelayStage;
-  category?: RepositoryRelayFailureCategory; failureCode?: string }
+  category?: RepositoryRelayFailureCategory; failureCode?: string; httpStatus?: number; errorCode?: string }
+/** One repository_relay line. `at` is the supervisor clock when the event happened. */
+export type RepositoryRelayObservation = Observation & { at: string };
 
 class StagedRepositoryRelayError extends Error {
   constructor(readonly stage: RepositoryRelayStage, cause: unknown) {
@@ -41,6 +46,35 @@ function failureMessage(error: unknown) {
   const cause = failureCause(error);
   try { return cause instanceof Error ? cause.message : ''; }
   catch { return ''; }
+}
+
+// The same rule as a relay child failure code (relayChildFailure.ts), for a code a server or a local store sets.
+const SAFE_LOWER_CODE = /^[a-z0-9_]{1,80}$/;
+// Node errno and system codes, such as ECONNRESET or UND_ERR_CONNECT_TIMEOUT.
+const SAFE_SYSTEM_CODE = /^[A-Z][A-Z0-9_]{1,79}$/;
+
+function field(value: unknown, name: string): unknown {
+  try { return value && typeof value === 'object' ? (value as Record<string, unknown>)[name] : undefined; }
+  catch { return undefined; }
+}
+
+// A safe class for a failure with no typed code: an HTTP status and one stable code, found on the error or
+// on the causes it wraps (fetch keeps its errno on the cause). Error text is never read here.
+function failureClass(error: unknown): { httpStatus?: number; errorCode?: string } {
+  let httpStatus: number | undefined, errorCode: string | undefined;
+  let current = failureCause(error);
+  for (let depth = 0; depth < 3 && current && typeof current === 'object'; depth++) {
+    const status = field(current, 'status'), code = field(current, 'code'), serverCode = field(current, 'serverCode');
+    if (httpStatus === undefined && typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) {
+      httpStatus = status;
+    }
+    if (errorCode === undefined && typeof code === 'string' && (SAFE_SYSTEM_CODE.test(code) || SAFE_LOWER_CODE.test(code))) {
+      errorCode = code;
+    }
+    if (errorCode === undefined && typeof serverCode === 'string' && SAFE_LOWER_CODE.test(serverCode)) errorCode = serverCode;
+    current = field(current, 'cause');
+  }
+  return { ...(httpStatus !== undefined ? { httpStatus } : {}), ...(errorCode !== undefined ? { errorCode } : {}) };
 }
 
 function failureCategory(error: unknown): RepositoryRelayFailureCategory {
@@ -86,6 +120,81 @@ export function currentRepositoryRelayFailure(input: { receipt: unknown; organiz
     ...typedFailure(value.failureCode) };
 }
 
+// #514: the latest-failure receipt is hidden by the next success, so each workspace also keeps a running count
+// and its last failures for the current relay process. Entries hold the time, stage and stable codes only.
+export const REPOSITORY_RELAY_FAILURE_HISTORY_SCHEMA = 'dharma.local-repository-relay-failure-history/v1';
+export const REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT = 20;
+export const REPOSITORY_RELAY_RECENT_FAILURE_MS = 24 * 60 * 60_000;
+export interface RepositoryRelayFailureHistoryEntry { at: string; stage: RepositoryRelayStage; failureCode?: string;
+  httpStatus?: number; errorCode?: string }
+export interface RepositoryRelayFailureHistory { count: number; since: string; entries: RepositoryRelayFailureHistoryEntry[] }
+interface RepositoryRelayProcessBinding { organizationId: string; deviceId: string; workspaceId: string; pid: number;
+  relayPidMtimeMs: number; relayPidCtimeMs: number }
+const HISTORY_ENTRY_KEYS: ReadonlySet<string> = new Set(['at', 'stage', 'failureCode', 'httpStatus', 'errorCode']);
+const HISTORY_KEYS: ReadonlySet<string> = new Set(['schema', 'organizationId', 'deviceId', 'workspaceId', 'pid',
+  'relayPidMtimeMs', 'relayPidCtimeMs', 'count', 'since', 'entries']);
+const safeHttpStatus = (value: unknown) => typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599;
+const safeErrorCode = (value: unknown) => typeof value === 'string' && (SAFE_SYSTEM_CODE.test(value) || SAFE_LOWER_CODE.test(value));
+
+// Builds an entry from a failure event, dropping any field that is not a stable value.
+function historyEntryFromEvent(event: Partial<RepositoryRelayObservation>): RepositoryRelayFailureHistoryEntry | null {
+  if (event.code !== 'repository_relay_failed' || repositoryRelayTimestampMs(event.at) === null
+    || !(REPOSITORY_RELAY_STAGES as readonly unknown[]).includes(event.stage)) return null;
+  return { at: event.at!, stage: event.stage!, ...typedFailure(event.failureCode),
+    ...(safeHttpStatus(event.httpStatus) ? { httpStatus: event.httpStatus } : {}),
+    ...(safeErrorCode(event.errorCode) ? { errorCode: event.errorCode } : {}) };
+}
+
+// A stored entry is read only in the exact form the relay writes.
+function storedHistoryEntry(value: unknown, now?: number): RepositoryRelayFailureHistoryEntry | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entry = value as Record<string, unknown>;
+  if (Object.keys(entry).some(key => !HISTORY_ENTRY_KEYS.has(key)) || repositoryRelayTimestampMs(entry.at, now) === null
+    || !(REPOSITORY_RELAY_STAGES as readonly unknown[]).includes(entry.stage)
+    || ('failureCode' in entry && !REPOSITORY_RELAY_FAILURE_CODES.has(entry.failureCode as string))
+    || ('httpStatus' in entry && !safeHttpStatus(entry.httpStatus))
+    || ('errorCode' in entry && !safeErrorCode(entry.errorCode))) return null;
+  return entry as unknown as RepositoryRelayFailureHistoryEntry;
+}
+
+export function currentRepositoryRelayFailureHistory(input: { record: unknown; organizationId: string; deviceId: string;
+  workspaceId: string; pid: number; relayPidMtimeMs: number | null; relayPidCtimeMs: number | null; now?: number;
+}): RepositoryRelayFailureHistory | null {
+  const value = input.record as Record<string, unknown> | null;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !HISTORY_KEYS.has(key))
+    || value.schema !== REPOSITORY_RELAY_FAILURE_HISTORY_SCHEMA
+    || value.organizationId !== input.organizationId || value.deviceId !== input.deviceId
+    || value.workspaceId !== input.workspaceId || !Number.isSafeInteger(input.pid) || input.pid <= 0 || value.pid !== input.pid
+    || !Number.isFinite(input.relayPidMtimeMs) || !Number.isFinite(input.relayPidCtimeMs)
+    || value.relayPidMtimeMs !== input.relayPidMtimeMs || value.relayPidCtimeMs !== input.relayPidCtimeMs
+    || repositoryRelayTimestampMs(value.since, input.now) === null || !Array.isArray(value.entries)
+    || value.entries.length < 1 || value.entries.length > REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT
+    || !Number.isSafeInteger(value.count) || (value.count as number) < value.entries.length) return null;
+  const entries = value.entries.map(entry => storedHistoryEntry(entry, input.now));
+  if (entries.some(entry => entry === null)) return null;
+  return { count: value.count as number, since: value.since as string, entries: entries as RepositoryRelayFailureHistoryEntry[] };
+}
+
+/** The history after one more failure. A history from another relay process, or in any other form, starts again. */
+export function appendRepositoryRelayFailureHistory(previous: unknown, event: Partial<RepositoryRelayObservation>,
+  binding: RepositoryRelayProcessBinding) {
+  const entry = historyEntryFromEvent(event);
+  if (!entry) return null;
+  const prior = currentRepositoryRelayFailureHistory({ record: previous, ...binding });
+  return { schema: REPOSITORY_RELAY_FAILURE_HISTORY_SCHEMA, organizationId: binding.organizationId,
+    deviceId: binding.deviceId, workspaceId: binding.workspaceId, pid: binding.pid,
+    relayPidMtimeMs: binding.relayPidMtimeMs, relayPidCtimeMs: binding.relayPidCtimeMs,
+    count: Math.min((prior?.count ?? 0) + 1, Number.MAX_SAFE_INTEGER), since: prior?.since ?? entry.at,
+    entries: [...(prior?.entries ?? []), entry].slice(-REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT) };
+}
+
+/** The one-line default status summary, only when the latest failure is from the last 24 hours. */
+export function recentRepositoryRelayFailure(history: RepositoryRelayFailureHistory | null, now = Date.now()) {
+  const latest = history?.entries.at(-1);
+  if (!history || !latest || now - Date.parse(latest.at) > REPOSITORY_RELAY_RECENT_FAILURE_MS) return null;
+  return { count: history.count, since: history.since, latest };
+}
+
 export async function selectRepositoryRelayRegistrations<T extends OnboardingWorkspaceRecord & { routeHash: string }>(
   records: readonly T[], enrollment: { organizationId: string; deviceId: string },
   readPolicy: (path: string) => Promise<{ organizationId: string; serverAuthorization?: { workspaceId: string } }>,
@@ -115,6 +224,26 @@ export function repositoryRelayObservationReady(input: {
   return Number.isSafeInteger(input.pid) && input.pid > 0 && value?.workspaceId === input.workspaceId
     && value.version === input.version && value.pid === input.pid
     && Number.isFinite(age) && age >= 0 && age <= 300_000;
+}
+
+// #511: sibling loops in this process wait in the signing-control line, but a holder in another process (a CLI
+// command or a native turn) can still outlast the 10 s lock wait. A stage retries that busy answer a few times
+// instead of ending the loop, which would reopen a device session and wait out the restart backoff.
+const SIGNING_CONTROL_BUSY_RETRIES = 3;
+const SIGNING_CONTROL_BUSY_RETRY_MS = 1_000;
+
+export async function retrySigningControlBusy<T>(operation: () => Promise<T>, input: { signal: AbortSignal;
+  wait?: (ms: number, signal: AbortSignal) => Promise<void> }): Promise<T> {
+  const wait = input.wait ?? waitForRelayRefresh;
+  for (let retries = 0; ; retries++) {
+    try { return await operation(); }
+    catch (error) {
+      if (retries >= SIGNING_CONTROL_BUSY_RETRIES || input.signal.aborted
+        || failureMessage(error) !== 'connection_anchor_busy') throw error;
+      await wait(SIGNING_CONTROL_BUSY_RETRY_MS, input.signal);
+      if (input.signal.aborted) throw error;
+    }
+  }
 }
 
 export function serializeRelayWork() {
@@ -157,19 +286,19 @@ export async function runRegisteredRepositoryRelays(input: {
   signal: AbortSignal;
   list: () => Promise<readonly RepositoryRelayRegistration[]>;
   run: (registration: RepositoryRelayRegistration, signal: AbortSignal) => Promise<unknown>;
-  observe?: (observation: Observation) => void | Promise<void>;
+  observe?: (observation: RepositoryRelayObservation) => void | Promise<void>;
   wait?: (ms: number, signal: AbortSignal) => Promise<void>;
   now?: () => number;
 }) {
   const now = input.now ?? Date.now;
   const wait = input.wait ?? waitForRelayRefresh;
   type Worker = { row: RepositoryRelayRegistration; controller: AbortController;
-    flight: Promise<void>; done: boolean; failed: boolean; failureCode?: string };
+    flight: Promise<void>; done: boolean; failed: boolean; failureCode?: string; startedAt: number; endedAt: number };
   const workers = new Map<string, Worker>();
   const failures = new Map<string, { count: number; credentialCount: number; retryAt: number }>();
   // Diagnostics must never turn a caught worker failure into an unhandled rejection.
   const observe = (event: Observation) => {
-    try { void Promise.resolve(input.observe?.(event)).catch(() => {}); }
+    try { void Promise.resolve(input.observe?.({ ...event, at: new Date(now()).toISOString() })).catch(() => {}); }
     catch { /* Preserve worker lifecycle. */ }
   };
   const abort = () => { for (const worker of workers.values()) worker.controller.abort(); };
@@ -191,7 +320,8 @@ export async function runRegisteredRepositoryRelays(input: {
         if (!worker.done) continue;
         workers.delete(id);
         if (worker.failed && !worker.controller.signal.aborted) {
-          const previous = failures.get(id), count = (previous?.count ?? 0) + 1;
+          const previous = worker.endedAt - worker.startedAt >= REPOSITORY_RELAY_HEALTHY_RUN_MS ? undefined : failures.get(id);
+          const count = (previous?.count ?? 0) + 1;
           const credentialCount = DEVICE_CREDENTIAL_FAILURES.has(worker.failureCode ?? '') ? (previous?.credentialCount ?? 0) + 1 : 0;
           failures.set(id, { count, credentialCount, retryAt: now() + (credentialCount >= DEVICE_CREDENTIAL_FAILURE_LIMIT
             ? DEVICE_CREDENTIAL_RETRY_MS : relayRestartDelayMs(count)) });
@@ -200,12 +330,14 @@ export async function runRegisteredRepositoryRelays(input: {
       for (const row of rows) {
         if (workers.has(row.workspaceId) || (failures.get(row.workspaceId)?.retryAt ?? 0) > now()) continue;
         const controller = new AbortController();
-        const worker: Worker = { row, controller, done: false, failed: false, flight: Promise.resolve() };
+        const startedAt = now();
+        const worker: Worker = { row, controller, done: false, failed: false, flight: Promise.resolve(), startedAt, endedAt: startedAt };
         workers.set(row.workspaceId, worker);
         worker.flight = Promise.resolve().then(async () => {
           if (controller.signal.aborted || input.signal.aborted) return;
           try {
-            await input.run(row, controller.signal);
+            // A stopped or revoked loop leaves the in-process signing line at once instead of waiting its turn.
+            await withDeviceSigningLineSignal(controller.signal, () => input.run(row, controller.signal));
             if (!controller.signal.aborted) {
               worker.failed = true;
               observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
@@ -217,10 +349,12 @@ export async function runRegisteredRepositoryRelays(input: {
               const stage = error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run';
               worker.failureCode = typedFailure(failureMessage(error)).failureCode
                 ?? (stage === 'session_open' ? relayOpenFailureCode(failureCause(error)) : undefined);
+              // A typed failure code already names the failure; the safe class explains the rest.
               observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed', stage,
-                category: failureCategory(error), ...(worker.failureCode ? { failureCode: worker.failureCode } : {}) });
+                category: failureCategory(error), ...(worker.failureCode ? { failureCode: worker.failureCode } : failureClass(error)) });
             }
           } finally {
+            worker.endedAt = now();
             worker.done = true;
           }
         });

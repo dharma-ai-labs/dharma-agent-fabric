@@ -18,7 +18,8 @@ jobs:
   validate:
     name: Validate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Windows hit the 20-minute limit twice on the 0.2.226 release PR (run 44947906533); main measured 24m48s after the relay-client stack.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 35 || 20 }}
     strategy:
       fail-fast: false
       matrix:

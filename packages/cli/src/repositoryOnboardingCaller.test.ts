@@ -922,8 +922,8 @@ test('workspace synchronization validates policy against the server-returned can
     assert.deepEqual(telemetry, { relayAutostartEnabled: true }, 'C8 autostart state rides on the signed registration');
     return response;
   } };
+  // The caller reads the autostart report before either lock and passes it in (#512).
   const actual = await (await caller('syncWorkspacePolicyHoldingRefreshLock', {
-    relayAutostartReport: async () => ({ relayAutostartEnabled: true }),
     receiptAwareProviderCapabilities: async () => [], selectedProviderAdapters: () => [],
     registry: async () => [requested, canonical],
     reconcileWorkspaceRegistration: reconcile,
@@ -935,7 +935,7 @@ test('workspace synchronization validates policy against the server-returned can
       return { relativePath: '.dharma/approved-policy.json', applied: true,
         policy: { revision: 'policy_fixture', evidence: { automaticDisclosure: { mode: 'local_analysis' } } } };
     },
-  }))(fabric, requested, 'policy_fixture', true, ['codex']);
+  }))(fabric, requested, 'policy_fixture', true, ['codex'], { relayAutostartEnabled: true });
   assert.deepEqual(calls, ['register', 'verify']);
   assert.equal((actual.workspace as Record<string, unknown>).id, canonical.workspaceId);
 });
