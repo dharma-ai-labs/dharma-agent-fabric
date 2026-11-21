@@ -5,9 +5,15 @@ type SigningControlInput = Parameters<typeof withDeviceSigningControl>[0];
 
 const holdingControl = new AsyncLocalStorage<true>();
 
-/** Holds device signing control so that this caller's signed requests skip the admission line below. */
-export function withClientSigningControl<T>(input: SigningControlInput, work: () => Promise<T>): Promise<T> {
-  return holdingControl.run(true, () => withDeviceSigningControl(input, work));
+/** Holds device signing control so that this caller's signed requests skip the admission line below. A caller whose
+ * work makes one signed call passes perSend, and each hold then makes at most one network send: when that call first
+ * sends another kept request (its client's earlier call, or an orphan that makes room in a full file), the hold ends
+ * there and work runs again from its start in a fresh hold, behind every caller that waited meanwhile. Such work does
+ * nothing before its signed call that it cannot do again. Without perSend, a caller that holds control across several
+ * calls keeps it across their sends. Inside a hold its own caller took, work runs in that hold either way. */
+export function withClientSigningControl<T>(input: SigningControlInput, work: () => Promise<T>,
+  options: {perSend?: boolean} = {}): Promise<T> {
+  return holdingControl.run(true, () => (options.perSend ? withSigningControlPerSend : withDeviceSigningControl)(input, work));
 }
 
 /** The pinned client takes signing control at the front of its queue, so a queued request

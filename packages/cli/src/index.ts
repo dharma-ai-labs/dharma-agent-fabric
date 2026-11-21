@@ -6100,14 +6100,18 @@ async function providerCapabilitiesForWorkspacePolicy(providerIds: ProviderId[] 
 // Every policy sync takes device signing control and then the refresh lock. A named
 // work turn holds signing control and then refreshes, so the reverse order makes that
 // turn lose a timeout to the relay. The control nests through its async owner, so a
-// sync inside the turn reuses it.
+// sync inside the turn reuses it. A sync makes one signed call (registerWorkspace) and
+// only reads local files before it, so its hold makes at most one network send: when
+// that call first sends another kept request, the hold and the refresh lock end, and
+// the sync runs again, taking control and then the refresh lock, before its own
+// request is signed.
 async function withWorkspacePolicySyncOrder<T>(
   fabric: AgentFabricClient,
   workspaceId: string,
   operation: () => Promise<T>,
 ): Promise<T> {
   return withClientSigningControl({ config: fabric.config, hostScope: currentBootstrapHostScope() },
-    () => withWorkspacePolicyRefreshLock(workspaceId, operation));
+    () => withWorkspacePolicyRefreshLock(workspaceId, operation), { perSend: true });
 }
 
 async function syncWorkspacePolicyHoldingRefreshLock(

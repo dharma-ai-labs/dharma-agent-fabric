@@ -105,8 +105,12 @@ network send. When a request sends another kept request before its own (its
 client's own earlier call, or another entry's request to make room in a full file),
 that hold ends after that send, and the request is signed and sent in a fresh
 hold, after every caller that waited meanwhile. The relay workspace loops'
-admission line hands its hold back in the same way. A caller that holds signing
-control itself across several calls keeps it across their sends. Every write of the local
+admission line hands its hold back in the same way, and so does a caller that
+holds signing control itself around one signed call (the CLI's workspace policy
+sync) when it takes it with `withSigningControlPerSend`: that caller's work then
+runs again in a fresh hold before its own request is signed. Only a caller that
+holds signing control itself across several calls, such as a work turn, keeps it
+across their sends. Every write of the local
 protocol state (the outbox, the session and recovered task completions)
 happens under the device signing control and starts from the latest file, so
 clients on one device never overwrite each other's kept requests or
