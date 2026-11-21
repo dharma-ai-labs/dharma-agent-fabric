@@ -162,8 +162,12 @@ same message id and idempotency key; it never signs that call again. Only an
 action acknowledgement older than 8 minutes is signed again, with a new message
 id and the same idempotency key, and only by its owner process in its own open
 session, at its next sequence. A process that took it over with its owner key
-signs it again only in the session it opens, once the server answered that
-session open. Another client never sends such an acknowledgement, nor a kept
+signs it again only in the session it opens, once the server accepted that
+session open. Until then it signs no other call, and the acknowledgement stays
+in the owner's entry, so when that session open fails or the process stops,
+the next process with the owner key takes it over again, and when the server
+refuses it, the process's next session open signs it again. Another client
+never sends such an acknowledgement, nor a kept
 session open, poll or read: it leaves them in the entry while their owner can
 come back (a workspace loop that restarts, or a process that still runs), and
 removes them unsent once that owner is gone (a command that exited, or an

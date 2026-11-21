@@ -298,6 +298,16 @@ function orphanDue(owner: string, entry: OutboxEntry, now: number): boolean {
     || (owner.startsWith('cli:') && !ownerProcessAlive(entry.ownerPid));
 }
 
+/** A kept request another client never sends: one only its owner can use, or one that could be sent only signed again. */
+function ownerOnlyEntry(entry: OutboxEntry, now: number): boolean {
+  return isOwnerOnlyRequest(entry.pending!) || cannotResendAsSigned(entry.pending!, now);
+}
+
+/** Whether an entry's owner can never come back: a command that exited, or an entry moved from an earlier version's file. */
+function ownerGone(owner: string, entry: OutboxEntry): boolean {
+  return owner.startsWith('migrated:') || (owner.startsWith('cli:') && !ownerProcessAlive(entry.ownerPid));
+}
+
 /** Whether two kept requests are one call: the same message id, or the same session, path and idempotency key (an
  * action acknowledgement signed again keeps those). */
 function sameKeptRequest(a: PendingRequest, b: PendingRequest): boolean {
@@ -1392,6 +1402,9 @@ export class AgentFabricClient {
   #deferredAcknowledgement: PendingRequest | null = null;
   /** Opened with an owner key, as a workspace loop is: it also sends due orphans after its own requests. */
   readonly #longLived: boolean;
+  /** Whether the server accepted this client's latest session open. Until it did, a client with a deferred
+   * acknowledgement signs no other call (see #signedRequestWithSigningControl). */
+  #sessionAccepted = false;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
@@ -1532,6 +1545,7 @@ export class AgentFabricClient {
         await this.#sendPendingWithSigningControl(this.#state);
       }
       if (deferred) this.#deferredAcknowledgement = this.#state.pending;
+      this.#sessionAccepted = false;
       this.#state.sessionId = randomUUID();
       this.#state.nextSequence = 1;
       this.#state.pending = null;
@@ -1676,6 +1690,7 @@ export class AgentFabricClient {
       ? (body as { eventType?: unknown } | null)?.eventType : undefined;
     if (event === 'completed' || event === 'failed' || event === 'cancelled') taskLeases.delete(this);
     const result = await this.#withProtocolState(() => this.#signedRequestWithSigningControl(method, route, body));
+    if (method === 'POST' && route === '/agent-fabric/sessions') this.#sessionAccepted = true;
     if (!this.#durable) return result;
     if (route === '/agent-fabric/tasks/poll' && result.task && typeof result.task === 'object') {
       const seconds = Number((body as { leaseSeconds?: unknown } | null)?.leaseSeconds);
@@ -1700,7 +1715,7 @@ export class AgentFabricClient {
    * waits in the signing-control line like any root, so this client's next request may wait for that one send, but
    * never while a task lease is held in this process. It never runs inside the caller's hold of signing control. */
   #sendDueOrphansLater(): void {
-    if (this.#orphanSection || Date.now() < this.#orphansDueAt || taskLeaseHeld(Date.now())) return;
+    if (this.#orphanSection || !this.#orphanWorkDue(Date.now()) || taskLeaseHeld(Date.now())) return;
     this.#orphanSection = true;
     const send = () => this.#withProtocolState(async () => {
       if (!taskLeaseHeld(Date.now())) await this.#adoptOrphans();
@@ -1805,8 +1820,13 @@ export class AgentFabricClient {
     }
   }
 
-  /** When this client next looks for due orphans after its own request. */
-  #orphansDueAt = 0;
+  /** Whether the entries as last read, which each request of this client reads again, hold work for #adoptOrphans: a
+   * due orphan it sends, or one it removes unsent because its owner is gone. A request only its owner can use, while
+   * that owner can come back, is no such work. */
+  #orphanWorkDue(now: number): boolean {
+    return Object.entries(this.#otherOutboxes).some(([owner, entry]) => orphanDue(owner, entry, now)
+      && (!ownerOnlyEntry(entry, now) || ownerGone(owner, entry)));
+  }
 
   /** Sends the kept requests of orphaned entries (see orphanDue): at most ORPHAN_SENDS_PER_SECTION, and none after one
    * without a definite answer. Their outcome is never this caller's and is never thrown. Each entry is marked in the
@@ -1821,11 +1841,8 @@ export class AgentFabricClient {
    * that still runs), and is settled unsent once that owner is gone (a command that exited, or a migrated entry). */
   async #adoptOrphans(): Promise<void> {
     const now = Date.now();
-    this.#orphansDueAt = now + ORPHAN_RETRY_INTERVAL_MS;
     const due = Object.entries(this.#otherOutboxes).filter(([owner, entry]) => orphanDue(owner, entry, now));
-    const ownerOnly = (entry: OutboxEntry) => isOwnerOnlyRequest(entry.pending!) || cannotResendAsSigned(entry.pending!, now);
-    const ownerGone = (owner: string, entry: OutboxEntry) => owner.startsWith('migrated:')
-      || (owner.startsWith('cli:') && !ownerProcessAlive(entry.ownerPid));
+    const ownerOnly = (entry: OutboxEntry) => ownerOnlyEntry(entry, now);
     let unwritten = false;
     for (const [owner, entry] of due) {
       if (!ownerOnly(entry) || !ownerGone(owner, entry)) continue;
@@ -1837,7 +1854,7 @@ export class AgentFabricClient {
     let sent = 0;
     for (const [owner, entry] of due) {
       if (!entry.pending || ownerOnly(entry)) continue;
-      if (sent === ORPHAN_SENDS_PER_SECTION) { this.#orphansDueAt = now; break; }
+      if (sent === ORPHAN_SENDS_PER_SECTION) break;
       sent += 1;
       const messageId = entry.pending.headers['x-dharma-message-id'] ?? '';
       const ownerReads = owner.startsWith('relay:') || ownerProcessAlive(entry.ownerPid);
@@ -1863,6 +1880,12 @@ export class AgentFabricClient {
   async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
     await this.#assertHostScope();
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
+    // An acknowledgement this client took over waits for its new session (see openSession). Until the server accepted
+    // that session open, no other call is signed or replayed, so its request never takes the acknowledgement's place in
+    // this client's entry: the session is open only once the server accepted it, and the next openSession opens it.
+    if (this.#deferredAcknowledgement && !this.#sessionAccepted && !(method === 'POST' && route === '/agent-fabric/sessions')) {
+      throw new Error('Relay session is not open.');
+    }
     if (this.#readOnly) {
       if (this.#state.pending) throw new Error('relay_read_only_pending_request');
       if (method !== 'GET') {
@@ -2227,8 +2250,11 @@ export class AgentFabricClient {
       delete outboxes[migrated];
     }
     const {sessionId, nextSequence} = this.#state;
-    // An acknowledgement kept from an earlier session while a new one opens stays in this client's entry.
-    const pending = this.#state.pending ?? this.#deferredAcknowledgement;
+    // An acknowledgement kept from an earlier session while a new one opens stays in this client's entry, also while
+    // the session open is in flight: a kept session open matters only to this client, whose next open replaces it,
+    // while the acknowledgement must reach the next process with this owner key if this one never re-issues it.
+    const deferred = this.#deferredAcknowledgement;
+    const pending = deferred && (!this.#state.pending || isSessionOpen(this.#state.pending)) ? deferred : this.#state.pending;
     // A completion this client recorded that the queue has no room for waits in its own entry, which is then kept.
     const listed = this.#state.recoveredTaskCompletions ?? [];
     const waiting = [...this.#keptCompletions, ...[...this.#unwrittenCompletions.values()].filter(item =>
