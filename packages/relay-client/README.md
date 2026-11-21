@@ -100,22 +100,27 @@ fails closed instead of enrolling or generating a replacement key.
 Every signed request is signed, written to the local outbox, sent and
 acknowledged while the device signing control for its origin, organization,
 device and OS user is held. While one caller holds it, no other caller that
-takes signing control signs or sends a request. Each hold makes at most one
-network send. When a request sends another kept request before its own (its
-client's own earlier call, or another entry's request to make room in a full file),
-that hold ends after that send, and the request is signed and sent in a fresh
-hold, after every caller that waited meanwhile. The relay workspace loops'
-admission line hands its hold back in the same way, and so does a caller that
-holds signing control itself around one signed call (the CLI's workspace policy
-sync) when it takes it with `withSigningControlPerSend`: that caller's work then
-runs again in a fresh hold before its own request is signed. A caller that
-holds signing control itself without `withSigningControlPerSend`, such as a work
-turn across several calls, keeps its work in that hold, so the client adds no
-send of its own to it: it sends no other entry's request there to make room, and
-a full file refuses the caller's request (`relay_protocol_state_outbox_full`), as
-before; after it sends its own earlier kept call there, the caller's request
-fails with `relay_retry_after_recovery`, unsent, and a retry signs and sends it
-in a hold of its own. Every write of the local
+takes signing control signs or sends a request. Each hold that the client or
+the admission line takes makes at most one network send. When a request sends
+another kept request before its own (its client's own earlier call, or another
+entry's request to make room in a full file), that hold ends after that send,
+and the request is signed and sent in a fresh hold, after every caller that
+waited meanwhile. The relay workspace loops' admission line hands its hold back
+in the same way, and so does a caller that holds signing control itself around
+one signed call (the CLI's workspace policy sync) when it takes it with
+`withSigningControlPerSend`: that caller's work then runs again in a fresh hold
+before its own request is signed. A hold that a caller takes itself without
+`withSigningControlPerSend` keeps its work in that hold, and the client adds no
+send of its own to it: it sends no other entry's request there to make room,
+and a full file refuses the caller's request
+(`relay_protocol_state_outbox_full`), as before; after it sends its own earlier
+kept call there, the caller's request fails with `relay_retry_after_recovery`,
+unsent, and a retry signs and sends it in a hold of its own. Such a hold makes
+one send for each signed call its caller makes in it, so a caller that holds
+signing control across several calls holds it across several sends. The CLI
+takes no such hold around a protocol-state request: the named session
+activation boundary takes only the workspace skill activation lock, and each
+signed call in a named session's turn takes a hold of its own. Every write of the local
 protocol state (the outbox, the session and recovered task completions)
 happens under the device signing control and starts from the latest file, so
 clients on one device never overwrite each other's kept requests or
