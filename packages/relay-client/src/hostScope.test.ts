@@ -13,6 +13,9 @@ import {HostOperationFence} from './hostOperationScope.js';
 type Scope = {signal: AbortSignal; current(): Promise<boolean>};
 type Open = Parameters<typeof AgentFabricClient.open>[0] & {hostScope: Scope};
 const unavailable = {message: 'relay_host_scope_unavailable'};
+type OwnEntry = {pending: {pathname: string} | null; nextSequence: number};
+/** The outbox entry of the one client a test opens. */
+const ownEntry = (text: string) => Object.values((JSON.parse(text) as {outboxes: Record<string, OwnEntry>}).outboxes)[0]!;
 
 test('malformed supplied protected-store scopes never select legacy behavior', async () => {
   const calls: string[] = [];
@@ -109,7 +112,7 @@ test('cancelled response remains unacknowledged and preserves the pending reques
   await assert.rejects(client.registerWorkspace({workspaceId: 'synthetic'}), unavailable);
   assert.equal(requestSignal?.aborted, true);
   const persisted = await readFile(f.statePath, 'utf8');
-  assert.match(JSON.parse(persisted).pending.pathname, /\/workspaces$/);
+  assert.match(ownEntry(persisted).pending!.pathname, /\/workspaces$/);
   assert.doesNotMatch(persisted, /private-response-canary/);
 });
 
@@ -148,7 +151,7 @@ test('valid scoped client retains the ordinary signed protocol contract', async 
   const client = await AgentFabricClient.open(f.input); await client.openSession();
   assert.equal((await client.registerWorkspace({workspaceId: 'synthetic'})).ok, true);
   assert.equal(wire?.redirect, 'error'); assert.equal(wire?.signal?.aborted, false);
-  const state = JSON.parse(await readFile(f.statePath, 'utf8'));
+  const state = ownEntry(await readFile(f.statePath, 'utf8'));
   assert.equal(state.pending, null); assert.equal(state.nextSequence, 3);
 });
 
@@ -297,7 +300,7 @@ test('real HTTP delivery with withdrawn authority stays pending rather than inve
   const client = await AgentFabricClient.open({...f.input, fetcher: fetch}); await client.openSession();
   await assert.rejects(client.registerWorkspace({workspaceId: 'synthetic'}), unavailable);
   assert.equal(deliveries.length, 2); assert.equal(deliveries.every(value => value.signatureVerified), true);
-  assert.match(JSON.parse(await readFile(f.statePath, 'utf8')).pending.pathname, /\/workspaces$/);
+  assert.match(ownEntry(await readFile(f.statePath, 'utf8')).pending!.pathname, /\/workspaces$/);
   await assert.rejects(client.registerWorkspace({workspaceId: 'not-dispatched'}), unavailable);
   assert.equal(deliveries.length, 2);
 });

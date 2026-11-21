@@ -32,5 +32,8 @@
   "dependencies": {
     "@dharma-ai-labs/agent-fabric-contracts": "0.1.18",
     "@dharma-ai-labs/agent-fabric-secure-store": "0.1.10"
+  },
+  "devDependencies": {
+    "agent-fabric-relay-client-v0.2.38": "npm:@dharma-ai-labs/agent-fabric-relay-client@0.2.38"
   }
 }

@@ -1417,6 +1417,16 @@ export async function withWorkspaceSkillActivationLock<T>(
   );
 }
 
+/** The named session activation boundary: the workspace skill activation lock around a turn's local activation work.
+ * It takes no hold of signing control. Each signed call in a turn (the lifetime check, the policy sync, the source
+ * policy, the work authorization and the channel calls) takes a hold of its own, the policy sync perSend and every
+ * other call through the admission line, so each hold makes at most one network send, and a kept call or a full file
+ * is sent in a hold of its own instead of failing a call in the turn. The activation lock comes before signing
+ * control here, as on every other path that takes it. */
+export function withNamedSessionActivationBoundary<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
+  return withWorkspaceSkillActivationLock(workspaceId, 'codex', operation);
+}
+
 async function assertWorkspaceAuthorizationCurrent(
   workspaceId: string,
   authorization: NonNullable<OrganizationPolicy['serverAuthorization']>,
@@ -1864,10 +1874,12 @@ async function gitValue(workspace: string, argv: string[]) {
   }
 }
 
-async function client(telemetry: DeviceTelemetryOptions = {}) {
+/** ownerKey names a stable outbox entry, such as the one of a relay workspace loop, so a restarted loop replays its
+ * own kept request; other callers get an entry of their own. */
+async function client(telemetry: DeviceTelemetryOptions = {}, ownerKey?: string) {
   const hostScope = currentBootstrapHostScope();
   const instance = admitSignedRequests(await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
-    hostScope, isolatedSession: isIsolatedDeviceSession() }), hostScope);
+    hostScope, isolatedSession: isIsolatedDeviceSession(), ...(ownerKey === undefined ? {} : { ownerKey }) }), hostScope);
   await instance.openSession(VERSION, telemetry);
   return instance;
 }
@@ -5959,7 +5971,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
         send: codexTaskExportUpload(fabric) }),
-      withActivationBoundary: (operation, work) => withClientSigningControl({config:fabric.config},()=>withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
+      withActivationBoundary: (operation, work) => withNamedSessionActivationBoundary(workspaceId, async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
         const sharedReady = await repositorySharedReady(item);
@@ -6007,7 +6019,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
           return await operation(context);
         }
         finally { taskState = null; }
-      })),
+      }),
       retainRepositoryState: async capture => {
         const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
         if (current.evidence.automaticDisclosure?.mode !== 'customer_authorized_content') {
@@ -6095,17 +6107,21 @@ async function providerCapabilitiesForWorkspacePolicy(providerIds: ProviderId[] 
   );
 }
 
-// Every policy sync takes device signing control and then the refresh lock. A named
-// work turn holds signing control and then refreshes, so the reverse order makes that
-// turn lose a timeout to the relay. The control nests through its async owner, so a
-// sync inside the turn reuses it.
+// Every policy sync takes device signing control and then the refresh lock. A caller
+// that holds signing control and then refreshes would lose a timeout to the relay in the
+// reverse order. The control nests through its async owner, so a sync inside such a
+// hold reuses it. A sync makes one signed call (registerWorkspace) and
+// only reads local files before it, so its hold makes at most one network send: when
+// that call first sends another kept request, the hold and the refresh lock end, and
+// the sync runs again, taking control and then the refresh lock, before its own
+// request is signed.
 async function withWorkspacePolicySyncOrder<T>(
   fabric: AgentFabricClient,
   workspaceId: string,
   operation: () => Promise<T>,
 ): Promise<T> {
   return withClientSigningControl({ config: fabric.config, hostScope: currentBootstrapHostScope() },
-    () => withWorkspacePolicyRefreshLock(workspaceId, operation));
+    () => withWorkspacePolicyRefreshLock(workspaceId, operation), { perSend: true });
 }
 
 async function syncWorkspacePolicyHoldingRefreshLock(
@@ -9349,7 +9365,7 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   signal.throwIfAborted();
   const fabric = await withRepositoryRelayStage('session_open', async () => {
     const telemetry = await relayAutostartReport();
-    return retrySigningControlBusy(() => client(telemetry), { signal });
+    return retrySigningControlBusy(() => client(telemetry, `relay:${canonicalWorkspace.workspaceId}`), { signal });
   });
   // The first poll receipt can follow a long task, so status needs this earlier success.
   await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', canonicalWorkspace.workspaceId,
