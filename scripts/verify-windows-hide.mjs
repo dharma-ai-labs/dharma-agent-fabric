@@ -7,8 +7,8 @@
 // `windowsHide: true` comes after every spread that could set the flag. A child_process function used
 // as a value (passed as a dependency, stored, or re-exported) cannot be checked
 // statically and is reported too; wrap it in a function that adds the option
-// instead. The same holds for the module itself: it may be read from,
-// destructured or loaded into a name, and any other use is reported.
+// instead. The same holds for the module itself, including its default export: it
+// may be read from, destructured or loaded into a name, and any other use is reported.
 import { readdirSync, readFileSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -185,12 +185,21 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
     const isDynamicImport = expression.expression.kind === ts.SyntaxKind.ImportKeyword;
     return (isDynamicImport || isRequire(expression.expression)) && isChildProcessSpecifier(expression.arguments[0]);
   };
-  // The whole module: a namespace name or a load expression.
+  // `module.default` or `module['default']`: the default export is the module itself.
+  const isDefaultRead = (node) => {
+    const expression = unwrap(node);
+    if (!expression) return false;
+    const isDefault = (ts.isPropertyAccessExpression(expression) && expression.name.text === 'default')
+      || (ts.isElementAccessExpression(expression) && ts.isStringLiteralLike(expression.argumentExpression)
+        && expression.argumentExpression.text === 'default');
+    return isDefault && isModule(expression.expression);
+  };
+  // The whole module: a namespace name, a load expression or a read of its default export.
   const isModule = (node) => {
     const expression = unwrap(node);
     if (!expression) return false;
     if (ts.isIdentifier(expression)) return namespaceSymbols.has(symbolOf(expression));
-    return isChildProcessLoad(expression);
+    return isChildProcessLoad(expression) || isDefaultRead(expression);
   };
 
   const collectRequires = (node) => {
@@ -208,7 +217,9 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
   const bindPattern = (pattern) => {
     for (const element of pattern.elements) {
       const imported = propertyName(element.propertyName ?? element.name);
-      if (ts.isIdentifier(element.name) && processFunctions.has(imported)) bindFunction(element.name, imported);
+      if (!ts.isIdentifier(element.name)) continue;
+      if (imported === 'default') bindNamespace(element.name);
+      else if (processFunctions.has(imported)) bindFunction(element.name, imported);
     }
   };
   const collect = (node) => {
@@ -220,7 +231,8 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
       if (bindings && ts.isNamedImports(bindings)) {
         for (const element of bindings.elements) {
           const imported = (element.propertyName ?? element.name).text;
-          if (processFunctions.has(imported)) bindFunction(element.name, imported);
+          if (imported === 'default') bindNamespace(element.name);
+          else if (processFunctions.has(imported)) bindFunction(element.name, imported);
         }
       }
     }
@@ -270,6 +282,8 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
     && Boolean(node.initializer) && Boolean(processFunctionOf(node.initializer));
   const bindAliases = (node) => {
     if (isAliasDeclaration(node)) bindFunction(node.name, processFunctionOf(node.initializer));
+    else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && isDefaultRead(node.initializer)) bindNamespace(node.name);
     else if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer
       && isModule(node.initializer)) bindPattern(node.name);
     ts.forEachChild(node, bindAliases);
@@ -305,6 +319,7 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
       for (const element of clause.elements) {
         const exported = (element.propertyName ?? element.name).text;
         if (processFunctions.has(exported)) report(element, exported, 'reference');
+        else if (exported === 'default') report(element, 'child_process', 'reference');
       }
     } else if (!node.moduleSpecifier && clause && ts.isNamedExports(clause)) {
       for (const element of clause.elements) {
@@ -339,6 +354,10 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
         if (!isCheckedModuleUse(node, true)) report(node, 'child_process', 'reference');
         return;
       }
+    }
+    if (isDefaultRead(node)) {
+      if (!isCheckedModuleUse(node, true)) report(node, 'child_process', 'reference');
+      return;
     }
     if (ts.isIdentifier(node) && !isDeclarationSite(node)) {
       const symbol = symbolOf(node);
