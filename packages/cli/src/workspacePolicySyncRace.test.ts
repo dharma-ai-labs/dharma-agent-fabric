@@ -315,7 +315,7 @@ test('control: the transmission refresh keeps syncing under its own refresh lock
 for (const side of ['sync', 'refresh'] as const) {
   for (const gap of ['probe', 'signing', 'request'] as const) {
     test(`a named turn and a relay ${side} stopped at its ${gap} step both finish`, async t => {
-      // The named turn holds signing control for the whole turn and then refreshes.
+      // A caller that holds signing control across its work and then refreshes.
       const relayStopped = deferred(), proceed = deferred();
       let stopped = false;
       const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}, {issuedAt: NEWEST}]);

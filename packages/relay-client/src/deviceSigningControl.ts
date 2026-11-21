@@ -32,6 +32,48 @@ export function withDeviceSigningLineSignal<T>(signal:AbortSignal,work:()=>Promi
   return lineSignals.run(signal,work);
 }
 
+/** Runs work outside any signing-control hold of its caller, so a signing-control call started in it, even one
+ * that runs after the caller's hold has settled, takes control as a root. A relay loop's line signal still applies. */
+export function outsideDeviceSigningControl<T>(work:()=>T):T{
+  return owners.exit(work);
+}
+
+/** Roots taken by withSigningControlPerSend: their work may end the hold after one network send. */
+const perSendRoots=new WeakSet<Owner>();
+class SigningControlHandBack extends Error{constructor(){super('device_signing_control_hand_back');}}
+
+/** Runs one signed request under device signing control so that each hold covers at most one network send. When the
+ * request first sends another kept request, it hands the hold back (handBackDeviceSigningControl) and runs again in a
+ * fresh hold, behind every root that waited meanwhile. Inside a caller's own hold it runs there, as
+ * withDeviceSigningControl does, so a caller that holds control across several calls keeps it across their sends. */
+export async function withSigningControlPerSend<T>(input:Parameters<typeof withDeviceSigningControl>[0],
+  work:()=>Promise<T>):Promise<T>{
+  if(owners.getStore())return withDeviceSigningControl(input,work);
+  for(;;){
+    try{return await withDeviceSigningControl(input,async()=>{perSendRoots.add(owners.getStore()!);return work();});}
+    catch(error){if(!(error instanceof SigningControlHandBack))throw error;}
+  }
+}
+
+/** Whether the current async context is inside a live hold that its caller took itself without perSend (with
+ * withDeviceSigningControl, directly or nested). Work in such a hold always runs in that one hold. */
+export function insideCallerSigningControlHold():boolean{
+  const owner=owners.getStore();
+  return !!owner?.active&&!perSendRoots.has(owner);
+}
+
+/** Whether the current async context is inside a live hold of signing control of any kind, perSend or not. */
+export function insideDeviceSigningControlHold():boolean{
+  return !!owners.getStore()?.active;
+}
+
+/** Ends the current hold when it is a root of withSigningControlPerSend, whose work then runs again in a fresh hold.
+ * In any other hold, or outside one, it returns and the caller goes on. */
+export function handBackDeviceSigningControl():void{
+  const owner=owners.getStore();
+  if(owner?.active&&perSendRoots.has(owner))throw new SigningControlHandBack();
+}
+
 /** Resolves with this root's leave() once every root ahead of it has left. A root that gives up, at the
  * deadline, when its host scope is withdrawn or when its relay loop stops, leaves at once, so the roots
  * behind it keep their order. */
