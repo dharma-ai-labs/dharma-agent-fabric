@@ -93,6 +93,7 @@ async function fixture(t: TestContext) {
   let enabled = false;
   let running = false;
   let loseRegistrationResponse = false;
+  let legacy = false;
   let systemdEnabled=true;
   const options = {platform: 'linux' as const, home: join(root, 'device'), userHome: root,
     workspace: '/fixtures/repo', launcher: '/fixtures/repo/.dharma/bin/dharma',
@@ -110,16 +111,18 @@ async function fixture(t: TestContext) {
         if (script.includes('dharma-wsl-host:register')) {
           exists = true;
           enabled = true;
+          legacy = false;
           if (loseRegistrationResponse) throw new Error('registration response lost');
         }
         if (script.includes('dharma-wsl-host:start')) running = true;
         if (script.includes('dharma-wsl-host:disable')) {exists = false;enabled=false;running = false;}
         if (script.includes('dharma-wsl-host:pause')) enabled=false;
-        return {stdout: JSON.stringify({exists, enabled, running})};
+        return {stdout: JSON.stringify({exists, enabled, running, ...(legacy ? {legacy} : {})})};
       },
     },
   };
-  return {options, scripts, foreignTask: () => {exists = true;enabled=true;}, loseResponse: () => {loseRegistrationResponse = true;}};
+  return {options, scripts, foreignTask: () => {exists = true;enabled=true;}, loseResponse: () => {loseRegistrationResponse = true;},
+    legacyTask: () => {exists = true;enabled = true;legacy = true;}};
 }
 
 test('WSL pause preserves its exact owned host receipt and remains independently verifiable',async t=>{
@@ -177,14 +180,33 @@ function registeredTaskAction(scripts: string[]) {
   return {execute: match[1]!, arguments: match[2]!};
 }
 
-test('WSL task uses the verified PowerShell host for its fixed native wait action', async t => {
+test('WSL task uses the verified PowerShell host under a headless console host for its fixed native wait action', async t => {
   const f = await fixture(t); await enableRelayAutostart(f.options);
   const action = registeredTaskAction(f.scripts);
-  assert.equal(action.execute, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-  assert.match(action.arguments, /^-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand [A-Za-z0-9+/=]+$/);
+  // No console window opens at logon, and none can be closed to stop the WSL host. Both programs are absolute paths.
+  assert.equal(action.execute, 'C:\\Windows\\System32\\conhost.exe');
+  assert.match(action.arguments, /^--headless C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand [A-Za-z0-9+/=]+$/);
   const script = Buffer.from(action.arguments.split(' ').at(-1)!, 'base64').toString('utf16le');
   assert.equal(script, "$ErrorActionPreference='Stop'; & 'C:\\Windows\\System32\\wsl.exe' --distribution 'Ubuntu' --user 'maatru' --cd / --exec /usr/bin/systemctl --user start --wait dharma-agent-fabric.service; exit $LASTEXITCODE");
   assert.doesNotMatch(script, /ExecutionPolicy|credential|password|token|grant|Start-Process|Invoke-Expression/i);
+});
+
+test('an owned WSL host task with the earlier PowerShell action gets the headless action at the next registration', async t => {
+  const f = await fixture(t);
+  await enableRelayAutostart(f.options);
+  f.legacyTask();
+  const before = f.scripts.length;
+  await enableRelayAutostart(f.options);
+  const registration = f.scripts.slice(before).find(script => script.includes('dharma-wsl-host:register'));
+  assert.ok(registration, 'an enabled owned task with the earlier action is registered again');
+  assert.equal(registeredTaskAction([registration]).execute, 'C:\\Windows\\System32\\conhost.exe');
+  // The owned task keeps its definition and only its action is replaced.
+  assert.match(registration, /if \(Test-LegacyAction \$task\) \{ Set-ScheduledTask -TaskPath '\\' -TaskName '[^']+' -Action \$action\|Out-Null \}; /);
+  assert.doesNotMatch(registration, /Unregister-ScheduledTask|-Force/);
+  // A task that already has the headless action is left as it is.
+  const after = f.scripts.length;
+  await enableRelayAutostart(f.options);
+  assert(!f.scripts.slice(after).some(script => script.includes('dharma-wsl-host:register')));
 });
 
 test('optional WSL task lookup distinguishes exact absence from a failed scheduler read', async () => {
@@ -255,20 +277,32 @@ test('the actual WSL guard validates the persisted SID rather than a normalized 
   const receipt=JSON.parse(await readFile(join(f.options.home,'relay','wsl-host.json'),'utf8'));
   const action=registeredTaskAction(f.scripts);
   task.Description=receipt.description;task.Actions[0]!.Execute=action.execute;task.Actions[0]!.Arguments=action.arguments;
-  for(const {foreign,legacyDirectAction} of [{foreign:false,legacyDirectAction:false},
-    {foreign:true,legacyDirectAction:false},{foreign:false,legacyDirectAction:true}]){
-    const rejected=foreign||legacyDirectAction;
+  const powershell='C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+  const legacyArguments=action.arguments.slice(`--headless ${powershell} `.length);
+  // The earlier action ran PowerShell itself. It is still owned and is reported as legacy.
+  const cases:{actions:{Execute:string;Arguments:string};foreign?:boolean;result:string}[]=[
+    {actions:{Execute:action.execute,Arguments:action.arguments},result:'owned'},
+    {actions:{Execute:action.execute,Arguments:action.arguments},foreign:true,result:'refused'},
+    {actions:{Execute:receipt.executable,Arguments:receipt.arguments},result:'refused'},
+    {actions:{Execute:powershell,Arguments:legacyArguments},result:'owned-legacy'},
+    {actions:{Execute:action.execute,Arguments:legacyArguments},result:'refused'},
+    {actions:{Execute:powershell,Arguments:action.arguments},result:'refused'},
+    {actions:{Execute:'conhost.exe',Arguments:action.arguments},result:'refused'},
+    {actions:{Execute:action.execute,Arguments:`--headless powershell.exe ${legacyArguments}`},result:'refused'},
+  ];
+  for(const {actions,foreign=false,result} of cases){
+    const rejected=result==='refused';
     const taskFixture=structuredClone(task);
-    if(legacyDirectAction){taskFixture.Actions[0]!.Execute=receipt.executable;taskFixture.Actions[0]!.Arguments=receipt.arguments;}
+    taskFixture.Actions[0]!.Execute=actions.Execute;taskFixture.Actions[0]!.Arguments=actions.Arguments;
     const script=`$ErrorActionPreference='Stop';$current=[System.Security.Principal.WindowsIdentity]::GetCurrent(); `
       + `$fixturePrincipalSid=${foreign?"'S-1-5-18'":'$current.User.Value'}; `
       + `function Export-ScheduledTask { '<Task><Principals><Principal><UserId>'+$fixturePrincipalSid+'</UserId></Principal></Principals></Task>' }; `
       + `$task=ConvertFrom-Json ([Console]::In.ReadToEnd());$task.Principal.UserId=($current.Name -split '\\\\')[-1]; `
       + `$task.Triggers[0].UserId=$current.Name; ${guard}; `
-      + `try{Assert-OwnedTask $task;[Console]::Out.Write('owned')}catch{[Console]::Out.Write('refused');`
-      + `if(!${rejected?'$true':'$false'}){[Console]::Error.Write($_.Exception.Message)}}`;
+      + `try{Assert-OwnedTask $task;[Console]::Out.Write('owned');if(Test-LegacyAction $task){[Console]::Out.Write('-legacy')}}`
+      + `catch{[Console]::Out.Write('refused');if(!${rejected?'$true':'$false'}){[Console]::Error.Write($_.Exception.Message)}}`;
     const stdout=runPowerShellFixture(script,JSON.stringify(taskFixture));
-    assert.equal(stdout,rejected?'refused':'owned');
+    assert.equal(stdout,result,JSON.stringify(actions));
   }
 });
 
