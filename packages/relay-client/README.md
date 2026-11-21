@@ -132,14 +132,22 @@ client with that entry's owner key (its process, or a restarted process with
 the same owner key) sends its own kept request again with a new time and
 signature, and only with the same message id, session, sequence, body and
 idempotency key. An earlier version reads only one
-kept request, at the top level of the file. Every write of this version copies
+kept request, at the top level of the file, and gives one signed more than 4
+minutes ago a new time and signature. Every write of this version copies
 there, exactly as signed, the oldest kept request that is already due (see
-below). A live client's fresh request, a session open, poll or read, and an
-action acknowledgement are never copied, so an earlier version never signs an
-acknowledgement again in this version's sessions. This version never sends
-that copy on its own. After a rollback to an earlier version, the first
+below) and that another client may send unchanged. Any other entry is due only
+after it stood unchanged for 10 minutes, so in practice the copy is a request a
+command signed within the last 4 minutes before it exited. A live client's
+fresh request, a request signed more than 4 minutes ago, a session open, poll or
+read, and an action acknowledgement are never copied. Each later write
+of this version drops the copy once it is 4 minutes old. This version never
+sends that copy on its own. After a rollback to an earlier version, the first
 session open of that version sends the copied request again, with the same
-message id, and then writes a file without the per-client entries. A rollback
+message id, byte for byte when it runs within 4 minutes of that signature, and
+then writes a file without the per-client entries. When no write of this
+version came between and the rollback is later, that version signs the
+request again in the exited command's session, where no process of this
+version signs any more. A rollback
 loses at most the rest: every other kept request, whose outcome then stays
 unknown, and the completion receipts that wait in an entry (see below).
 

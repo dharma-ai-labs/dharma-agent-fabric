@@ -2312,11 +2312,14 @@ export class AgentFabricClient {
     // An earlier version reads only the top-level session, sequence and kept request, and its session open replays
     // that request and then writes a file without outboxes. So the oldest kept request that is already due (see
     // orphanDue) also goes there, exactly as signed: after a rollback the earlier version still sends that one, with
-    // the same message id. A live client's fresh request is never handed to it, nor a request only its owner can use,
-    // nor an action acknowledgement, which the earlier version would sign again in its owner's session. outboxesOf
-    // never takes this copy for another orphan.
+    // the same message id. A live client's fresh request is never handed to it, nor any request another client never
+    // sends (see ownerOnlyEntry), nor an action acknowledgement: the earlier version would sign either again in its
+    // owner's session. That version gives a request signed more than 4 minutes ago a new time and signature, so a
+    // request copied here was signed within the last 4 minutes, and it replays that one byte for byte. In practice that
+    // is a command's request after the command exited, since any other entry is due only after 10 minutes unchanged.
+    // outboxesOf never takes this copy for another orphan.
     const [copy] = leftover ? [leftover] : Object.entries(outboxes)
-      .filter(([owner, entry]) => entry.pending && orphanDue(owner, entry, now) && !isOwnerOnlyRequest(entry.pending)
+      .filter(([owner, entry]) => entry.pending && orphanDue(owner, entry, now) && !ownerOnlyEntry(entry, now)
         && !ACTION_ACKNOWLEDGEMENT_PATH.test(entry.pending.pathname))
       .map(([, entry]) => entry)
       .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt));
