@@ -3,10 +3,12 @@
 // git, node) started by a process that has no console of its own opens a
 // visible terminal window on Windows and takes focus.
 //
-// A call passes when one of its arguments is an object literal that contains
-// `windowsHide: true`. A child_process function used as a value (passed as a
-// dependency, stored, or re-exported) cannot be checked statically and is
-// reported too; wrap it in a function that adds the option instead.
+// A call passes when one of its arguments is an object literal whose last spread
+// or `windowsHide` member is `windowsHide: true`. A child_process function used
+// as a value (passed as a dependency, stored, or re-exported) cannot be checked
+// statically and is reported too; wrap it in a function that adds the option
+// instead. The same holds for the module itself: it may be read from,
+// destructured or loaded into a name, and any other use is reported.
 import { readdirSync, readFileSync } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,41 +77,54 @@ const singleFileProgram = (realName, sourceText) => {
 
 const isChildProcessSpecifier = (node) => Boolean(node) && ts.isStringLiteralLike(node) && childProcessModules.has(node.text);
 
+const isWrapper = (node) => ts.isAwaitExpression(node) || ts.isParenthesizedExpression(node)
+  || ts.isAsExpression(node) || ts.isNonNullExpression(node);
+
 const unwrap = (node) => {
   let current = node;
-  while (current && (ts.isAwaitExpression(current) || ts.isParenthesizedExpression(current)
-    || ts.isAsExpression(current) || ts.isNonNullExpression(current))) {
-    current = current.expression;
-  }
+  while (current && isWrapper(current)) current = current.expression;
   return current;
 };
 
-// `require('node:child_process')` or `await import('node:child_process')`.
-const isChildProcessLoad = (node) => {
-  const expression = unwrap(node);
-  if (!expression || !ts.isCallExpression(expression)) return false;
-  const isRequire = ts.isIdentifier(expression.expression) && expression.expression.text === 'require';
-  const isDynamicImport = expression.expression.kind === ts.SyntaxKind.ImportKeyword;
-  return (isRequire || isDynamicImport) && isChildProcessSpecifier(expression.arguments[0]);
+// The outermost `await`, parenthesis, `as` or `!` wrapped around `node`.
+const outermost = (node) => {
+  let current = node;
+  while (current.parent && isWrapper(current.parent)) current = current.parent;
+  return current;
 };
 
 const propertyName = (name) => (name && (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) ? name.text : undefined);
 
+// The last spread or `windowsHide` member of the literal decides: a spread or a
+// duplicate after `windowsHide: true` can set the flag back to false.
 const hasWindowsHide = (argument) => {
   const expression = unwrap(argument);
   if (expression && ts.isConditionalExpression(expression)) {
     return hasWindowsHide(expression.whenTrue) && hasWindowsHide(expression.whenFalse);
   }
   if (!expression || !ts.isObjectLiteralExpression(expression)) return false;
-  return expression.properties.some((property) => ts.isPropertyAssignment(property)
-    && propertyName(property.name) === 'windowsHide'
-    && unwrap(property.initializer)?.kind === ts.SyntaxKind.TrueKeyword);
+  const deciding = expression.properties.filter((property) => ts.isSpreadAssignment(property)
+    || propertyName(property.name) === 'windowsHide').at(-1);
+  return Boolean(deciding) && ts.isPropertyAssignment(deciding)
+    && unwrap(deciding.initializer)?.kind === ts.SyntaxKind.TrueKeyword;
 };
 
-const isPromisify = (node) => {
+const calleeNamed = (node, name) => {
   const callee = unwrap(node);
-  return Boolean(callee) && ((ts.isIdentifier(callee) && callee.text === 'promisify')
-    || (ts.isPropertyAccessExpression(callee) && callee.name.text === 'promisify'));
+  return Boolean(callee) && ((ts.isIdentifier(callee) && callee.text === name)
+    || (ts.isPropertyAccessExpression(callee) && callee.name.text === name));
+};
+const isPromisify = (node) => calleeNamed(node, 'promisify');
+const isCreateRequire = (node) => calleeNamed(node, 'createRequire');
+
+// `mock.method(childProcess, 'spawn', replacement)` replaces the function in place.
+// The replacement's own calls and every call made through the module are still checked.
+const isMockMethodTarget = (node) => {
+  const call = node.parent;
+  if (!call || !ts.isCallExpression(call) || call.arguments[0] !== node) return false;
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'method') return false;
+  return calleeNamed(callee.expression, 'mock');
 };
 
 const isDeclarationSite = (node) => {
@@ -128,6 +143,7 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
   const { source, checker } = singleFileProgram(fileName, sourceText);
   const functionSymbols = new Map(); // declaration symbol -> child_process function name
   const namespaceSymbols = new Set(); // declaration symbols bound to the whole module
+  const requireSymbols = new Set(); // names bound to `createRequire(...)`
   const symbolOf = (identifier) => {
     if (identifier.parent && ts.isShorthandPropertyAssignment(identifier.parent) && identifier.parent.name === identifier) {
       return checker.getShorthandAssignmentValueSymbol(identifier.parent);
@@ -143,6 +159,46 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
     if (symbol) namespaceSymbols.add(symbol);
   };
 
+  // `require`, a name bound to `createRequire(...)`, or `createRequire(...)` itself.
+  const isRequire = (callee) => {
+    const expression = unwrap(callee);
+    if (!expression) return false;
+    if (ts.isIdentifier(expression)) return expression.text === 'require' || requireSymbols.has(symbolOf(expression));
+    return ts.isCallExpression(expression) && isCreateRequire(expression.expression);
+  };
+  // `require('node:child_process')` or `await import('node:child_process')`.
+  const isChildProcessLoad = (node) => {
+    const expression = unwrap(node);
+    if (!expression || !ts.isCallExpression(expression)) return false;
+    const isDynamicImport = expression.expression.kind === ts.SyntaxKind.ImportKeyword;
+    return (isDynamicImport || isRequire(expression.expression)) && isChildProcessSpecifier(expression.arguments[0]);
+  };
+  // The whole module: a namespace name or a load expression.
+  const isModule = (node) => {
+    const expression = unwrap(node);
+    if (!expression) return false;
+    if (ts.isIdentifier(expression)) return namespaceSymbols.has(symbolOf(expression));
+    return isChildProcessLoad(expression);
+  };
+
+  const collectRequires = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      const initializer = unwrap(node.initializer);
+      if (initializer && ts.isCallExpression(initializer) && isCreateRequire(initializer.expression)) {
+        const symbol = symbolOf(node.name);
+        if (symbol) requireSymbols.add(symbol);
+      }
+    }
+    ts.forEachChild(node, collectRequires);
+  };
+  collectRequires(source);
+
+  const bindPattern = (pattern) => {
+    for (const element of pattern.elements) {
+      const imported = propertyName(element.propertyName ?? element.name);
+      if (ts.isIdentifier(element.name) && processFunctions.has(imported)) bindFunction(element.name, imported);
+    }
+  };
   const collect = (node) => {
     if (ts.isImportDeclaration(node) && isChildProcessSpecifier(node.moduleSpecifier) && node.importClause) {
       const clause = node.importClause;
@@ -158,17 +214,14 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
     }
     if (ts.isVariableDeclaration(node) && node.initializer && isChildProcessLoad(node.initializer)) {
       if (ts.isIdentifier(node.name)) bindNamespace(node.name);
-      else if (ts.isObjectBindingPattern(node.name)) {
-        for (const element of node.name.elements) {
-          const imported = propertyName(element.propertyName ?? element.name);
-          if (ts.isIdentifier(element.name) && processFunctions.has(imported)) bindFunction(element.name, imported);
-        }
-      }
+      else if (ts.isObjectBindingPattern(node.name)) bindPattern(node.name);
     }
     ts.forEachChild(node, collect);
   };
   collect(source);
 
+  // A process function is a bound name, a property or element read on the module,
+  // `promisify(...)` of one, or a `||`, `??` or conditional with one as an operand.
   function processFunctionOf(node) {
     const expression = unwrap(node);
     if (!expression) return undefined;
@@ -176,22 +229,37 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
       const symbol = symbolOf(expression);
       return symbol ? functionSymbols.get(symbol) : undefined;
     }
-    if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)
-      && processFunctions.has(expression.name.text) && namespaceSymbols.has(symbolOf(expression.expression))) {
-      return expression.name.text;
+    if (ts.isPropertyAccessExpression(expression)) {
+      return processFunctions.has(expression.name.text) && isModule(expression.expression) ? expression.name.text : undefined;
+    }
+    if (ts.isElementAccessExpression(expression)) {
+      if (!isModule(expression.expression)) return undefined;
+      const key = expression.argumentExpression;
+      if (!ts.isStringLiteralLike(key)) return 'child_process[computed]';
+      return processFunctions.has(key.text) ? key.text : undefined;
     }
     if (ts.isCallExpression(expression) && isPromisify(expression.expression) && expression.arguments.length === 1) {
       return processFunctionOf(expression.arguments[0]);
     }
+    if (ts.isBinaryExpression(expression) && (expression.operatorToken.kind === ts.SyntaxKind.BarBarToken
+      || expression.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)) {
+      return processFunctionOf(expression.left) ?? processFunctionOf(expression.right);
+    }
+    if (ts.isConditionalExpression(expression)) {
+      return processFunctionOf(expression.whenTrue) ?? processFunctionOf(expression.whenFalse);
+    }
     return undefined;
   }
 
-  // `const run = promisify(execFile)` or `const original = childProcess.spawn`
-  // makes `run` or `original` a checked process function too.
+  // `const run = promisify(execFile)`, `const original = childProcess.spawn`,
+  // `const run = probe || (await import('node:child_process')).spawnSync` and
+  // `const { spawn } = childProcess` make `run`, `original` and `spawn` checked process functions too.
   const isAliasDeclaration = (node) => ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)
     && Boolean(node.initializer) && Boolean(processFunctionOf(node.initializer));
   const bindAliases = (node) => {
     if (isAliasDeclaration(node)) bindFunction(node.name, processFunctionOf(node.initializer));
+    else if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer
+      && isModule(node.initializer)) bindPattern(node.name);
     ts.forEachChild(node, bindAliases);
   };
   bindAliases(source);
@@ -202,8 +270,45 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
     findings.push({ line: line + 1, name, kind, text: node.getText(source).split('\n')[0].trim().slice(0, 120) });
   };
 
+  // The module may be read from (`childProcess.spawn`), destructured, or loaded
+  // into a name. Any other use passes it on to code whose calls cannot be checked.
+  const isCheckedModuleUse = (node, allowNamedBinding) => {
+    const outer = outermost(node);
+    const parent = outer.parent;
+    if (!parent) return false;
+    if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === outer) return true;
+    if (ts.isVariableDeclaration(parent) && parent.initializer === outer) {
+      return ts.isObjectBindingPattern(parent.name) || (allowNamedBinding && ts.isIdentifier(parent.name));
+    }
+    return isMockMethodTarget(outer);
+  };
+
+  const visitExport = (node) => {
+    const clause = node.exportClause;
+    if (isChildProcessSpecifier(node.moduleSpecifier)) {
+      if (!clause || ts.isNamespaceExport(clause)) {
+        report(node, 'child_process', 'reference');
+        return;
+      }
+      for (const element of clause.elements) {
+        const exported = (element.propertyName ?? element.name).text;
+        if (processFunctions.has(exported)) report(element, exported, 'reference');
+      }
+    } else if (!node.moduleSpecifier && clause && ts.isNamedExports(clause)) {
+      for (const element of clause.elements) {
+        const local = checker.getExportSpecifierLocalTargetSymbol(element);
+        if (local && functionSymbols.has(local)) report(element, functionSymbols.get(local), 'reference');
+        else if (local && namespaceSymbols.has(local)) report(element, 'child_process', 'reference');
+      }
+    }
+  };
+
   const visit = (node) => {
     if (ts.isTypeNode(node) || isAliasDeclaration(node)) return;
+    if (ts.isExportDeclaration(node)) {
+      visitExport(node);
+      return;
+    }
     if (ts.isCallExpression(node)) {
       const name = processFunctionOf(node.expression);
       if (name) {
@@ -218,13 +323,19 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
         if (!calledNow) report(node, processFunctionOf(node.arguments[0]), 'reference');
         return;
       }
+      if (isChildProcessLoad(node)) {
+        if (!isCheckedModuleUse(node, true)) report(node, 'child_process', 'reference');
+        return;
+      }
     }
     if (ts.isIdentifier(node) && !isDeclarationSite(node)) {
       const symbol = symbolOf(node);
       if (symbol && functionSymbols.has(symbol)) report(node, functionSymbols.get(symbol), 'reference');
-    } else if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)
-      && processFunctions.has(node.name.text) && namespaceSymbols.has(symbolOf(node.expression))) {
-      report(node, node.name.text, 'reference');
+      else if (symbol && namespaceSymbols.has(symbol) && !isCheckedModuleUse(node, false)) {
+        report(node, 'child_process', 'reference');
+      }
+    } else if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && processFunctionOf(node)) {
+      report(node, processFunctionOf(node), 'reference');
       return;
     }
     ts.forEachChild(node, visit);
