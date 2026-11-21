@@ -101,8 +101,8 @@ Every signed request is signed, written to the local outbox, sent and
 acknowledged while the device signing control for its origin, organization,
 device and OS user is held. While one caller holds it, no other caller that
 takes signing control signs or sends a request. Each hold makes at most one
-network send. When a request first sends another kept request (its client's
-own earlier call, or another entry's request to make room in a full file),
+network send. When a request sends another kept request before its own (its
+client's own earlier call, or another entry's request to make room in a full file),
 that hold ends after that send, and the request is signed and sent in a fresh
 hold, after every caller that waited meanwhile. The relay workspace loops'
 admission line hands its hold back in the same way. A caller that holds signing

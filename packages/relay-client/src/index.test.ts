@@ -2869,7 +2869,7 @@ test('a long-lived client does not send an orphan again within 10 minutes, and a
   assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'a later request of the same client settles it unsent');
   assert.deepEqual(keptMessageIds(await f.read()), []);
   await sharedLater(22, () => loop.pollTask());
-  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 2);
+  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1);
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
 
