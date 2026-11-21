@@ -124,6 +124,9 @@ const ORPHAN_RETRY_INTERVAL_MS = 10 * 60_000;
 /** Orphans one hold of signing control sends, so another process that waits for the lock file waits for at most one
  * such send. While more are due, the client's next request sends the next one, in a section of its own. */
 const ORPHAN_SENDS_PER_SECTION = 1;
+/** What one hold's part of a signed request returns after it sent another kept request first, so that the caller's
+ * request is signed in a hold of its own. Any answer the server gives, a JSON null among them, is the caller's. */
+const HANDED_BACK: unique symbol = Symbol('handed_back');
 /** Task leases held in this process, by client, until when they run unless extended. While one is held, no client of
  * this process sends an orphan after its own request, so a lease heartbeat never waits behind such a send. */
 const taskLeases = new Map<object, number>();
@@ -1708,10 +1711,10 @@ export class AgentFabricClient {
     // request is signed in a fresh hold, from a fresh read of the file, behind every caller that waited meanwhile. Under
     // the admission line the line's hold is handed back (see withSigningControlPerSend); a caller that holds signing
     // control itself across its calls keeps it.
-    let result: Record<string, unknown> | null;
+    let result: Record<string, unknown>;
     for (;;) {
-      result = await this.#withProtocolState(() => this.#signedRequestWithSigningControl(method, route, body));
-      if (result) break;
+      const answer = await this.#withProtocolState(() => this.#signedRequestWithSigningControl(method, route, body));
+      if (answer !== HANDED_BACK) { result = answer; break; }
       handBackDeviceSigningControl();
     }
     if (method === 'POST' && route === '/agent-fabric/sessions') this.#sessionAccepted = true;
@@ -1907,10 +1910,10 @@ export class AgentFabricClient {
    * another orphan first, so a file that is still full refuses it, as before. */
   #madeRoomFor: string | null = null;
 
-  /** One hold's part of a signed request: it makes at most one network send. It returns the caller's answer, or null
-   * after it sent another kept request first (this client's own earlier call, or a due orphan that makes room in a full
-   * file); the caller's request is then signed in a hold of its own. */
-  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown> | null> {
+  /** One hold's part of a signed request: it makes at most one network send. It returns the caller's answer, whatever
+   * its JSON body, or HANDED_BACK after it sent another kept request first (this client's own earlier call, or a due
+   * orphan that makes room in a full file); the caller's request is then signed in a hold of its own. */
+  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown> | typeof HANDED_BACK> {
     await this.#assertHostScope();
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
     // An acknowledgement this client took over waits for its new session (see openSession). Until the server accepted
@@ -1952,7 +1955,7 @@ export class AgentFabricClient {
         && this.#state.pending.body === serialized;
       const recovered = await this.#sendPendingWithSigningControl(this.#state);
       // Recovery acknowledges only its original caller's request identity. Another call is signed in a hold of its own.
-      return sameRequest ? recovered : null;
+      return sameRequest ? recovered : HANDED_BACK;
     }
     // In a file full of other clients' kept requests, a due orphan is sent first to make room for this one, in a hold
     // of its own. A completion the queue has no room for is refused before that.
@@ -1964,7 +1967,7 @@ export class AgentFabricClient {
       && Object.values(this.#otherOutboxes).filter(entry => entry.pending).length >= OUTBOX_ENTRIES_MAX
       && await this.#adoptOrphans()) {
       this.#madeRoomFor = call;
-      return null;
+      return HANDED_BACK;
     }
     const timestamp = new Date().toISOString();
     await this.#assertHostScope();
