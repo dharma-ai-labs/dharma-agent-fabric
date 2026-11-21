@@ -211,6 +211,9 @@ test('windowsHide passes only when no later spread or property can override it',
     "spawn('git', [], { ...options, windowsHide: true, stdio: 'ignore' });",
     "spawn('git', [], { windowsHide: true, ...{ windowsHide: false } });",
     "spawn('git', [], { ...first, windowsHide: true, cwd: '.', });",
+    "spawn('git', [], { windowsHide: true, ...(cwd === undefined ? {} : { cwd }) });",
+    "spawn('git', [], { windowsHide: true, ...(cwd === undefined ? {} : options) });",
+    "spawn('git', [], { windowsHide: true, ...{ cwd, ...options } });",
   ].join('\n');
-  assert.deepEqual(lines(source, 'fixture.mjs'), ['2:call:spawn', '4:call:spawn']);
+  assert.deepEqual(lines(source, 'fixture.mjs'), ['2:call:spawn', '4:call:spawn', '7:call:spawn', '8:call:spawn']);
 });
