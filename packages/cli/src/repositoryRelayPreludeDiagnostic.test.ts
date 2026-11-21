@@ -7,6 +7,9 @@ import type {FormatsPlugin} from 'ajv-formats';
 import {currentRepositoryRelayFailure, REPOSITORY_RELAY_FAILURE_CODES, REPOSITORY_RELAY_STAGES, repositoryRelayFailureReceipt,
   runRegisteredRepositoryRelays, withRepositoryRelayStage, type RepositoryRelayStage} from './repositoryRelaySupervisor.js';
 
+// Every stage line carries the supervisor clock; these tests pin it at 0.
+const AT0 = new Date(0).toISOString();
+
 for (const stage of ['session_open', 'vault_open']) {
   test(`current-process diagnostics retain ${stage} without private error text`, () => {
     const at = '2026-10-16T23:00:00.000Z', mtime = Date.parse(at) - 1000;
@@ -26,7 +29,7 @@ for (const stage of ['session_open', 'vault_open']) {
       run:()=>withRepositoryRelayStage(stage as RepositoryRelayStage,async()=>{throw Error('private-key-and-response-body');}),
       observe:event=>{events.push(event);},now:()=>0,
       wait:async()=>{await Promise.resolve();await Promise.resolve();if(++ticks===4)controller.abort();}});
-    assert.deepEqual(events,[{workspaceId:'workspace_a',code:'repository_relay_failed',stage,category:'unexpected'}]);
+    assert.deepEqual(events,[{workspaceId:'workspace_a',at:AT0,code:'repository_relay_failed',stage,category:'unexpected'}]);
     assert(!JSON.stringify(events).includes('private-key-and-response-body'));
   });
 }
@@ -48,7 +51,7 @@ async function observedFailure(error: Error) {
 
 for (const failureCode of lockCodes) {
   test(`the stage line names ${failureCode} instead of only unexpected`, async () => {
-    assert.deepEqual(await observedFailure(Error(failureCode)), [{workspaceId:'workspace_a',
+    assert.deepEqual(await observedFailure(Error(failureCode)), [{workspaceId:'workspace_a',at:AT0,
       code:'repository_relay_failed',stage:'session_open',category:'unexpected',failureCode}]);
   });
 }
@@ -57,7 +60,7 @@ test('only an exact known code reaches the stage line, never a message that hold
   for (const message of ['connection_anchor_lock_invalid C:/Users/someone/.secret', 'connection_anchor_lock_invalid\n',
     'Connection_Anchor_Lock_Invalid', 'plain_lowercase_words', 'sk_live_token_value']) {
     const events = await observedFailure(Error(message));
-    assert.deepEqual(events, [{workspaceId:'workspace_a',code:'repository_relay_failed',stage:'session_open',category:'unexpected'}]);
+    assert.deepEqual(events, [{workspaceId:'workspace_a',at:AT0,code:'repository_relay_failed',stage:'session_open',category:'unexpected'}]);
   }
 });
 
@@ -157,21 +160,24 @@ const openFailures: Array<[string, () => Error]> = [
 for (const [failureCode, error] of openFailures) {
   test(`a session open that fails with "${error().message.slice(0, 48)}" records ${failureCode}`, async () => {
     const events = await observedFailure(error());
-    assert.deepEqual(events, [{workspaceId:'workspace_a',code:'repository_relay_failed',stage:'session_open',category:'unexpected',failureCode}]);
+    assert.deepEqual(events, [{workspaceId:'workspace_a',at:AT0,code:'repository_relay_failed',stage:'session_open',category:'unexpected',failureCode}]);
     assert.doesNotMatch(JSON.stringify(events), /secret|sk_live|private|Users|tmp|Temp|lock\b/i);
   });
 }
 
-test('session open errors outside the known forms keep no code', async () => {
-  for (const error of [Error('relay_host_device_identity_unavailable C:/Users/someone/.secret'),
-    Error('request_failed: relay_host_device_identity_unavailable'), Error('Protected enrollment anchor is corrupt'),
-    Object.assign(Error('read_response_invalid'), {code: 'read_response_invalid_extra'}),
-    Object.assign(Error('read_timeout'), {code: 7}),
-    errno('EPERM', {syscall: 'rename', path: '/home/someone/.dharma/device.json'}),
-    errno('ENOENT', {syscall: 'kill'}),
-    errno('EPERM', {syscall: 'open', path: '/home/someone/dharma-enrollment-locks-short/x.lock'})]) {
-    assert.deepEqual(await observedFailure(error),
-      [{workspaceId:'workspace_a',code:'repository_relay_failed',stage:'session_open',category:'unexpected'}]);
+test('session open errors outside the known forms keep no failure code, only a safe error class', async () => {
+  for (const [error, errorCode] of [[Error('relay_host_device_identity_unavailable C:/Users/someone/.secret'), undefined],
+    [Error('request_failed: relay_host_device_identity_unavailable'), undefined],
+    [Error('Protected enrollment anchor is corrupt'), undefined],
+    [Object.assign(Error('read_response_invalid'), {code: 'read_response_invalid_extra'}), 'read_response_invalid_extra'],
+    [Object.assign(Error('read_timeout'), {code: 7}), undefined],
+    [errno('EPERM', {syscall: 'rename', path: '/home/someone/.dharma/device.json'}), 'EPERM'],
+    [errno('ENOENT', {syscall: 'kill'}), 'ENOENT'],
+    [errno('EPERM', {syscall: 'open', path: '/home/someone/dharma-enrollment-locks-short/x.lock'}), 'EPERM']] as const) {
+    const events = await observedFailure(error);
+    assert.deepEqual(events, [{workspaceId:'workspace_a',at:AT0,code:'repository_relay_failed',stage:'session_open',
+      category:'unexpected',...(errorCode ? {errorCode} : {})}]);
+    assert.doesNotMatch(JSON.stringify(events), /secret|someone|device\.json|x\.lock|corrupt/);
   }
 });
 
@@ -184,7 +190,7 @@ test('open error forms are classified only at session_open', async () => {
       run:()=>withRepositoryRelayStage(stage,async()=>{throw Error('relay_host_device_identity_unavailable');}),
       observe:event=>{events.push(event);},now:()=>0,
       wait:async()=>{await Promise.resolve();await Promise.resolve();if(++ticks===4)controller.abort();}});
-    assert.deepEqual(events, [{workspaceId:'workspace_a',code:'repository_relay_failed',stage,category:'unexpected'}]);
+    assert.deepEqual(events, [{workspaceId:'workspace_a',at:AT0,code:'repository_relay_failed',stage,category:'unexpected'}]);
   }
 });
 
