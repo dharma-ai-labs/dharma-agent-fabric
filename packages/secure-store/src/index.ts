@@ -76,8 +76,8 @@ interface ProcessResult { code: number | null; stdout: string; stderr: string; t
 
 function run(command: string, argv: string[], input?: string, timeoutMs = 10_000, cwd?: string): Promise<ProcessResult> {
   return new Promise((accept, reject) => {
-    const child = spawn(command, argv, { shell: false, stdio: ['pipe', 'pipe', 'pipe'],
-      ...(cwd === undefined ? {} : {cwd}), windowsHide: true });
+    const child = spawn(command, argv, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      ...(cwd === undefined ? {} : {cwd}) });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let settled = false;
