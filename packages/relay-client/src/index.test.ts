@@ -4195,6 +4195,68 @@ for (const [kind, hold] of [
   });
 }
 
+// Owner review 3: a caller that holds signing control across a session open and another call on the same client. The
+// inherited acknowledgement keeps its place in the owner's entry until it has had a hold of its own, so an ordinary
+// call in between, whatever its outcome, never takes that place, and a later process with the owner key still
+// re-issues it with its original idempotency key. Every send runs in a hold of its own throughout.
+for (const [kind, hold] of [
+  ['withDeviceSigningControl', withDeviceSigningControl],
+  ['withSigningControlPerSend', withSigningControlPerSend],
+] as const) {
+  test(`an ordinary call after a session open in a hold its caller took itself never takes an inherited stale acknowledgement's place, and a fresh client with the owner key re-issues it with its idempotency key: ${kind} (shared protocol state)`, async () => {
+    const f = await sharedMonotonicFixture(`fabric-shared-acknowledgement-ordinary-call-${kind}-`);
+    const o = await f.open('relay:o');
+    await o.openSession();
+    f.failNext();
+    await assert.rejects(o.postActionEnforcement(simplifiedDecision, sharedAcknowledgement()),
+      error => error instanceof AgentFabricRequestError && error.status === 503);
+    const kept = f.calls.at(-1)!;
+    // From here every send records the hold of signing control it runs in: the fetcher runs inside that hold, so a
+    // nested withDeviceSigningControl reuses it and returns its lease.
+    const holds: string[] = [];
+    const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+      holds.push(await withDeviceSigningControl({ config: f.config }, async lease => lease.controllerInstanceId));
+      return f.fetcher(url, init);
+    };
+    const open = () => AgentFabricClient.open(withOwner({ configPath: f.configPath, statePath: f.statePath, store: f.store,
+      fetcher }, 'relay:o'));
+    // The process exits. 9 minutes later a new process with the same key opens its session in a hold it took itself and
+    // makes another call there. That call's outcome is unknown, and so is the outcome of every acknowledgement send.
+    const fresh = await open();
+    f.down.add('/agent-fabric/tasks/poll');
+    f.down.add('/enforcements');
+    const inHold = await sharedLater(9, async () => {
+      const result = await hold({ config: f.config }, async () => {
+        const from = f.calls.length;
+        await fresh.openSession();
+        const outcome = await fresh.pollTask().then(() => 'answered', (error: unknown) =>
+          error instanceof AgentFabricRequestError ? `status ${error.status}` : (error as Error).message);
+        return { sent: f.calls.slice(from).map(call => call.path), outcome };
+      });
+      await sharedSettled(f.config);
+      return result;
+    });
+    assert.deepEqual(inHold.sent, ['/agent-fabric/sessions'], 'only the session open is sent in the caller\'s hold');
+    assert.equal(inHold.outcome, 'relay_retry_after_recovery', 'the other call is neither signed nor sent, and fails retryably');
+    const entry = (await f.read()).outboxes?.['relay:o'];
+    assert.deepEqual([entry?.pending?.pathname, entry?.pending?.headers['idempotency-key']],
+      [`/api/v1/orgs/org_a${kept.path}`, kept.idempotencyKey],
+      'the owner\'s entry still holds the acknowledgement, with its original idempotency key');
+    // The process exits again. Another new process with the same key, a fresh client object, recovers it.
+    f.down.clear();
+    const next = await open();
+    const from = f.calls.length;
+    assert.equal(await sharedLater(9, () => sharedOutcome(next.openSession())), 'accepted', 'its session opens');
+    const recovered = f.calls.slice(from).filter(call => call.path === kept.path);
+    assert.ok(recovered.length >= 1, 'the fresh client sends the acknowledgement');
+    assert.deepEqual(recovered.map(call => call.idempotencyKey), recovered.map(() => kept.idempotencyKey),
+      'with the original idempotency key');
+    assert.deepEqual(keptMessageIds(await f.read()), [], 'the answered acknowledgement leaves the file');
+    assert.equal(new Set(holds).size, holds.length, 'every send runs in a hold of its own, the hand-off included');
+    for (const session of new Set(f.calls.map(call => call.sessionId))) assertNoSequenceSignedTwice(f.calls, session);
+  });
+}
+
 test('an inherited stale acknowledgement stays in the owner\'s entry while its new session opens, so a failed session open leaves it for the next process (shared protocol state)', async () => {
   const f = await sharedMonotonicFixture('fabric-shared-restart-acknowledgement-open-fails-');
   const o = await f.open('relay:o');
