@@ -24,8 +24,8 @@ import {HostOperationFence, type HostOperationScope} from './hostOperationScope.
 import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRecoveryJournalIO} from './signingRecoveryJournal.js';
 import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 import {planSigningRecovery} from './signingRecoveryPlan.js';
-import {handBackDeviceSigningControl,insideCallerSigningControlHold,outsideDeviceSigningControl,withDeviceSigningControl}
-  from './deviceSigningControl.js';
+import {handBackDeviceSigningControl,insideCallerSigningControlHold,insideDeviceSigningControlHold,outsideDeviceSigningControl,
+  withDeviceSigningControl} from './deviceSigningControl.js';
 export {withDeviceSigningControl,withDeviceSigningLineSignal,withSigningControlPerSend,type DeviceSigningControlLease}
   from './deviceSigningControl.js';
 export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
@@ -1543,6 +1543,11 @@ export class AgentFabricClient {
     // A durable client sends one due orphan or replays its own kept request, and writes its new session from the
     // latest file, all in one signing-control section. It calls the sends directly: waiting on #serial while holding
     // control could deadlock. The section ends before the session POST, which takes control again through #serial.
+    // In a hold of signing control its caller took itself, perSend or not, this client adds no send of its own to that
+    // hold beyond the session open: it sends no orphan there, and after it sends its own earlier kept request there, a
+    // perSend hold is handed back and the session open runs again in a fresh hold, while in any other hold the session
+    // open fails with relay_retry_after_recovery, unsent, and a retry opens it in a hold of its own.
+    const callerHold = insideDeviceSigningControlHold();
     const replace = async () => {
       const pending = this.#state.pending;
       // An action acknowledgement past its time window can be sent again only signed again. Only the process that
@@ -1552,7 +1557,7 @@ export class AgentFabricClient {
       // Not while a task lease is held in this process, so the lease heartbeat of a sibling loop never waits on them,
       // and not when this section replays this client's own kept request, so it holds signing control for one send.
       const replays = !!pending && !deferred && !isExplicitlyRebuiltPath(pending.pathname);
-      if (this.#durable && !replays && !taskLeaseHeld(Date.now())) await this.#adoptOrphans();
+      if (this.#durable && !replays && !callerHold && !taskLeaseHeld(Date.now())) await this.#adoptOrphans();
       if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
         // Content-bearing requests require refreshed consent. Repository connect
         // requests depend on current workspace registration. Both are rebuilt by
@@ -1561,6 +1566,10 @@ export class AgentFabricClient {
         await this.#persist();
       } else if (this.#state.pending && !deferred) {
         await this.#sendPendingWithSigningControl(this.#state);
+        if (callerHold) {
+          handBackDeviceSigningControl();
+          throw new Error('relay_retry_after_recovery');
+        }
       }
       if (deferred) this.#deferredAcknowledgement = this.#state.pending;
       this.#sessionAccepted = false;
@@ -1578,14 +1587,21 @@ export class AgentFabricClient {
       // In a section of its own, as this client's next request: the acknowledgement is signed again at the next
       // sequence of the new session, with its idempotency key, and sent. Its outcome is never this caller's: a
       // retryable failure keeps it for this client's next request.
-      const reissue = this.#serial.then(() => this.#withProtocolState(async () => {
+      const send = () => this.#withProtocolState(async () => {
         if (!this.#deferredAcknowledgement || this.#state.pending) return;
         this.#state.pending = this.#deferredAcknowledgement;
         this.#deferredAcknowledgement = null;
         try { await this.#sendPendingWithSigningControl(this.#state); } catch { await this.#assertHostScope(); }
-      }));
-      this.#serial = reissue.catch(() => undefined);
-      await reissue;
+      });
+      if (callerHold) {
+        // Never in the caller's hold: in a hold of its own once that hold ends. It is not awaited, and not queued in
+        // #serial, since it waits for the caller's hold to end, and the caller's next call in that hold must not wait on it.
+        void outsideDeviceSigningControl(() => protocolStateSections.exit(send)).catch(() => undefined);
+      } else {
+        const reissue = this.#serial.then(send);
+        this.#serial = reissue.catch(() => undefined);
+        await reissue;
+      }
     }
     return opened;
   }

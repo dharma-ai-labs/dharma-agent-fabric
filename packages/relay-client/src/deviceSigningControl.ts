@@ -62,6 +62,11 @@ export function insideCallerSigningControlHold():boolean{
   return !!owner?.active&&!perSendRoots.has(owner);
 }
 
+/** Whether the current async context is inside a live hold of signing control of any kind, perSend or not. */
+export function insideDeviceSigningControlHold():boolean{
+  return !!owners.getStore()?.active;
+}
+
 /** Ends the current hold when it is a root of withSigningControlPerSend, whose work then runs again in a fresh hold.
  * In any other hold, or outside one, it returns and the caller goes on. */
 export function handBackDeviceSigningControl():void{

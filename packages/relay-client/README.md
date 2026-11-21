@@ -115,7 +115,14 @@ send of its own to it: it sends no other entry's request there to make room,
 and a full file refuses the caller's request
 (`relay_protocol_state_outbox_full`), as before; after it sends its own earlier
 kept call there, the caller's request fails with `relay_retry_after_recovery`,
-unsent, and a retry signs and sends it in a hold of its own. Such a hold makes
+unsent, and a retry signs and sends it in a hold of its own. A session open
+(`openSession`) in a hold its caller took itself, with or without
+`withSigningControlPerSend`, adds no send of its own either: it sends no other
+entry's request there; after it sends its own earlier kept call there, a
+`withSigningControlPerSend` hold is handed back and the session opens in a
+fresh hold, and in any other hold the session open fails with
+`relay_retry_after_recovery`; and a taken-over action acknowledgement that it
+signs again is sent after that hold ends, in a hold of its own. Such a hold makes
 one send for each signed call its caller makes in it, so a caller that holds
 signing control across several calls holds it across several sends. The CLI
 takes no such hold around a protocol-state request: the named session
