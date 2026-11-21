@@ -170,19 +170,28 @@ or content a poll or read returns is never written to the file. A kept request
 in a file written by an earlier version is moved to such an entry when the file
 is first read, unless it is the copy of a kept request in an entry, or that
 request as the earlier version re-signed it (same session, path and
-idempotency key), which then replaces the entry's request. Entries without a kept request are removed once
+idempotency key), which then replaces the entry's request. Such an entry has
+no owner process: another client sends its request only once it has stood
+unchanged for 10 minutes, counted from when it was last signed or stamped, so
+a command of the earlier version that still runs sends its own request first.
+Entries without a kept request are removed once
 their owner process has exited, except that an entry whose request another
 client answered stays for 10 minutes, so an owner that read the entry before
 still finds the answer. At most 32 entries without a kept request stay, the
 newest first, in the room the kept requests leave. When the entry of an owner
 that still runs leaves the file while it keeps a request (the idle cap removed
 it after another client answered it, an earlier version rewrote the file, or
-the file was removed), the file no longer shows whether another client sent
+the file was removed), or comes back without that request (an earlier version
+writes back the whole file it read when it opened), the file no longer shows whether another client sent
 that request, nor which sequences were signed in the owner's session. The owner
 then sends its kept request again only exactly as signed, with the same message
 id, sequence and idempotency key. It drops unsent a request that could be sent
 only at a new sequence or never replayed (an action acknowledgement past its
-time window, or a content-bearing request). It signs nothing new in that
+time window, or a content-bearing request). Before it sends the request, it
+writes it back to its own entry, marked to be sent only as signed, and no
+other entry then holds it: a new client with the same owner key, or another
+client once the entry is due, also sends it only as signed and drops an action
+acknowledgement past its time window. It signs nothing new in that
 session: once the request has an answer or is dropped, the session is closed.
 The call that sent it gets the answer only when it is the same call as the
 kept request; otherwise, and for every later call until the owner opens a new
