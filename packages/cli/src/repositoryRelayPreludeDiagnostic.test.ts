@@ -4,7 +4,7 @@ import {createRequire} from 'node:module';
 import test from 'node:test';
 import {Ajv2020} from 'ajv/dist/2020.js';
 import type {FormatsPlugin} from 'ajv-formats';
-import {currentRepositoryRelayFailure, REPOSITORY_RELAY_FAILURE_CODES, REPOSITORY_RELAY_STAGES, repositoryRelayFailureReceipt,
+import {currentRepositoryRelayFailure, REPOSITORY_RELAY_FAILURE_CODES, REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT, REPOSITORY_RELAY_STAGES, repositoryRelayFailureReceipt,
   runRegisteredRepositoryRelays, withRepositoryRelayStage, type RepositoryRelayStage} from './repositoryRelaySupervisor.js';
 
 // Every stage line carries the supervisor clock; these tests pin it at 0.
@@ -93,6 +93,13 @@ test('the failure receipt schema lists exactly the stages and codes the relay wr
   const {properties} = await schema('local-repository-relay-failure');
   assert.deepEqual(properties.stage.enum, [...REPOSITORY_RELAY_STAGES]);
   assert.deepEqual(properties.failureCode.enum, [...REPOSITORY_RELAY_FAILURE_CODES]);
+});
+
+test('the failure history schema lists exactly the stages, codes and entry limit the relay writes', async () => {
+  const {$defs, properties} = await schema('local-repository-relay-failure-history');
+  assert.deepEqual($defs.entry.properties.stage.enum, [...REPOSITORY_RELAY_STAGES]);
+  assert.deepEqual($defs.entry.properties.failureCode.enum, [...REPOSITORY_RELAY_FAILURE_CODES]);
+  assert.equal(properties.entries.maxItems, REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT);
 });
 
 test('receipts built from real relay events match the failure receipt schema', async () => {
