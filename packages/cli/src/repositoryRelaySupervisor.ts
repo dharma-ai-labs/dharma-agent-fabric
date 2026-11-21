@@ -1,4 +1,5 @@
 import { isAbsolute, resolve, win32 } from 'node:path';
+import { withDeviceSigningLineSignal } from '@dharma-ai-labs/agent-fabric-relay-client';
 import { selectDeviceWorkspace, type OnboardingWorkspaceRecord } from './onboardingWorkspace.js';
 import { RELAY_OPEN_FAILURE_CODES, relayOpenFailureCode } from './relayOpenFailure.js';
 import { relayRestartDelayMs } from './relaySupervisor.js';
@@ -150,6 +151,26 @@ export function repositoryRelayObservationReady(input: {
     && Number.isFinite(age) && age >= 0 && age <= 300_000;
 }
 
+// #511: sibling loops in this process wait in the signing-control line, but a holder in another process (a CLI
+// command or a native turn) can still outlast the 10 s lock wait. A stage retries that busy answer a few times
+// instead of ending the loop, which would reopen a device session and wait out the restart backoff.
+const SIGNING_CONTROL_BUSY_RETRIES = 3;
+const SIGNING_CONTROL_BUSY_RETRY_MS = 1_000;
+
+export async function retrySigningControlBusy<T>(operation: () => Promise<T>, input: { signal: AbortSignal;
+  wait?: (ms: number, signal: AbortSignal) => Promise<void> }): Promise<T> {
+  const wait = input.wait ?? waitForRelayRefresh;
+  for (let retries = 0; ; retries++) {
+    try { return await operation(); }
+    catch (error) {
+      if (retries >= SIGNING_CONTROL_BUSY_RETRIES || input.signal.aborted
+        || failureMessage(error) !== 'connection_anchor_busy') throw error;
+      await wait(SIGNING_CONTROL_BUSY_RETRY_MS, input.signal);
+      if (input.signal.aborted) throw error;
+    }
+  }
+}
+
 export function serializeRelayWork() {
   let tail = Promise.resolve();
   return <T>(operation: () => Promise<T>): Promise<T> => {
@@ -240,7 +261,8 @@ export async function runRegisteredRepositoryRelays(input: {
         worker.flight = Promise.resolve().then(async () => {
           if (controller.signal.aborted || input.signal.aborted) return;
           try {
-            await input.run(row, controller.signal);
+            // A stopped or revoked loop leaves the in-process signing line at once instead of waiting its turn.
+            await withDeviceSigningLineSignal(controller.signal, () => input.run(row, controller.signal));
             if (!controller.signal.aborted) {
               worker.failed = true;
               observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed',
