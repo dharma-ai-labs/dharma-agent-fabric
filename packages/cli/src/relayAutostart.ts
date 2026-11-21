@@ -204,6 +204,15 @@ function encodedPowerShell(command: string) {
 function registrationPath(home: string) { return join(home, 'relay', 'autostart.json'); }
 function unitPath(userHome: string) { return join(userHome, '.config', 'systemd', 'user', UNIT_NAME); }
 function scriptPath(home: string) { return join(home, 'relay', 'autostart.ps1'); }
+// The task action runs PowerShell under a headless console host, so no console
+// window opens at logon. Closing a visible window would also stop the supervisor.
+const WINDOWS_TASK_EXECUTE = 'conhost.exe';
+function windowsTaskArguments(home: string) {
+  return `--headless powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File "${scriptPath(home)}"`;
+}
+// Earlier releases registered this visible action. It is still owned, and the
+// next setup or upgrade registers the headless action in its place.
+function legacyWindowsTaskArguments(home: string) { return `-NoProfile -NonInteractive -File "${scriptPath(home)}"`; }
 function taskName(home: string) {
   return `DharmaAgentFabric-${createHash('sha256').update(home.toLowerCase()).digest('hex').slice(0, 12)}`;
 }
@@ -366,9 +375,11 @@ function windowsTaskGuard(registration: Registration, home: string) {
     + `$principalMatches = $principals.Count -eq 1 -and $principals[0].UserId -eq $identity.User.Value `
     + `} catch { $principalMatches = $false }; `
     + `$actions = @($task.Actions); `
-    + `if ($null -eq $task -or $actions.Count -ne 1 `
-    + `-or $actions[0].Execute -cne 'powershell.exe' `
-    + `-or $actions[0].Arguments -cne ${psLiteral(`-NoProfile -NonInteractive -File "${scriptPath(home)}"`)} `
+    + `$headlessAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq ${psLiteral(WINDOWS_TASK_EXECUTE)} `
+    + `-and $actions[0].Arguments -ceq ${psLiteral(windowsTaskArguments(home))}; `
+    + `$legacyAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq 'powershell.exe' `
+    + `-and $actions[0].Arguments -ceq ${psLiteral(legacyWindowsTaskArguments(home))}; `
+    + `if ($null -eq $task -or -not ($headlessAction -or $legacyAction) `
     + `-or $actions[0].WorkingDirectory -cne ${psLiteral(registration.workspace)} `
     + `-or -not $principalMatches) `
     + `{ throw 'autostart_conflict' }; `;
@@ -535,11 +546,14 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     throw new Error('autostart_conflict: the user startup entry is not owned by this enrollment.');
   }
   if (backend === 'systemd-user') await assertWslHostPreflight(options);
+  let legacyWindowsAction = false;
   if (platform === 'win32' && previous) {
-    await run('powershell.exe', encodedPowerShell(windowsTaskLookup(previous)
-      + `if ($null -ne $task) { ${windowsTaskGuard(previous, options.home)} }`));
+    const result = await run('powershell.exe', encodedPowerShell(windowsTaskLookup(previous)
+      + `if ($null -ne $task) { ${windowsTaskGuard(previous, options.home)}if ($legacyAction) { 'legacy-action' } }`));
+    legacyWindowsAction = result?.stdout?.trim() === 'legacy-action';
   }
-  if (preserve) {
+  // A task with the earlier visible action is registered again even when the anchor is preserved.
+  if (preserve && !legacyWindowsAction) {
     const status = await relayAutostartStatus(options);
     if (status.state === 'enabled' && codexHome === previousCodexHome) return status;
   }
@@ -562,10 +576,9 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     await run('/bin/launchctl', ['enable', `${macDomain(options)}/${MAC_LABEL}`]);
     await run('/bin/launchctl', ['bootstrap', macDomain(options), destination]);
   } else {
-    const script = scriptPath(options.home);
     const command = `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; `
-      + `$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-      + `-Argument ${psLiteral(`-NoProfile -NonInteractive -File "${script}"`)} `
+      + `$action = New-ScheduledTaskAction -Execute ${psLiteral(WINDOWS_TASK_EXECUTE)} `
+      + `-Argument ${psLiteral(windowsTaskArguments(options.home))} `
       + `-WorkingDirectory ${psLiteral(registration.workspace)}; `
       + `$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity; `
       + `$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited; `

@@ -612,6 +612,46 @@ test('Windows task registration uses the enrolled user without an embedded passw
   assert.match(calls.at(-1) || '', /Unregister-ScheduledTask/);
 });
 
+test('Windows task action starts PowerShell without a visible console and replaces the earlier visible action', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-headless-'));
+  const calls: string[] = [];
+  let legacyAction = false;
+  const run = async (_file: string, args: string[]) => {
+    const decoded = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
+    calls.push(decoded);
+    return { stdout: decoded.includes("'exists'") ? 'absent\n'
+      : legacyAction && decoded.includes("'legacy-action'") ? 'legacy-action\n'
+      : decoded.includes('Get-ScheduledTask') ? 'enabled\n' : '' };
+  };
+  const options = {
+    platform: 'win32' as const, home: join(root, 'dharma'), userHome: root,
+    workspace: 'C:\\first', launcher: 'C:\\first\\.dharma\\bin\\dharma.cmd',
+    policy: 'C:\\first\\.dharma\\approved-policy.json', version: '0.2.119', run,
+  };
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  const action = /New-ScheduledTaskAction -Execute '([^']+)' -Argument '([^']+)'/
+    .exec(calls.find(call => call.includes('Register-ScheduledTask')) || '');
+  assert.ok(action, 'expected one fixed task action');
+  const script = join(options.home, 'relay', 'autostart.ps1');
+  // A headless console host: no window opens at logon, and none can be closed to stop the supervisor.
+  assert.equal(action[1], 'conhost.exe');
+  assert.equal(action[2], `--headless powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File "${script}"`);
+  // The ownership guard accepts the headless action and the earlier visible one, so enrolled devices keep working.
+  const guard = calls.find(call => call.includes('$headlessAction')) || '';
+  assert.ok(guard.includes(`$actions[0].Execute -ceq 'conhost.exe' -and $actions[0].Arguments -ceq '${action[2]}'`));
+  assert.ok(guard.includes(`$actions[0].Execute -ceq 'powershell.exe' -and $actions[0].Arguments -ceq '-NoProfile -NonInteractive -File "${script}"'`));
+
+  // A preserved anchor whose task still has the earlier visible action is registered again with the headless one.
+  calls.length = 0;
+  legacyAction = true;
+  const second = { ...options, workspace: 'C:\\second', launcher: 'C:\\second\\.dharma\\bin\\dharma.cmd',
+    policy: 'C:\\second\\.dharma\\approved-policy.json', preserveStandardAnchor: true };
+  assert.equal((await enableRelayAutostart(second)).state, 'enabled');
+  const replaced = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+  assert.match(replaced, /New-ScheduledTaskAction -Execute 'conhost\.exe' -Argument '--headless powershell\.exe /);
+  assert.ok(replaced.includes("-WorkingDirectory 'C:\\first'"));
+});
+
 test('failed OS registration remains unavailable instead of reporting completion', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-failed-autostart-'));
   const options = {
