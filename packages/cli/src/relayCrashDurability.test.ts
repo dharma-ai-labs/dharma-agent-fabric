@@ -564,3 +564,29 @@ test('each failed loop keeps the last-failure receipt unchanged and adds to the 
   }
   assert.equal(writes.length, 44);
 });
+
+test('every relay workspace loop opens its client under its workspace owner key, so a restarted loop replays its own kept request', async () => {
+  const opened: Array<Record<string, unknown>> = [];
+  const {client} = await privateFunctions(['client'], {
+    AgentFabricClient: {open: async (input: Record<string, unknown>) => {
+      opened.push(input); return {openSession: async () => ({ok: true})};
+    }},
+    admitSignedRequests: (instance: unknown) => instance, configPath: () => 'device.json',
+    protocolStatePath: () => 'protocol-state.json', isIsolatedDeviceSession: () => false, VERSION: '0.0.0'});
+  await client!({}, 'relay:workspace-a');
+  await client!({}, 'relay:workspace-a');
+  await client!();
+  assert.deepEqual(opened.map(input => [input.statePath, input.ownerKey]),
+    [['protocol-state.json', 'relay:workspace-a'], ['protocol-state.json', 'relay:workspace-a'], ['protocol-state.json', undefined]],
+    'a loop restarted in the same process gets the same entry; an ad hoc command gets one of its own');
+  const source = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
+  const loop = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'relayWorkspaceLoop')!;
+  const calls: string[][] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === 'client') calls.push(node.arguments.map(arg => arg.getText(ast)));
+    ts.forEachChild(node, visit);
+  };
+  visit(loop);
+  assert.deepEqual(calls, [['telemetry', '`relay:${canonicalWorkspace.workspaceId}`']]);
+});
