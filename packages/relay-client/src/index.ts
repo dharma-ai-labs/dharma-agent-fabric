@@ -24,7 +24,8 @@ import {HostOperationFence, type HostOperationScope} from './hostOperationScope.
 import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRecoveryJournalIO} from './signingRecoveryJournal.js';
 import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 import {planSigningRecovery} from './signingRecoveryPlan.js';
-import {handBackDeviceSigningControl,outsideDeviceSigningControl,withDeviceSigningControl} from './deviceSigningControl.js';
+import {handBackDeviceSigningControl,insideCallerSigningControlHold,outsideDeviceSigningControl,withDeviceSigningControl}
+  from './deviceSigningControl.js';
 export {withDeviceSigningControl,withDeviceSigningLineSignal,withSigningControlPerSend,type DeviceSigningControlLease}
   from './deviceSigningControl.js';
 export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
@@ -1709,12 +1710,16 @@ export class AgentFabricClient {
     // Each hold of signing control makes at most one network send. When another kept request is sent first (this
     // client's own earlier call, or a due orphan that makes room in a full file), that hold ends there, and the caller's
     // request is signed in a fresh hold, from a fresh read of the file, behind every caller that waited meanwhile. Under
-    // the admission line the line's hold is handed back (see withSigningControlPerSend); a caller that holds signing
-    // control itself across its calls keeps it.
+    // the admission line the line's hold is handed back (see withSigningControlPerSend). A hold its caller took itself
+    // without perSend keeps its work, so this client adds no send to it: it sends no orphan to make room there, and
+    // after it sends its own earlier kept call there, the caller's call fails with relay_retry_after_recovery, a failure
+    // with no outcome that a retry sends in a hold of its own.
+    const callerHold = insideCallerSigningControlHold();
     let result: Record<string, unknown>;
     for (;;) {
-      const answer = await this.#withProtocolState(() => this.#signedRequestWithSigningControl(method, route, body));
+      const answer = await this.#withProtocolState(() => this.#signedRequestWithSigningControl(method, route, body, callerHold));
       if (answer !== HANDED_BACK) { result = answer; break; }
+      if (callerHold) throw new Error('relay_retry_after_recovery');
       handBackDeviceSigningControl();
     }
     if (method === 'POST' && route === '/agent-fabric/sessions') this.#sessionAccepted = true;
@@ -1912,8 +1917,10 @@ export class AgentFabricClient {
 
   /** One hold's part of a signed request: it makes at most one network send. It returns the caller's answer, whatever
    * its JSON body, or HANDED_BACK after it sent another kept request first (this client's own earlier call, or a due
-   * orphan that makes room in a full file); the caller's request is then signed in a hold of its own. */
-  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown> | typeof HANDED_BACK> {
+   * orphan that makes room in a full file); the caller's request is then signed in a hold of its own. In a hold its
+   * caller took itself (callerHold), it sends no orphan to make room, so only this client's own earlier call hands back. */
+  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown,
+    callerHold: boolean): Promise<Record<string, unknown> | typeof HANDED_BACK> {
     await this.#assertHostScope();
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
     // An acknowledgement this client took over waits for its new session (see openSession). Until the server accepted
@@ -1958,12 +1965,13 @@ export class AgentFabricClient {
       return sameRequest ? recovered : HANDED_BACK;
     }
     // In a file full of other clients' kept requests, a due orphan is sent first to make room for this one, in a hold
-    // of its own. A completion the queue has no room for is refused before that.
+    // of its own. A completion the queue has no room for is refused before that. In a hold its caller took itself, no
+    // orphan is sent, and the full file refuses this request (relay_protocol_state_outbox_full).
     const call = `${method} ${pathname} ${serialized}`, unsigned: PendingRequest = {method, pathname, body: serialized, headers: {}};
     const madeRoom = this.#madeRoomFor === call;
     this.#madeRoomFor = null;
     this.#assertRecoveredTaskCompletionCapacity(unsigned);
-    if (!madeRoom && this.#durable && !isExplicitlyRebuiltPath(pathname) && !isSessionOpen(unsigned)
+    if (!madeRoom && !callerHold && this.#durable && !isExplicitlyRebuiltPath(pathname) && !isSessionOpen(unsigned)
       && Object.values(this.#otherOutboxes).filter(entry => entry.pending).length >= OUTBOX_ENTRIES_MAX
       && await this.#adoptOrphans()) {
       this.#madeRoomFor = call;

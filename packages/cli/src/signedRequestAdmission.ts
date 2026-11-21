@@ -10,7 +10,9 @@ const holdingControl = new AsyncLocalStorage<true>();
  * sends another kept request (its client's earlier call, or an orphan that makes room in a full file), the hold ends
  * there and work runs again from its start in a fresh hold, behind every caller that waited meanwhile. Such work does
  * nothing before its signed call that it cannot do again. Without perSend, a caller that holds control across several
- * calls keeps it across their sends. Inside a hold its own caller took, work runs in that hold either way. */
+ * calls keeps it across their sends, and the client adds no send to that hold: a call that would first send another
+ * kept request fails instead (relay_retry_after_recovery after its client's earlier call, or
+ * relay_protocol_state_outbox_full in a full file). Inside a hold its own caller took, work runs in that hold either way. */
 export function withClientSigningControl<T>(input: SigningControlInput, work: () => Promise<T>,
   options: {perSend?: boolean} = {}): Promise<T> {
   return holdingControl.run(true, () => (options.perSend ? withSigningControlPerSend : withDeviceSigningControl)(input, work));

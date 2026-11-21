@@ -55,6 +55,13 @@ export async function withSigningControlPerSend<T>(input:Parameters<typeof withD
   }
 }
 
+/** Whether the current async context is inside a live hold that its caller took itself without perSend (with
+ * withDeviceSigningControl, directly or nested). Work in such a hold always runs in that one hold. */
+export function insideCallerSigningControlHold():boolean{
+  const owner=owners.getStore();
+  return !!owner?.active&&!perSendRoots.has(owner);
+}
+
 /** Ends the current hold when it is a root of withSigningControlPerSend, whose work then runs again in a fresh hold.
  * In any other hold, or outside one, it returns and the caller goes on. */
 export function handBackDeviceSigningControl():void{
