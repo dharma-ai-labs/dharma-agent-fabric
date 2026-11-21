@@ -2460,16 +2460,19 @@ test('a workspace loop that restarts replays its kept completion when it opens i
 // The server accepts a session's sequences only in increasing order; gaps are allowed.
 async function sharedMonotonicFixture(prefix: string) {
   const highest = new Map<string, number>();
+  /** Paths whose calls fail with a retryable 503 while listed, matched by their ending. */
+  const down = new Set<string>();
   let unavailable = 0;
   const f = await sharedStateFixture(prefix, call => {
     if (unavailable > 0) { unavailable -= 1; return sharedUnavailable(); }
+    if ([...down].some(ending => call.path.endsWith(ending))) return sharedUnavailable();
     if ((highest.get(call.sessionId) ?? 0) >= call.sequence) {
       return new Response(JSON.stringify({ ok: false, error: { code: 'sequence_out_of_order', message: 'Out of order.' } }), { status: 409 });
     }
     highest.set(call.sessionId, call.sequence);
     return sharedOk();
   });
-  return { ...f, highest, failNext: (count = 1) => { unavailable = count; } };
+  return { ...f, highest, down, failNext: (count = 1) => { unavailable = count; } };
 }
 /** Asserts that no sequence was signed twice with different message ids in the session. */
 function assertNoSequenceSignedTwice(calls: SharedStateCall[], sessionId: string) {
@@ -4007,4 +4010,91 @@ test('acknowledging a completion whose state write failed removes it before any 
   await fresh.openSession();
   assert.deepEqual([a.listRecoveredTaskCompletions(), fresh.listRecoveredTaskCompletions(),
     (await f.read()).recoveredTaskCompletions], [[], [], []], 'the acknowledged receipt never comes back');
+});
+
+// Owner review round 6: only an owner signs in its own session (an earlier version aside). Another client sends a kept
+// request only exactly as signed and drops a stale action acknowledgement unsent, and an owner that sees an earlier
+// version signed in its session, or finds its entry holding another call, signs nothing new there.
+for (const next of ['the owner', 'the owner after another client wrote', 'a fresh owner'] as const) {
+  test(`after an earlier version re-signed an owner's stale acknowledgement and wrote the file back, ${next} never signs that sequence again (shared protocol state)`, async () => {
+    const f = await sharedMonotonicFixture('fabric-shared-earlier-resigned-copy-');
+    const a = await f.open('relay:a'), b = await f.open('relay:b');
+    await a.openSession();
+    await b.openSession();
+    const decisionId = '33333333-3333-4333-8333-333333333333', acknowledgement = sharedAcknowledgement();
+    f.failNext();
+    await assert.rejects(a.postActionEnforcement(decisionId, acknowledgement),
+      error => error instanceof AgentFabricRequestError && error.status === 503);
+    const kept = f.calls.at(-1)!;
+    // An earlier version's session open reads the file; its top-level copy is the kept acknowledgement.
+    const snapshot = await f.read();
+    assert.equal(snapshot.pending?.headers['x-dharma-message-id'], kept.messageId);
+    // 9 minutes later it re-signs the stale copy one sequence higher in the owner's session and the server accepts it.
+    f.calls.push({ ...kept, messageId: randomUUID(), sequence: kept.sequence + 1 });
+    f.highest.set(kept.sessionId, kept.sequence + 1);
+    // It writes back the file as it read it, with no kept request at the top level and the next sequence it reached.
+    await writeFile(f.statePath, JSON.stringify({ ...snapshot, pending: null, nextSequence: kept.sequence + 2 }));
+    if (next === 'the owner after another client wrote') await sharedLater(9, () => b.pollTask());
+    const retry = next === 'a fresh owner'
+      ? await sharedLater(9, async () => sharedOutcome((await f.open('relay:a')).openSession()))
+      : await sharedLater(9, () => sharedOutcome(a.postActionEnforcement(decisionId, acknowledgement)));
+    assertNoSequenceSignedTwice(f.calls, kept.sessionId);
+    assert.notEqual(retry, 409, 'the owner gets no out-of-order refusal');
+    assert.deepEqual(keptMessageIds(await f.read()), [], 'the stale acknowledgement is dropped unsent');
+  });
+}
+
+for (const adopterOutcome of ['accepted', 'retryable'] as const) {
+  test(`another client never signs an owner's stale acknowledgement, so an owner whose entry an earlier version wrote back never signs a sequence twice: ${adopterOutcome} (shared protocol state)`, async () => {
+    const f = await sharedMonotonicFixture(`fabric-shared-adopter-no-resign-${adopterOutcome}-`);
+    const a = await f.open('relay:a');
+    await a.openSession();
+    const decisionId = '33333333-3333-4333-8333-333333333333', acknowledgement = sharedAcknowledgement();
+    f.failNext();
+    await assert.rejects(a.postActionEnforcement(decisionId, acknowledgement),
+      error => error instanceof AgentFabricRequestError && error.status === 503);
+    const kept = f.calls.at(-1)!;
+    // An earlier version reads the file before another client takes the entry, which stood unchanged for 11 minutes.
+    const snapshot = await f.read();
+    if (adopterOutcome === 'retryable') f.down.add('/enforcements');
+    await sharedLater(11, async () => { const c = await f.open('relay:c'); await c.openSession(); });
+    f.down.clear();
+    assert.equal(f.calls.filter(call => call.sessionId === kept.sessionId).length, 2,
+      'the other client signs nothing in the owner\'s session');
+    // The earlier version writes back the file it read, so the owner's entry is back in its older state.
+    await writeFile(f.statePath, JSON.stringify(snapshot));
+    const retry = await sharedLater(12, () => sharedOutcome(a.postActionEnforcement(decisionId, acknowledgement)));
+    assertNoSequenceSignedTwice(f.calls, kept.sessionId);
+    assert.equal(retry, 'accepted', 'the owner re-signs it in its own session at a sequence nobody used');
+  });
+}
+
+test('an owner whose entry an earlier version wrote back holding another call resends its own kept request exactly as signed (shared protocol state)', async () => {
+  const f = await sharedMonotonicFixture('fabric-shared-older-entry-other-call-');
+  const a = await f.open('relay:a');
+  await a.openSession();
+  const first = randomUUID(), second = randomUUID();
+  f.down.add(`/${first}/events`);
+  await assert.rejects(a.postTaskEvent(first, 'started', {}),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  // 11 minutes later another client takes the entry, and its send gets no definite answer.
+  await sharedLater(11, async () => { const c = await f.open('relay:c'); await c.openSession(); });
+  f.down.clear();
+  // An earlier version reads the file: the owner's entry holds the first event and the other client's attempt.
+  const snapshot = await f.read();
+  // The owner's next call sends the first event, then signs the second and keeps it after a 503.
+  f.down.add(`/${second}/events`);
+  await assert.rejects(sharedLater(12, () => a.postTaskEvent(second, 'started', {})),
+    error => error instanceof AgentFabricRequestError && error.status === 503);
+  f.down.clear();
+  const event = f.calls.at(-1)!;
+  assert.ok(event.path.endsWith(`/${second}/events`));
+  // The earlier version writes back the file it read: the owner's entry holds the first event again.
+  await writeFile(f.statePath, JSON.stringify(snapshot));
+  assert.equal(await sharedLater(12, () => sharedOutcome(a.postTaskEvent(second, 'started', {}))), 'accepted');
+  const sent = f.calls.filter(call => call.path === event.path);
+  assert.deepEqual(sent.map(call => [call.messageId, call.sequence, call.idempotencyKey]),
+    [[event.messageId, event.sequence, event.messageId], [event.messageId, event.sequence, event.messageId]],
+    'the kept second event is sent again exactly as signed');
+  assertNoSequenceSignedTwice(f.calls, event.sessionId);
 });
