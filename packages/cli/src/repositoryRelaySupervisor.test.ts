@@ -497,3 +497,107 @@ test('a relay stop releases a loop queued behind a sibling signing hold before t
   } finally { released.resolve(); await stopped; }
   assert.deepEqual({ outcome, signedByB }, { outcome: { b: 'AbortError', a: 'released' }, signedByB: 0 });
 });
+
+// #514: a per-workspace count and short history of loop failures, kept while each later loop succeeds.
+type FailureHistory = { count: number; since: string; entries: Array<Record<string, unknown>> };
+type FailureHistoryApi = {
+  REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT: number;
+  appendRepositoryRelayFailureHistory(previous: unknown, event: Record<string, unknown>,
+    binding: Record<string, unknown>): Record<string, unknown> | null;
+  currentRepositoryRelayFailureHistory(input: Record<string, unknown>): FailureHistory | null;
+  recentRepositoryRelayFailure(history: FailureHistory | null, now?: number): Record<string, unknown> | null;
+};
+function failureHistoryApi() {
+  const api = supervisor as unknown as Partial<FailureHistoryApi>;
+  assert.equal(typeof api.appendRepositoryRelayFailureHistory, 'function', 'the failure history is not kept');
+  return api as FailureHistoryApi;
+}
+const historyStart = Date.parse('2026-11-20T00:00:00.000Z');
+const historyBinding = { organizationId: 'org_a', deviceId: 'device_a', workspaceId: 'a', pid: 50,
+  relayPidMtimeMs: historyStart - 0.5, relayPidCtimeMs: historyStart - 0.25 };
+const failureAt = (minutes: number) => new Date(historyStart + minutes * 60_000).toISOString();
+const failureEvent = (minutes: number, extra: Record<string, unknown> = {}) => ({ workspaceId: 'a',
+  code: 'repository_relay_failed', at: failureAt(minutes), stage: 'task_poll', category: 'unexpected', ...extra });
+function historyOf(events: Record<string, unknown>[], previous: unknown = null) {
+  const api = failureHistoryApi();
+  return events.reduce<unknown>((record, event) => api.appendRepositoryRelayFailureHistory(record, event, historyBinding), previous);
+}
+
+test('the failure history keeps the last 20 failures, a running count and the first failure time', () => {
+  const api = failureHistoryApi();
+  assert.equal(api.REPOSITORY_RELAY_FAILURE_HISTORY_LIMIT, 20);
+  const events = Array.from({ length: 25 }, (_, index) => index % 2
+    ? failureEvent(index, { stage: 'session_open', failureCode: 'connection_identity_store_busy' })
+    : failureEvent(index, { httpStatus: 503, errorCode: 'upstream_unavailable' }));
+  const record = historyOf(events) as { count: number; since: string; entries: unknown[] };
+  assert.equal(record.count, 25);
+  assert.equal(record.since, failureAt(0));
+  assert.equal(record.entries.length, 20);
+  assert.deepEqual(record.entries[0], { at: failureAt(5), stage: 'session_open', failureCode: 'connection_identity_store_busy' });
+  assert.deepEqual(record.entries[19], { at: failureAt(24), stage: 'task_poll', httpStatus: 503, errorCode: 'upstream_unavailable' });
+  const current = api.currentRepositoryRelayFailureHistory({ record, ...historyBinding, now: historyStart + 3_600_000 });
+  assert.deepEqual(current, { count: 25, since: failureAt(0), entries: record.entries });
+  assert.ok(JSON.stringify(record).length < 4096, 'the history stays small however long the relay fails');
+});
+
+test('history entries keep only the time, stage, failure code and safe error class', () => {
+  const canary = 'token-sk-private-canary C:/Users/someone/.secret';
+  const record = historyOf([
+    failureEvent(1, { stage: 'session_open', failureCode: 'connection_identity_store_busy', message: canary, remedy: canary }),
+    failureEvent(2, { failureCode: canary, httpStatus: 700, errorCode: 'has space' }),
+    failureEvent(3, { httpStatus: 429, errorCode: 'ECONNRESET', category: 'policy_boundary' }),
+  ]) as { entries: unknown[] };
+  assert.deepEqual(record.entries, [
+    { at: failureAt(1), stage: 'session_open', failureCode: 'connection_identity_store_busy' },
+    { at: failureAt(2), stage: 'task_poll' },
+    { at: failureAt(3), stage: 'task_poll', httpStatus: 429, errorCode: 'ECONNRESET' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(record), /canary|secret|policy_boundary|unexpected/);
+  const api = failureHistoryApi();
+  for (const event of [{ ...failureEvent(4), stage: 'private-stage' }, { ...failureEvent(4), at: 'not-a-time' },
+    { workspaceId: null, code: 'repository_registry_unavailable', at: failureAt(4) }]) {
+    assert.equal(api.appendRepositoryRelayFailureHistory(record, event, historyBinding), null);
+  }
+});
+
+test('a new relay process or a damaged history starts a fresh count', () => {
+  const previous = historyOf([failureEvent(1), failureEvent(2)]) as Record<string, unknown>;
+  assert.equal(previous.count, 2);
+  for (const stale of [{ ...previous, pid: 49 }, { ...previous, relayPidMtimeMs: 1 }, { ...previous, workspaceId: 'b' },
+    { ...previous, schema: 'foreign' }, { ...previous, entries: [{ at: failureAt(1), stage: 'task_poll', message: 'x' }] },
+    '\0'.repeat(186), null, []]) {
+    const record = historyOf([failureEvent(3)], stale) as { count: number; since: string; entries: unknown[] };
+    assert.deepEqual({ count: record.count, since: record.since, entries: record.entries },
+      { count: 1, since: failureAt(3), entries: [{ at: failureAt(3), stage: 'task_poll' }] });
+  }
+});
+
+test('status reads a failure history only for the current relay process and in its exact form', () => {
+  const api = failureHistoryApi();
+  const record = historyOf([failureEvent(1), failureEvent(2, { httpStatus: 502 })]) as Record<string, unknown>;
+  const input = { record, ...historyBinding, now: historyStart + 3_600_000 };
+  assert.equal(api.currentRepositoryRelayFailureHistory(input)?.count, 2);
+  const entries = record.entries as Record<string, unknown>[];
+  for (const changed of [{ organizationId: 'org_b' }, { deviceId: 'device_b' }, { workspaceId: 'b' }, { pid: 51 },
+    { relayPidMtimeMs: null }, { relayPidCtimeMs: historyBinding.relayPidCtimeMs + 1 },
+    { now: historyStart }, // every entry would be from the future
+    { record: { ...record, count: 1 } }, { record: { ...record, count: 2.5 } }, { record: { ...record, since: 'x' } },
+    { record: { ...record, entries: [] } }, { record: { ...record, entries: Array(21).fill(entries[0]) } },
+    { record: { ...record, entries: [{ ...entries[0], message: 'private' }] } },
+    { record: { ...record, entries: [{ ...entries[0], failureCode: 'C:/private' }] } },
+    { record: { ...record, entries: [{ ...entries[0], stage: 'private' }] } },
+    { record: { ...record, privatePayload: 'x' } }, { record: '\0'.repeat(32) }]) {
+    assert.equal(api.currentRepositoryRelayFailureHistory({ ...input, ...changed }), null, JSON.stringify(changed));
+  }
+});
+
+test('the default status summary names a workspace only for a failure in the last 24 hours', () => {
+  const api = failureHistoryApi();
+  const record = historyOf([failureEvent(0), failureEvent(10, { stage: 'evidence_sync', httpStatus: 503 })]);
+  const history = api.currentRepositoryRelayFailureHistory({ record, ...historyBinding, now: historyStart + 3_600_000 });
+  const latestAt = historyStart + 10 * 60_000;
+  assert.deepEqual(api.recentRepositoryRelayFailure(history, latestAt + 23 * 3_600_000), { count: 2, since: failureAt(0),
+    latest: { at: failureAt(10), stage: 'evidence_sync', httpStatus: 503 } });
+  assert.equal(api.recentRepositoryRelayFailure(history, latestAt + 24 * 3_600_000 + 1), null);
+  assert.equal(api.recentRepositoryRelayFailure(null, latestAt), null);
+});
