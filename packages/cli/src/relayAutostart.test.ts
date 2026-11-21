@@ -763,6 +763,37 @@ test('the generated Windows task action and ownership guard run in real PowerShe
   }
 });
 
+// Waits for a file that a started program writes. conhost may return before its client finishes.
+async function readMarker(path: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { return await readFile(path, 'utf8'); } catch { await new Promise(accept => setTimeout(accept, 100)); }
+  }
+  return null;
+}
+
+test('the registered Windows task action starts the startup script under the real headless console host', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-headless-run-'));
+  const calls: string[] = [];
+  const options = windowsTaskOptions(root, windowsTaskRunner(calls));
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+  const variables = registration.slice(registration.indexOf('$system = '), registration.indexOf('$action = '));
+  const printed = await syntheticTaskRunner({})('powershell.exe', ['-EncodedCommand',
+    Buffer.from(`${variables}[Console]::Out.Write($headlessExecute + '|' + $headlessArguments)`, 'utf16le').toString('base64')]);
+  const [execute, argumentsLine] = printed.stdout.split('|') as [string, string];
+  // The real script starts the relay supervisor; a script that writes a marker takes its place at the same path.
+  const marker = join(root, 'started.txt');
+  await writeFile(join(options.home, 'relay', 'autostart.ps1'),
+    `[System.IO.File]::WriteAllText('${marker.replace(/'/g, "''")}', 'started')\r\nexit 0\r\n`);
+  // Task Scheduler passes the argument text as it is, so the test does too.
+  const result = spawnSync(execute, [argumentsLine], {
+    encoding: 'utf8', timeout: 60_000, windowsHide: true, windowsVerbatimArguments: true, cwd: root,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readMarker(marker), 'started');
+});
+
 test('failed OS registration remains unavailable instead of reporting completion', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-failed-autostart-'));
   const options = {
