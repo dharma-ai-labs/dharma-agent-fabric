@@ -125,7 +125,7 @@ export async function packPreservedDependency(item,root,directory,{read=publicGe
   assert.ok(bytes&&bytes.length<=131072,'bounded immutable artifact required');
   const integrity='sha512-'+createHash('sha512').update(bytes).digest('base64');assert.equal(integrity,item.integrity,'historical artifact integrity mismatch');
   const file=join(directory,filename);writeFileSync(file,bytes,{mode:0o600,flag:'wx'});
-  const tar=(...args)=>execFileSync('tar',args,{timeout:15000,maxBuffer:4194304,stdio:['ignore','pipe','pipe'], windowsHide: true});
+  const tar=(...args)=>execFileSync('tar',args,{timeout:15000,maxBuffer:4194304,stdio:['ignore','pipe','pipe']});
   const entries=tar('-tzf',file).toString('utf8').trim().split(/\r?\n/);
   assert.ok(entries.length>0&&entries.length<1000&&new Set(entries).size===entries.length,'bounded unique archive entries required');
   assert.ok(entries.every(p=>p.startsWith('package/')&&!p.includes('\\')&&!p.split('/').includes('..')&&!p.includes('\0')),'unsafe archive entry');
@@ -153,11 +153,11 @@ async function publicGet(url,json=true,timeout=30000){
 
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url){
   const root=resolve(import.meta.dirname,'..');let directory;
-  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:8388608, windowsHide: true}).trim();
+  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:8388608}).trim();
   const text=p=>readFileSync(join(root,p),'utf8'),json=p=>JSON.parse(text(p));
   const baseline=p=>JSON.parse(git('show',release.baseline.commit+':'+p));
   const npm=(...args)=>{assert.ok(process.env.npm_execpath,'normal npm execution required');
-    return execFileSync(process.execPath,[process.env.npm_execpath,...args],{cwd:root,encoding:'utf8',timeout:120000,maxBuffer:8388608,stdio:['ignore','pipe','pipe'], windowsHide: true});};
+    return execFileSync(process.execPath,[process.env.npm_execpath,...args],{cwd:root,encoding:'utf8',timeout:120000,maxBuffer:8388608,stdio:['ignore','pipe','pipe']});};
   const result=await runSigningCommand(process.argv.slice(2),{
     verifySource:async head=>{
       git('merge-base','--is-ancestor',release.baseline.commit,'HEAD');

@@ -18,6 +18,15 @@ const skippedDirectories = new Set(['node_modules', 'dist', 'coverage', '.dharma
 const childProcessModules = new Set(['child_process', 'node:child_process']);
 const processFunctions = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']);
 
+// Release publishers whose exact text is pinned by SHA-256 in the publication
+// workflows. They run only on Linux release runners, where windowsHide has no
+// effect, and any edit changes the reviewed publisher pin.
+export const pinnedPublishers = new Set([
+  'scripts/publish-device-maintenance.mjs',
+  'scripts/publish-security-recovery.mjs',
+  'scripts/publish-signing-upgrade.mjs',
+]);
+
 export function listSourceFiles(repository, roots = scannedRoots) {
   const files = [];
   const walk = (directory) => {
@@ -227,11 +236,11 @@ export function findMissingWindowsHide(sourceText, fileName = 'source.ts') {
 export function scanRepository(repository) {
   const findings = [];
   for (const file of listSourceFiles(repository)) {
+    const path = relative(repository, file).split(sep).join('/');
+    if (pinnedPublishers.has(path)) continue;
     const text = readFileSync(file, 'utf8');
     if (!text.includes('child_process')) continue;
-    for (const finding of findMissingWindowsHide(text, file)) {
-      findings.push({ file: relative(repository, file).split(sep).join('/'), ...finding });
-    }
+    for (const finding of findMissingWindowsHide(text, file)) findings.push({ file: path, ...finding });
   }
   return findings;
 }

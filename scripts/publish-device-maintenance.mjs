@@ -113,10 +113,10 @@ async function publicGet(value,{json=true,timeout=30000}={}){
 }
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url){
   const root=resolve(import.meta.dirname,'..');let directory;
-  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:8*1024*1024, windowsHide: true}).trim();
+  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:8*1024*1024}).trim();
   const npm=(...args)=>{assert.ok(process.env.npm_execpath,'invoke packaging through npm');
     return execFileSync(process.execPath,[process.env.npm_execpath,...args],{cwd:root,encoding:'utf8',
-      stdio:['ignore','pipe','pipe'],timeout:120000,maxBuffer:8*1024*1024, windowsHide: true}).trim();};
+      stdio:['ignore','pipe','pipe'],timeout:120000,maxBuffer:8*1024*1024}).trim();};
   const baseline=maintenanceBaseline.commit,hashFile=path=>textHash(readFileSync(join(root,path),'utf8'));
   const result=await runMaintenanceCommand(process.argv.slice(2),{
     verifySource:async expected=>{

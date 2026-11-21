@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { findMissingWindowsHide, scanRepository } from './verify-windows-hide.mjs';
+import { findMissingWindowsHide, pinnedPublishers, scanRepository } from './verify-windows-hide.mjs';
 
 // On Windows a console child started without `windowsHide: true` from a process
 // that has no console (a background agent, a scheduled task, the relay
@@ -13,6 +13,17 @@ const lines = (source, fileName) => findMissingWindowsHide(source, fileName).map
 test('every child process started from apps, packages, plugins and scripts hides its window', () => {
   const missing = scanRepository(repository).map(({ file, line, kind, name, text }) => `${file}:${line}: ${kind} ${name}: ${text}`);
   assert.deepEqual(missing, []);
+});
+
+test('only release publishers pinned by hash in a Linux publication workflow are exempt', () => {
+  const workflows = ['publish.yml', 'publish-security-recovery.yml', 'publish-signing-upgrade.yml']
+    .map((name) => readFileSync(resolve(repository, '.github/workflows', name), 'utf8'));
+  for (const path of pinnedPublishers) {
+    const pinning = workflows.filter((text) => text.includes(path.replace('scripts/', '')) && /_PUBLISHER_SHA256:\s*[a-f0-9]{64}/.test(text));
+    assert.ok(pinning.length > 0, `${path} is not hash-pinned by a publication workflow`);
+    assert.ok(pinning.every((text) => /runs-on:\s*ubuntu-latest/.test(text) && !/runs-on:\s*windows/.test(text)), `${path} may run on Windows`);
+  }
+  assert.equal(pinnedPublishers.size, 3);
 });
 
 test('the guard runs as part of npm run check', () => {
