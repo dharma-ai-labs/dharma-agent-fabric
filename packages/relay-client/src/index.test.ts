@@ -2522,7 +2522,7 @@ test('a stale action acknowledgement is re-signed only by its owner, in its own 
   assert.ok(next.sequence > resigned.sequence, 'the owner signs its next request above the re-signed one');
 });
 
-test('a running owner never signs a sequence again after another client re-signed its acknowledgement and the answer left the file (shared protocol state)', async () => {
+test('a running owner never signs a sequence again after another client took its stale acknowledgement and wrote no answer (shared protocol state)', async () => {
   const f = await sharedMonotonicFixture('fabric-shared-resign-adopted-');
   const a = await f.open(), b = await f.open();
   await a.openSession();
@@ -2532,13 +2532,11 @@ test('a running owner never signs a sequence again after another client re-signe
   await assert.rejects(a.postActionEnforcement('33333333-3333-4333-8333-333333333333', acknowledgement),
     error => error instanceof AgentFabricRequestError && error.status === 503);
   const kept = f.calls.at(-1)!;
-  // The entry stood unchanged long enough: another client's session open sends it, re-signed in the owner's session.
+  // The entry stood unchanged long enough: another client's session open takes it and drops the stale acknowledgement
+  // unsent, since it cannot be sent as signed and only its owner signs in the owner's session.
   await sharedLater(11, async () => { const c = await f.open(); await c.openSession(); });
-  const adopted = f.calls.filter(call => call.path === kept.path);
-  assert.equal(adopted.length, 2);
-  assert.equal(adopted[1]!.sessionId, kept.sessionId);
-  assert.ok(adopted[1]!.sequence > kept.sequence);
-  // Later, another client's write drops the kept answer.
+  assert.equal(f.calls.filter(call => call.path === kept.path).length, 1, 'the other client signs nothing in the owner\'s session');
+  // Later, another client writes; no answer is in the file.
   await sharedLater(22, () => b.pollTask());
   assert.ok(!Object.values((await f.read()).outboxes ?? {}).some(entry => entry.adoptedOutcome));
   const retry = await sharedLater(22, () => a.postActionEnforcement('33333333-3333-4333-8333-333333333333', acknowledgement))
@@ -2552,8 +2550,8 @@ test('a running owner never signs a sequence again after another client re-signe
   assert.equal(retry, 'accepted', 'the owner gets no out-of-order refusal');
 });
 
-// Owner review round 1: the same holds when the idle cap evicted the owner's entry, not only when its answer expired.
-test('a running owner never signs a sequence again after another client re-signed its acknowledgement and the idle cap evicted its entry (shared protocol state)', async () => {
+// Owner review round 1: the same holds when the idle cap evicted the owner's entry, not only when no answer was written.
+test('a running owner never signs a sequence again after another client took its stale acknowledgement and the idle cap evicted its entry (shared protocol state)', async () => {
   const f = await sharedMonotonicFixture('fabric-shared-resign-evicted-');
   const a = await f.open(), b = await f.open();
   await a.openSession();
@@ -2564,12 +2562,10 @@ test('a running owner never signs a sequence again after another client re-signe
   await assert.rejects(a.postActionEnforcement(decisionId, acknowledgement),
     error => error instanceof AgentFabricRequestError && error.status === 503);
   const kept = f.calls.at(-1)!;
-  // The entry stood unchanged long enough: another client's session open sends it, re-signed in the owner's session.
+  // The entry stood unchanged long enough: another client's session open takes it and drops the stale acknowledgement
+  // unsent, since it cannot be sent as signed and only its owner signs in the owner's session.
   await sharedLater(11, async () => { const c = await f.open(); await c.openSession(); });
-  const adopted = f.calls.filter(call => call.path === kept.path);
-  assert.equal(adopted.length, 2);
-  assert.equal(adopted[1]!.sessionId, kept.sessionId);
-  assert.ok(adopted[1]!.sequence > kept.sequence);
+  assert.equal(f.calls.filter(call => call.path === kept.path).length, 1, 'the other client signs nothing in the owner\'s session');
   // Newer idle entries of other live clients fill the idle cap, so the next write evicts the owner's entry while
   // its answer would still be kept.
   const state = await f.read();
@@ -3743,7 +3739,7 @@ test('acknowledging a listed receipt that the file still keeps in another client
 const sharedOutcome = (promise: Promise<unknown>) => promise.then(() => 'accepted',
   (error: unknown) => error instanceof AgentFabricRequestError ? error.status : (error as Error).message);
 
-test('an owner whose entry left with the removed file after another client re-signed its acknowledgement never signs a sequence again (shared protocol state)', async () => {
+test('an owner whose entry left with the removed file after another client took its stale acknowledgement never signs a sequence again (shared protocol state)', async () => {
   const f = await sharedMonotonicFixture('fabric-shared-removed-resigned-');
   const a = await f.open(), b = await f.open();
   await a.openSession();
@@ -3754,11 +3750,10 @@ test('an owner whose entry left with the removed file after another client re-si
   await assert.rejects(a.postActionEnforcement(decisionId, acknowledgement),
     error => error instanceof AgentFabricRequestError && error.status === 503);
   const kept = f.calls.at(-1)!;
-  // The entry stood unchanged long enough: another client's session open sends it, re-signed in the owner's session.
+  // The entry stood unchanged long enough: another client's session open takes it and drops the stale acknowledgement
+  // unsent, since it cannot be sent as signed and only its owner signs in the owner's session.
   await sharedLater(11, async () => { const c = await f.open(); await c.openSession(); });
-  const adopted = f.calls.filter(call => call.path === kept.path);
-  assert.equal(adopted.length, 2);
-  assert.ok(adopted[1]!.sequence > kept.sequence);
+  assert.equal(f.calls.filter(call => call.path === kept.path).length, 1, 'the other client signs nothing in the owner\'s session');
   await rm(f.statePath, { force: true });
   const retry = await sharedLater(12, () => sharedOutcome(a.postActionEnforcement(decisionId, acknowledgement)));
   assertNoSequenceSignedTwice(f.calls, kept.sessionId);
@@ -3926,7 +3921,7 @@ const sharedEarlierAcknowledgement = (deviceId: string, sessionId: string, seque
       'x-dharma-nonce': 'earlier-nonce', 'x-dharma-sequence': String(sequence), 'x-dharma-signature': 'earlier-signature' } };
 };
 
-test('a kept request of an earlier version that still runs is sent by another client only after it stood unchanged for 10 minutes, never at a sequence that version signed (shared protocol state)', async () => {
+test('a kept request of an earlier version that still runs is taken by another client only after it stood unchanged for 10 minutes, and a stale acknowledgement is never signed again (shared protocol state)', async () => {
   const f = await sharedMonotonicFixture('fabric-shared-earlier-live-');
   const session = randomUUID(), key = randomUUID();
   const inSession = () => f.calls.filter(call => call.sessionId === session);
@@ -3944,8 +3939,8 @@ test('a kept request of an earlier version that still runs is sent by another cl
   await sharedLater(11, async () => { const c = await f.open('relay:c'); await c.openSession(); });
   assert.equal(inSession().length, 1, 'its new signature restarts the 10 minutes');
   await sharedLater(20, async () => { const d = await f.open('relay:d'); await d.openSession(); });
-  assert.equal(inSession().length, 2, 'once the earlier version is gone, another client sends it');
-  assert.ok(inSession()[1]!.sequence > 3, 'above every sequence the earlier version signed');
+  assert.equal(inSession().length, 1, 'once the earlier version is gone, another client drops the stale acknowledgement unsent');
+  assert.deepEqual(keptMessageIds(await f.read()), []);
   assertNoSequenceSignedTwice(f.calls, session);
 });
 

@@ -155,8 +155,11 @@ refusal without signing the call again. Only an answer whose body is a JSON
 object is kept. When no answer is there (any other answer, or one removed
 after its 10 minutes), the owner sends the request it signed again, with the
 same message id and idempotency key; it never signs that call again. Only an
-action acknowledgement older than 8 minutes is signed again, with a new message
-id, at a sequence above every one already used in its session. The
+action acknowledgement older than 8 minutes is signed again, by its owner only,
+with a new message id, at a sequence above every one already used in its
+session. Another client sends a kept request only exactly as signed and drops
+such an acknowledgement unsent, so it never signs in another client's session;
+an owner that still runs keeps its own copy and signs it again. The
 client records each such send in
 the file before it starts, so a request without a definite answer, including
 one whose sender stopped during the send, stays in the file and is sent again
@@ -181,8 +184,12 @@ still finds the answer. At most 32 entries without a kept request stay, the
 newest first, in the room the kept requests leave. When the entry of an owner
 that still runs leaves the file while it keeps a request (the idle cap removed
 it after another client answered it, an earlier version rewrote the file, or
-the file was removed), or comes back without that request (an earlier version
-writes back the whole file it read when it opened), the file no longer shows whether another client sent
+the file was removed), comes back holding another request, or no request and no
+other client's attempt (an earlier version writes back the whole file it read
+when it opened), or shows that an
+earlier version signed in the owner's session after the request was kept (it
+sent the copy at the top level of the file and wrote back a higher next
+sequence), the file no longer shows whether another client sent
 that request, nor which sequences were signed in the owner's session. The owner
 then sends its kept request again only exactly as signed, with the same message
 id, sequence and idempotency key. It drops unsent a request that could be sent

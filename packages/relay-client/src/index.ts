@@ -242,6 +242,14 @@ function outboxesOf(state: ProtocolState): Record<string, OutboxEntry> {
     }
     if (copied) break;
   }
+  // An earlier version that sent the top-level copy writes its session and next sequence back to the top level. That
+  // next sequence is above every sequence it signed in that session, so the entry of the session takes it, and its
+  // owner then sees that a sequence it does not know was signed there (see #reloadSharedState).
+  for (const [owner, entry] of Object.entries(outboxes)) {
+    if (state.sessionId && entry.sessionId === state.sessionId && state.nextSequence > entry.nextSequence) {
+      outboxes[owner] = {...entry, nextSequence: state.nextSequence};
+    }
+  }
   if (pending && !copied && !isExplicitlyRebuiltPath(pending.pathname) && !isSessionOpen(pending)) {
     const session = pending.headers['x-dharma-session-id'] || state.sessionId || '';
     const key = `migrated:${/^[A-Za-z0-9_-]{1,128}$/.test(session) ? session : sha256(session).slice(0, 32)}`;
@@ -1495,8 +1503,10 @@ export class AgentFabricClient {
       const {[ownerKey]: own, ...others} = outboxesOf(parsed);
       otherOutboxes = others;
       keptOnDisk = !!own?.pending;
-      // A request an earlier client with this owner key wrote back after its entry left the file is sent only as signed.
-      sequenceFloorLost = !!own?.pending && own.asSignedOnly === true;
+      // A request an earlier client with this owner key wrote back after its entry left the file is sent only as signed,
+      // as is one in a session an earlier version signed in after it was kept (see outboxesOf).
+      sequenceFloorLost = !!own?.pending && (own.asSignedOnly === true
+        || own.nextSequence > Number(own.pending.headers['x-dharma-sequence'] || 0));
       state = {
         schema: 'dharma.protocol-state/v1', sessionId: own?.sessionId ?? null, nextSequence: own?.nextSequence ?? 1,
         pending: own?.pending ?? null, recoveredTaskCompletions: parsed.recoveredTaskCompletions ?? [],
@@ -1767,16 +1777,18 @@ export class AgentFabricClient {
       if (waiting?.length) entry.keptCompletions = waiting; else delete entry.keptCompletions;
     }
     this.#state.recoveredTaskCompletions = merged;
-    // This client's kept request left the file, although no write by this client drops one. Another client may have
-    // sent it, and may have re-signed it at a higher sequence in this session, before its entry was removed (by the
-    // idle cap, by an earlier version that rewrote the file without outboxes, or with the file) or came back in an
-    // older state (an earlier version writes back the whole file it read when it opened). The file no longer shows
-    // whether anyone sent it, nor which sequences were signed in this session. So this client keeps the request and
+    // This client's kept request left the file, although no write by this client drops one: its entry was removed (by
+    // the idle cap, by an earlier version that rewrote the file without outboxes, or with the file), or came back in an
+    // older state (an earlier version writes back the whole file it read when it opened) that holds another call, or no
+    // request and no other client's attempt. Or an earlier version signed in this session after the request was kept:
+    // the entry then shows a next sequence above this client's (see outboxesOf). Another client or an earlier version
+    // may have sent it, and an earlier version may have signed in this session. The file no longer shows which
+    // sequences were signed there. So this client keeps the request and
     // sends it again only exactly as signed, signs nothing new in this session, and then closes it (see
     // #sendKeptAsSigned), which writes the request back to the file, marked so, before it sends it.
     const kept = this.#state.pending;
-    if (kept && this.#keptOnDisk && (!own || (!own.adoptedAt
-      && own.pending?.headers['x-dharma-message-id'] !== kept.headers['x-dharma-message-id']))) {
+    if (kept && this.#keptOnDisk && (!own || (own.pending
+      ? !sameKeptRequest(own.pending, kept) || own.nextSequence > this.#state.nextSequence : !own.adoptedAt))) {
       this.#sequenceFloorLost = true;
       this.#keptOnDisk = false;
       // The same call can still be in the file: its top-level copy, moved to a migrated entry, or as an earlier version
@@ -1796,7 +1808,7 @@ export class AgentFabricClient {
     // answer is not there (never kept, or removed after ORPHAN_RETRY_INTERVAL_MS), this client keeps its signed
     // request, so a retry sends it again with the same message id and idempotency key instead of signing the call again.
     // The file's next sequence counts any sequence the other client signed in this session, so none is signed again.
-    if (own?.adoptedAt && this.#state.pending) {
+    else if (own?.adoptedAt && this.#state.pending) {
       const signed = this.#state.pending;
       const outcome = own.adoptedOutcome;
       const answered = !own.pending && !!outcome && outcome.messageId === signed.headers['x-dharma-message-id'];
@@ -1818,8 +1830,9 @@ export class AgentFabricClient {
    * An answered entry keeps no request; it holds the answer only when its owner may still read it (a workspace loop, or a process
    * that still runs), so a live owner takes the outcome from the file, and #persist drops that answer after
    * ORPHAN_RETRY_INTERVAL_MS. A request without a definite answer stays and is due again after
-   * ORPHAN_RETRY_INTERVAL_MS. A re-signed request keeps its owner's session. While more are due, this client's next
-   * request sends the next one. An orphaned request only its owner can use is dropped without sending. */
+   * ORPHAN_RETRY_INTERVAL_MS. An orphan is sent only exactly as signed, so this client never signs in another client's
+   * session; a stale action acknowledgement is dropped unsent. While more are due, this client's next request sends
+   * the next one. An orphaned request only its owner can use is dropped without sending. */
   async #adoptOrphans(): Promise<void> {
     const now = Date.now();
     this.#orphansDueAt = now + ORPHAN_RETRY_INTERVAL_MS;
@@ -1998,15 +2011,17 @@ export class AgentFabricClient {
         throw new Error('Stale action acknowledgement is invalid and was discarded.');
       }
       if (acknowledgementTimeStale(acknowledgement.acknowledgedAt, Date.now())
-        && (slot === this.#state ? this.#sequenceFloorLost : (slot as Partial<OutboxEntry>).asSignedOnly === true)) {
-        // Sent only as signed (see OutboxEntry.asSignedOnly): nothing new is signed in that session.
+        && (slot !== this.#state || this.#sequenceFloorLost)) {
+        // Only its owner signs in a session, and only while it knows every sequence signed there: another client sends
+        // an orphan only exactly as signed, as does an owner whose entry left the file (see #reloadSharedState). A stale
+        // acknowledgement cannot be sent so, and is dropped unsent. A live owner keeps its own copy and re-signs it.
         slot.pending = null;
         await this.#persist();
         throw new Error('Stale action acknowledgement can be sent only as signed and was discarded.');
       }
       if (acknowledgementTimeStale(acknowledgement.acknowledgedAt, Date.now())) {
         const refreshed = refreshActionDecisionAcknowledgement(acknowledgement);
-        // Above every sequence used in this session, including one another client signed when it sent this entry.
+        // Above every sequence used in this session, including one an earlier version signed when it sent this entry.
         const sequence = Math.max(Number(pending.headers['x-dharma-sequence'] || 0) + 1, slot.nextSequence);
         const timestamp = new Date().toISOString();
         const messageId = randomUUID();
