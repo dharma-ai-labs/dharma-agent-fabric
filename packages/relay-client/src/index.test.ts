@@ -4489,3 +4489,41 @@ test('each hold of signing control makes at most one network send while another 
     assert.equal(keptMessageIds(await f.read()).length, 255, 'one orphan made room and the call was answered');
   } finally { await waiter.stop(); }
 });
+
+// Owner review: a 2xx answer whose JSON body is null (or false, 0, "") is the caller's answer. It is never read as a
+// hold that ended after another kept request was sent first, so the call is signed and sent once, directly and in a
+// hold of the admission line.
+test('a 2xx answer with a falsy JSON body is the call\'s answer: one signed request and one network send, directly and per send (shared protocol state)', async () => {
+  for (const [answer, value] of [['null', null], ['false', false], ['0', 0], ['""', '']] as const) {
+    for (const perSend of [false, true]) {
+      const name = `${answer}${perSend ? ' per send' : ''}`;
+      let sends = 0;
+      const f = await sharedStateFixture('fabric-shared-falsy-answer-', call => {
+        if (call.path !== '/agent-fabric/workspaces') return sharedOk();
+        // The cap stands in for a loop that would otherwise sign and send the same call again without end.
+        if (++sends > 3) throw new Error('send cap reached');
+        return new Response(answer, { status: 200 });
+      });
+      const client = await f.open();
+      await client.openSession();
+      let settled = 0;
+      const call = () => client.signedPost('/agent-fabric/workspaces', { workspaceId: 'w' });
+      const outcome = await (perSend ? withSigningControlPerSend({ config: client.config }, call) : call())
+        .then(result => ({ value: result as unknown }), error => ({ error: (error as Error).message }))
+        .finally(() => { settled += 1; });
+      const workspaceSends = f.calls.filter(item => item.path === '/agent-fabric/workspaces');
+      assert.equal(workspaceSends.length, 1, `${name}: the call is sent once`);
+      assert.equal(new Set(workspaceSends.flatMap(item => [item.messageId, item.idempotencyKey])).size, 1,
+        `${name}: under one message id and idempotency key`);
+      assert.deepEqual(outcome, { value }, `${name}: the caller gets that answer`);
+      assert.equal(settled, 1, `${name}: once`);
+      assert.deepEqual(keptMessageIds(await f.read()), [], `${name}: and nothing stays kept to send again`);
+      // The next call is signed in the same session at the next sequence, and sent once.
+      await client.pollTask();
+      const poll = f.calls.at(-1)!;
+      assert.deepEqual([poll.path, poll.sessionId, poll.sequence],
+        ['/agent-fabric/tasks/poll', workspaceSends[0]!.sessionId, workspaceSends[0]!.sequence + 1], name);
+      await sharedSettled(f.config);
+    }
+  }
+});
