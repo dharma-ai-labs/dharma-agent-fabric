@@ -46,7 +46,7 @@ import { superviseRelay } from './relaySupervisor.js';
 import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureReceipt } from './relayChildFailure.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
-  repositoryRelayFailureReceipt, repositoryRelayTimestampMs, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+  repositoryRelayFailureReceipt, repositoryRelayTimestampMs, retrySigningControlBusy, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
 import { relayOpenFailureRemedyForHost } from './relayOpenFailure.js';
 import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, startupPreflightFailure, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
@@ -638,6 +638,7 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
   fabric: AgentFabricClient,
 ) {
   const providers = await providerCapabilitiesForWorkspacePolicy(null);
+  const telemetry = await relayAutostartReport();
   return withWorkspacePolicySyncOrder(fabric, workspaceId, async () => {
     const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
     if (!item) throw new Error('Content transmission workspace is not registered locally.');
@@ -653,7 +654,7 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
     if (current.organizationId !== item.organizationId) {
       throw new Error('Workspace policy organization does not match registration.');
     }
-    await syncWorkspacePolicyHoldingRefreshLock(fabric, item, current.revision, true, providers);
+    await syncWorkspacePolicyHoldingRefreshLock(fabric, item, current.revision, true, providers, telemetry);
     return loadVerifiedWorkspacePolicy(policyPath, workspaceId);
   });
 }
@@ -5996,12 +5997,14 @@ async function syncWorkspacePolicy(
   providerIds: ProviderId[] | null = null,
 ) {
   const providers = await providerCapabilitiesForWorkspacePolicy(providerIds);
+  const telemetry = await relayAutostartReport();
   return withWorkspacePolicySyncOrder(fabric, item.workspaceId,
-    () => syncWorkspacePolicyHoldingRefreshLock(fabric, item, policyRevision, apply, providers));
+    () => syncWorkspacePolicyHoldingRefreshLock(fabric, item, policyRevision, apply, providers, telemetry));
 }
 
-// Provider probes spawn up to six blocking commands, so they run before either lock
-// of a policy sync. A slow CLI must not stall every signed request on this device.
+// Provider probes spawn up to six blocking commands, and the relay autostart report can
+// start PowerShell, systemctl or launchctl, so both run before either lock of a policy
+// sync. A slow command must not stall every signed request on this device.
 async function providerCapabilitiesForWorkspacePolicy(providerIds: ProviderId[] | null) {
   return receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters(providerIds).map(async (adapter) => (await relayProviderCapability(adapter)).capability)),
@@ -6027,13 +6030,14 @@ async function syncWorkspacePolicyHoldingRefreshLock(
   policyRevision: string,
   apply: boolean,
   providers: ProviderCapability[],
+  telemetry: DeviceTelemetryOptions,
 ) {
   const response = await fabric.registerWorkspace({
     workspaceId: item.workspaceId, name: item.name, routeHash: item.routeHash,
     repositoryRemoteHash: item.repositoryRemoteHash, defaultBranch: item.defaultBranch,
     repositoryAgentId: item.repositoryAgentId,
     policyRevision, providers,
-  }, await relayAutostartReport());
+  }, telemetry);
   const canonical = reconcileWorkspaceRegistration(await registry(), item, response);
   const generated = await materializeWorkspacePolicy({
     workspace: canonical.path,
@@ -9234,7 +9238,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   const verifiedPolicy = await withRepositoryRelayStage('policy_verification',
     () => loadVerifiedWorkspacePolicyUnlessReplayAhead(policyPath, canonicalWorkspace.workspaceId));
   signal.throwIfAborted();
-  const fabric = await withRepositoryRelayStage('session_open', async () => client(await relayAutostartReport()));
+  const fabric = await withRepositoryRelayStage('session_open', async () => {
+    const telemetry = await relayAutostartReport();
+    return retrySigningControlBusy(() => client(telemetry), { signal });
+  });
   // The first poll receipt can follow a long task, so status needs this earlier success.
   await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', canonicalWorkspace.workspaceId,
     'last-session-open.json'), { at: new Date().toISOString() }).catch(() => undefined);
