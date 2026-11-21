@@ -1,5 +1,5 @@
 import {AsyncLocalStorage} from 'node:async_hooks';
-import {withDeviceSigningControl, type AgentFabricClient} from '@dharma-ai-labs/agent-fabric-relay-client';
+import {withDeviceSigningControl, withSigningControlPerSend, type AgentFabricClient} from '@dharma-ai-labs/agent-fabric-relay-client';
 
 type SigningControlInput = Parameters<typeof withDeviceSigningControl>[0];
 
@@ -15,12 +15,14 @@ export function withClientSigningControl<T>(input: SigningControlInput, work: ()
  * signing lock timeout fails the waiter. Each request here takes the control before it
  * enters that queue. The line keeps the queue's order on one client and gives each
  * waiter its full lock timeout once it is next. A holder skips the line, because a
- * waiter ahead of it there cannot move until the holder finishes. */
+ * waiter ahead of it there cannot move until the holder finishes. Each hold the line
+ * takes covers at most one network send: when a request first sends another kept
+ * request, it hands the hold back and takes a fresh one, still first in this line. */
 export function admitSignedRequests(fabric: AgentFabricClient, hostScope?: SigningControlInput['hostScope']) {
   const {signedGet, signedPost} = fabric;
   let line: Promise<unknown> = Promise.resolve();
   const admit = <T>(request: () => Promise<T>) => {
-    const underControl = () => withDeviceSigningControl({config: fabric.config, hostScope}, request);
+    const underControl = () => withSigningControlPerSend({config: fabric.config, hostScope}, request);
     if (holdingControl.getStore()) return underControl();
     const turn = line.then(underControl);
     line = turn.catch(() => undefined);

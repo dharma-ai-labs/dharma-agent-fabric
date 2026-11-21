@@ -24,8 +24,9 @@ import {HostOperationFence, type HostOperationScope} from './hostOperationScope.
 import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRecoveryJournalIO} from './signingRecoveryJournal.js';
 import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 import {planSigningRecovery} from './signingRecoveryPlan.js';
-import {outsideDeviceSigningControl,withDeviceSigningControl} from './deviceSigningControl.js';
-export {withDeviceSigningControl,withDeviceSigningLineSignal,type DeviceSigningControlLease} from './deviceSigningControl.js';
+import {handBackDeviceSigningControl,outsideDeviceSigningControl,withDeviceSigningControl} from './deviceSigningControl.js';
+export {withDeviceSigningControl,withDeviceSigningLineSignal,withSigningControlPerSend,type DeviceSigningControlLease}
+  from './deviceSigningControl.js';
 export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 export {progressPreparedDeviceSigningRecoveryOffer,SigningRecoveryOfferClientError,
   type ProgressPreparedDeviceSigningRecoveryOfferInput,type SigningRecoveryOfferClientPhase} from './signingRecoveryOfferClient.js';
@@ -217,7 +218,8 @@ function assertProtocolState(value: unknown): asserts value is ProtocolState {
 }
 
 /** Every outbox entry of a file. The kept request of an earlier single-slot file becomes an orphan keyed by its
- * session, sent once by a later session open; a request that is always rebuilt is dropped as before. Such an entry has
+ * session; a request that is always rebuilt is dropped as before. Once due, it can be sent only signed again, which
+ * only the earlier process could do, so it is settled unsent (see ownerOnlyEntry). Such an entry has
  * no owner process, so it counts as unchanged from when its request was last signed or stamped: an earlier version
  * that still runs keeps 10 minutes to send its own request (see orphanDue). A top-level request with the message id of
  * an entry's kept request is that entry's copy (see #persist), not another orphan. The top-level session and next
@@ -245,6 +247,16 @@ const ACTION_ACKNOWLEDGEMENT_PATH = /\/agent-fabric\/decisions\/[^/]+\/enforceme
 function acknowledgementTimeStale(acknowledgedAt: string, now: number): boolean {
   const at = Date.parse(acknowledgedAt);
   return !Number.isFinite(at) || now - at > 8 * 60_000 || at > now + 5 * 60_000;
+}
+
+/** A kept request signed longer ago than this is sent again only with a new time and signature: the server refuses a
+ * signature more than 5 minutes old. Only its owner signs it again (see #sendPendingWithSigningControl). */
+const SIGNATURE_SENDABLE_MS = 4 * 60_000;
+
+/** Whether a kept request's signature is too old to send it again exactly as signed. */
+function signatureTooOld(pending: PendingRequest, now: number): boolean {
+  const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] ?? '');
+  return !Number.isFinite(signedAt) || now - signedAt > SIGNATURE_SENDABLE_MS;
 }
 
 /** Whether a kept request can be sent again only with a new signature at a new sequence, or not at all: a
@@ -298,9 +310,11 @@ function orphanDue(owner: string, entry: OutboxEntry, now: number): boolean {
     || (owner.startsWith('cli:') && !ownerProcessAlive(entry.ownerPid));
 }
 
-/** A kept request another client never sends: one only its owner can use, or one that could be sent only signed again. */
+/** A kept request another client never sends: one only its owner can use, or one that could be sent only signed again,
+ * including one whose signature is too old to send exactly as signed. Another client sends a kept request only byte for
+ * byte as signed. */
 function ownerOnlyEntry(entry: OutboxEntry, now: number): boolean {
-  return isOwnerOnlyRequest(entry.pending!) || cannotResendAsSigned(entry.pending!, now);
+  return isOwnerOnlyRequest(entry.pending!) || cannotResendAsSigned(entry.pending!, now) || signatureTooOld(entry.pending!, now);
 }
 
 /** Whether an entry's owner can never come back: a command that exited, or an entry moved from an earlier version's file. */
@@ -1689,7 +1703,17 @@ export class AgentFabricClient {
     const event = method === 'POST' && /^\/agent-fabric\/tasks\/[^/]+\/events$/.test(route)
       ? (body as { eventType?: unknown } | null)?.eventType : undefined;
     if (event === 'completed' || event === 'failed' || event === 'cancelled') taskLeases.delete(this);
-    const result = await this.#withProtocolState(() => this.#signedRequestWithSigningControl(method, route, body));
+    // Each hold of signing control makes at most one network send. When another kept request is sent first (this
+    // client's own earlier call, or a due orphan that makes room in a full file), that hold ends there, and the caller's
+    // request is signed in a fresh hold, from a fresh read of the file, behind every caller that waited meanwhile. Under
+    // the admission line the line's hold is handed back (see withSigningControlPerSend); a caller that holds signing
+    // control itself across its calls keeps it.
+    let result: Record<string, unknown> | null;
+    for (;;) {
+      result = await this.#withProtocolState(() => this.#signedRequestWithSigningControl(method, route, body));
+      if (result) break;
+      handBackDeviceSigningControl();
+    }
     if (method === 'POST' && route === '/agent-fabric/sessions') this.#sessionAccepted = true;
     if (!this.#durable) return result;
     if (route === '/agent-fabric/tasks/poll' && result.task && typeof result.task === 'object') {
@@ -1838,8 +1862,9 @@ export class AgentFabricClient {
    * session. While more are due, this client's next request sends the next one. A kept request only its owner can use
    * (see isOwnerOnlyRequest), or one that could be sent only signed again (see cannotResendAsSigned), is never sent by
    * another client: it stays in its entry while its owner can come back (a workspace loop that restarts, or a process
-   * that still runs), and is settled unsent once that owner is gone (a command that exited, or a migrated entry). */
-  async #adoptOrphans(): Promise<void> {
+   * that still runs), and is settled unsent once that owner is gone (a command that exited, or a migrated entry).
+   * Returns whether it sent one. */
+  async #adoptOrphans(): Promise<boolean> {
     const now = Date.now();
     const due = Object.entries(this.#otherOutboxes).filter(([owner, entry]) => orphanDue(owner, entry, now));
     const ownerOnly = (entry: OutboxEntry) => ownerOnlyEntry(entry, now);
@@ -1875,9 +1900,17 @@ export class AgentFabricClient {
       if (entry.pending) break;
     }
     if (unwritten) await this.#persist();
+    return sent > 0;
   }
 
-  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
+  /** The call a due orphan was just sent to make room for in a full file. Its next hold signs it without sending
+   * another orphan first, so a file that is still full refuses it, as before. */
+  #madeRoomFor: string | null = null;
+
+  /** One hold's part of a signed request: it makes at most one network send. It returns the caller's answer, or null
+   * after it sent another kept request first (this client's own earlier call, or a due orphan that makes room in a full
+   * file); the caller's request is then signed in a hold of its own. */
+  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown> | null> {
     await this.#assertHostScope();
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
     // An acknowledgement this client took over waits for its new session (see openSession). Until the server accepted
@@ -1918,8 +1951,20 @@ export class AgentFabricClient {
         && this.#state.pending.pathname === pathname
         && this.#state.pending.body === serialized;
       const recovered = await this.#sendPendingWithSigningControl(this.#state);
-      // Recovery acknowledges only its original caller's request identity.
-      if (sameRequest) return recovered;
+      // Recovery acknowledges only its original caller's request identity. Another call is signed in a hold of its own.
+      return sameRequest ? recovered : null;
+    }
+    // In a file full of other clients' kept requests, a due orphan is sent first to make room for this one, in a hold
+    // of its own. A completion the queue has no room for is refused before that.
+    const call = `${method} ${pathname} ${serialized}`, unsigned: PendingRequest = {method, pathname, body: serialized, headers: {}};
+    const madeRoom = this.#madeRoomFor === call;
+    this.#madeRoomFor = null;
+    this.#assertRecoveredTaskCompletionCapacity(unsigned);
+    if (!madeRoom && this.#durable && !isExplicitlyRebuiltPath(pathname) && !isSessionOpen(unsigned)
+      && Object.values(this.#otherOutboxes).filter(entry => entry.pending).length >= OUTBOX_ENTRIES_MAX
+      && await this.#adoptOrphans()) {
+      this.#madeRoomFor = call;
+      return null;
     }
     const timestamp = new Date().toISOString();
     await this.#assertHostScope();
@@ -1945,12 +1990,6 @@ export class AgentFabricClient {
         'x-dharma-sequence': String(sequence), 'x-dharma-signature': signature,
       },
     };
-    this.#assertRecoveredTaskCompletionCapacity(pending);
-    // In a file full of other clients' kept requests, due orphans are sent first to make room for this one.
-    if (this.#durable && !isExplicitlyRebuiltPath(pending.pathname) && !isSessionOpen(pending)
-      && Object.values(this.#otherOutboxes).filter(entry => entry.pending).length >= OUTBOX_ENTRIES_MAX) {
-      await this.#adoptOrphans();
-    }
     this.#state.pending = pending;
     try { await this.#persist(); } catch (error) {
       // A request the full file refused is never sent, so it is not kept for a later replay either.
@@ -2024,8 +2063,11 @@ export class AgentFabricClient {
         await this.#persist();
       }
     }
-    const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] || '');
-    if (!Number.isFinite(signedAt) || Date.now() - signedAt > 4 * 60_000) {
+    if (signatureTooOld(pending, Date.now())) {
+      // Only this client's own kept request gets a new time and signature, with its message id, session, sequence,
+      // body and idempotency key unchanged. Another client sends a kept request only byte for byte as signed: one too
+      // old for that stays in its entry for its owner (see ownerOnlyEntry), so nothing is signed or sent here.
+      if (slot !== this.#state) throw new Error('A kept request too old to send as signed is signed again only by its owner.');
       const timestamp = new Date().toISOString();
       const nonce = randomBytes(24).toString('base64url');
       const messageId = pending.headers['x-dharma-message-id']!;

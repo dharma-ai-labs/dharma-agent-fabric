@@ -100,7 +100,13 @@ fails closed instead of enrolling or generating a replacement key.
 Every signed request is signed, written to the local outbox, sent and
 acknowledged while the device signing control for its origin, organization,
 device and OS user is held. While one caller holds it, no other caller that
-takes signing control signs or sends a request. Every write of the local
+takes signing control signs or sends a request. Each hold makes at most one
+network send. When a request first sends another kept request (its client's
+own earlier call, or another entry's request to make room in a full file),
+that hold ends after that send, and the request is signed and sent in a fresh
+hold, after every caller that waited meanwhile. The relay workspace loops'
+admission line hands its hold back in the same way. A caller that holds signing
+control itself across several calls keeps it across their sends. Every write of the local
 protocol state (the outbox, the session and recovered task completions)
 happens under the device signing control and starts from the latest file, so
 clients on one device never overwrite each other's kept requests or
@@ -113,8 +119,15 @@ that is still running can overwrite the file until it exits.
 Only the process that opened a session signs in it, from the sequence it holds
 in memory: no client reads another's session or sequence from the file, and a
 restarted process with the same owner key opens a session of its own. Every
-other client sends a kept request only exactly as signed, with the same message
-id, session, sequence and idempotency key. An earlier version reads only one
+other client sends a kept request only exactly as signed: every signed header
+(message id, session, sequence, idempotency key, time, nonce and signature) and
+the body byte for byte. The server refuses a signature older than 5 minutes, so
+another client never sends a kept request signed more than 4 minutes ago: it
+stays in its entry, unsent and with its outcome unknown, for its owner. Only the
+client with that entry's owner key (its process, or a restarted process with
+the same owner key) sends its own kept request again with a new time and
+signature, and only with the same message id, session, sequence, body and
+idempotency key. An earlier version reads only one
 kept request, at the top level of the file. Every write of this version copies
 there, exactly as signed, the oldest kept request that is already due (see
 below). A live client's fresh request, a session open, poll or read, and an
@@ -133,7 +146,8 @@ own. A client signs and replays the kept request in its own entry, in its own
 session, so another client's kept request never delays, fails or answers its
 calls. Another client sends that request only in the cases below: once its
 owner process has exited, or once its entry has stood unchanged for 10
-minutes, even while its owner still runs. A workspace loop that restarts finds its entry and sends its
+minutes, even while its owner still runs, and in both cases only while its
+signature is recent enough to send byte for byte as signed (see above). A workspace loop that restarts finds its entry and sends its
 kept request again, with the same message id, when it opens its session.
 
 When the owner process has exited, as with an ad hoc command that stopped
@@ -144,11 +158,11 @@ such a request only when it opens its session, so it exits once its last call
 returns. That client sends it in a signing-control
 section of its own, which starts only once the request has returned its
 answer, sends one kept request at most, and does not start while any client of
-the process holds a task lease. So does a kept request that
-stood unchanged for 10 minutes, even when its process id still answers (it may
-have been reused or belong to another account) or when it belongs to a
-workspace loop that never ran again; a workspace loop that restarts sooner
-replays its own request first. The outcome never answers the client that sent
+the process holds a task lease. A kept request that stood unchanged for 10
+minutes is due too, even when its process id still answers (it may have been
+reused or belong to another account) or when it belongs to a workspace loop
+that never ran again; but it was signed at least that long ago, so another
+client leaves it in the entry for its owner, as below. The outcome never answers the client that sent
 it and is never raised to its caller. An accepted or refused request leaves
 the file. When its owner can still read the entry (a workspace loop, or a
 process that still runs), the answer stays in the owner's entry for 10
@@ -167,15 +181,18 @@ session open. Until then it signs no other call, and the acknowledgement stays
 in the owner's entry, so when that session open fails or the process stops,
 the next process with the owner key takes it over again, and when the server
 refuses it, the process's next session open signs it again. Another client
-never sends such an acknowledgement, nor a kept
+never sends such an acknowledgement, nor a kept request signed more than 4
+minutes ago, nor a kept
 session open, poll or read: it leaves them in the entry while their owner can
 come back (a workspace loop that restarts, or a process that still runs), and
 removes them unsent once that owner is gone (a command that exited, or an
 entry moved from an earlier version's file). The
 client records each such send in
 the file before it starts, so a request without a definite answer, including
-one whose sender stopped during the send, stays in the file and is sent again
-after at least 10 minutes. A session open sends at most one such request in
+one whose sender stopped during the send, stays in the file and is due again
+after at least 10 minutes. By then it was signed too long ago for another
+client to send: it stays for its owner, or is removed unsent once that owner is
+gone. A session open sends at most one such request in
 its signing-control section, and none when it replays its own kept request
 there, so another process that waits for signing control waits for at most
 one such send; while more are due, each next request of a client opened with
@@ -184,9 +201,11 @@ its owner, so the task or content a poll or read returns is never written to
 the file. A kept request in a file written by an earlier version is moved to
 such an entry when the file is first read, unless it has the message id of a
 kept request in an entry (it is then that entry's copy). Such an entry has
-no owner process: another client sends its request only once it has stood
-unchanged for 10 minutes, counted from when it was last signed or stamped, so
-a command of the earlier version that still runs sends its own request first.
+no owner process: it is due only once it has stood unchanged for 10 minutes,
+counted from when it was last signed or stamped, so a command of the earlier
+version that still runs sends its own request first. By then its signature is
+too old to send as signed and no process of this version opened its session,
+so this version removes it unsent, and its outcome stays unknown.
 Another client's entry stays in the file only while it holds a kept request,
 waiting completion receipts, or an answer another client got for it in the
 last 10 minutes; every other entry is removed on the next write, so clients
@@ -209,10 +228,11 @@ The file holds at most 256 kept requests. A client without a kept request
 still opens its session in a full file; that session open is not kept in the
 file. Before a request that would add a
 kept request to a full file, the client sends a due request of another entry to
-make room; when none is due yet, the request is refused with
+make room, in a hold of its own; when none is due yet, or the file is still
+full after that send, the request is refused with
 `relay_protocol_state_outbox_full`. A new kept request that an earlier version
 adds to a full file stays at the top level of the file, in place of the copy
-described above, until a client of this version sends it.
+described above, until a client of this version sends it or removes it unsent.
 
 A signed request that is kept in the outbox may be sent again: see the two
 cases below.

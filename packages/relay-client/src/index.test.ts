@@ -30,6 +30,7 @@ import {
   deviceKeysetTelemetry,
   withDeviceSigningControl,
   withDeviceSigningLineSignal,
+  withSigningControlPerSend,
 } from './index.js';
 import * as relayClientModule from './index.js';
 import {
@@ -1135,8 +1136,9 @@ test('signed outbox retries the exact message after an unknown network outcome',
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   state.outboxes['relay:restart'].pending.headers['x-dharma-timestamp'] = '2026-01-01T00:00:00.000Z';
   await writeFile(statePath, JSON.stringify(state));
-  // A restarted process never signs in the session it inherited: its session open sends the kept request again,
-  // exactly as signed, before it opens its own session.
+  // A restarted process with the same owner key signs no new call in the session it inherited: its session open sends
+  // its kept request again with the same message id, session, sequence and idempotency key, with only a new time and
+  // signature since the old one is too old to send, before it opens its own session.
   const resumed = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
   await resumed.openSession();
   assert.equal(messageIds.at(-3), messageIds.at(-2));
@@ -2657,16 +2659,15 @@ for (const outcome of ['accepted', 'refused', 'retryable'] as const) {
       const next = await f.open();
       assert.equal((await sharedLater(11, () => next.openSession())).ok, true);
       sent = f.calls.filter(call => call.messageId === kept.messageId);
-      assert.equal(sent.length, 3, 'a later session open sends it again');
-      assert.equal(sent[2]!.idempotencyKey, kept.messageId);
+      assert.equal(sent.length, 2, 'once due again it could be sent only signed again, and its owner is gone: it is settled unsent');
     }
-    assert.deepEqual(keptMessageIds(await f.read()), [], 'an answered orphan leaves the file');
+    assert.deepEqual(keptMessageIds(await f.read()), [], 'an answered or settled orphan leaves the file');
     assert.deepEqual((await f.read()).recoveredTaskCompletions?.map(item => item.taskId),
-      outcome === 'refused' ? [] : [taskId]);
+      outcome === 'accepted' ? [taskId] : []);
   });
 }
 
-test('a kept request in an earlier single-slot file is sent once by the next session open and never answers it (shared protocol state)', async () => {
+test('a kept request in an earlier single-slot file that only its signer could send again is settled unsent by the next session open, which it never fails (shared protocol state)', async () => {
   const legacy = randomUUID(), legacySession = randomUUID();
   const f = await sharedStateFixture('fabric-shared-migrate-', call => call.messageId === legacy
     ? new Response(JSON.stringify({ ok: false, error: { code: 'sequence_out_of_order', message: 'Out of order.' } }), { status: 409 })
@@ -2676,13 +2677,13 @@ test('a kept request in an earlier single-slot file is sent once by the next ses
       'content-type': 'application/json', 'idempotency-key': legacy, 'x-dharma-device-id': f.config.deviceId,
       'x-dharma-session-id': legacySession, 'x-dharma-message-id': legacy, 'x-dharma-timestamp': '2026-01-01T00:00:00.000Z',
       'x-dharma-nonce': 'legacy-nonce', 'x-dharma-sequence': '4', 'x-dharma-signature': 'legacy-signature' } } }));
+  // Signed long ago in the earlier version's session: its signature is older than the server accepts, and no process of
+  // this version opened that session, so none signs it again.
   const a = await f.open();
-  assert.equal((await a.openSession()).ok, true, 'a refusal of the migrated request never fails the session open');
+  assert.equal((await a.openSession()).ok, true, 'the migrated request never fails the session open');
   const b = await f.open();
   await b.openSession();
-  const sent = f.calls.filter(call => call.messageId === legacy);
-  assert.equal(sent.length, 1, 'the migrated request is sent exactly once');
-  assert.deepEqual([sent[0]!.sessionId, sent[0]!.sequence, sent[0]!.idempotencyKey], [legacySession, 4, legacy]);
+  assert.equal(f.calls.filter(call => call.messageId === legacy).length, 0, 'the migrated request is neither sent nor signed again');
   const state = await f.read();
   assert.equal(state.pending, null);
   assert.deepEqual(keptMessageIds(state), []);
@@ -2850,7 +2851,7 @@ const writeSharedOutboxes = (statePath: string, outboxes: Record<string, unknown
   schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null, outboxes }));
 const sentTimes = (calls: SharedStateCall[], messageId: string) => calls.filter(call => call.messageId === messageId).length;
 
-test('a long-lived client sends a due orphan after its own request, without another session open (shared protocol state)', async () => {
+test('a long-lived client does not send an orphan again within 10 minutes, and after its own request settles one it could then send only signed again (shared protocol state)', async () => {
   let down = true;
   const f = await sharedStateFixture('fabric-shared-orphan-poll-', call =>
     down && call.path === '/agent-fabric/workspaces' ? sharedUnavailable() : sharedOk());
@@ -2862,15 +2863,17 @@ test('a long-lived client sends a due orphan after its own request, without anot
   down = false;
   for (let poll = 0; poll < 20; poll++) await loop.pollTask();
   assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'not again within 10 minutes');
+  assert.deepEqual(keptMessageIds(await f.read()), [orphanMessageId(orphan)]);
+  // Due again, its signature is older than the server accepts and its owner is gone: nobody may sign it again.
   await sharedLater(11, async () => { await loop.pollTask(); await sharedSettled(f.config); });
-  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 2, 'a later request of the same client sends it once more');
-  assert.equal(f.calls.at(-2)!.path, '/agent-fabric/tasks/poll', 'after the client\'s own request');
+  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'a later request of the same client settles it unsent');
+  assert.deepEqual(keptMessageIds(await f.read()), []);
   await sharedLater(22, () => loop.pollTask());
   assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 2);
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
 
-test('a kept request whose entry stood unchanged for 10 minutes is sent when its pid answers or its workspace loop is gone (shared protocol state)', async () => {
+test('a kept request whose entry stood unchanged for 10 minutes is left for its owner, since its signature is then too old to send as signed (shared protocol state)', async () => {
   const f = await sharedStateFixture('fabric-shared-orphan-stale-', () => sharedOk());
   const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   try {
@@ -2883,10 +2886,13 @@ test('a kept request whose entry stood unchanged for 10 minutes is sent when its
     assert.deepEqual([sentTimes(f.calls, orphanMessageId(reused)), sentTimes(f.calls, orphanMessageId(removed))], [0, 0],
       'a fresh entry is left to its owner, and a workspace loop that restarts promptly replays its own');
     const b = await f.open('relay:workspace-b');
-    // One orphan per hold of signing control: the session open sends one, the loop's next request the other.
+    // 10 minutes later both are due, but each was signed then too: only its owner may sign it again, and either owner
+    // can still come back (the pid answers, and a workspace loop restarts), so both stay as they are.
     await sharedLater(11, async () => { await b.openSession(); await b.pollTask(); await sharedSettled(f.config); });
-    assert.deepEqual([sentTimes(f.calls, orphanMessageId(reused)), sentTimes(f.calls, orphanMessageId(removed))], [1, 1]);
-    assert.deepEqual(keptMessageIds(await f.read()), []);
+    assert.deepEqual([sentTimes(f.calls, orphanMessageId(reused)), sentTimes(f.calls, orphanMessageId(removed))], [0, 0]);
+    const outboxes = (await f.read()).outboxes ?? {};
+    assert.deepEqual([outboxes[`cli:${unrelated.pid}:earlier:1`]?.pending, outboxes['relay:removed-workspace']?.pending],
+      [reused.pending, removed.pending], 'each keeps its request exactly as signed');
   } finally { unrelated.kill(); }
 });
 
@@ -2928,16 +2934,22 @@ test('one session open sends at most one orphan, none after one without an answe
     'an exited command\'s session open is never sent');
   assert.deepEqual(keptMessageIds(await f.read()).sort(), kept.map(orphanMessageId).sort(),
     'the session opens left the file and the other orphans stay');
+  const unanswered = f.calls.find(call => kept.some(entry => orphanMessageId(entry) === call.messageId))!.messageId;
   down = false;
   const b = await f.open('relay:workspace-b');
-  await sharedLater(11, () => b.openSession());
+  await b.openSession();
   assert.equal(orphanSends(), 2, 'at most one orphan per session open');
-  for (let poll = 1; poll <= 9; poll++) {
-    await sharedLater(11, async () => { await b.pollTask(); await sharedSettled(f.config); });
-    assert.equal(orphanSends(), Math.min(11, 2 + poll), 'after each of its requests the loop sends one more while due orphans remain');
+  for (let poll = 1; poll <= 8; poll++) {
+    await b.pollTask();
+    await sharedSettled(f.config);
+    assert.equal(orphanSends(), 2 + poll, 'after each of its requests the loop sends one more while due orphans remain');
   }
-  assert.equal(orphanSends(), 11, 'each orphan is answered once');
-  assert.deepEqual(kept.map(entry => sentTimes(f.calls, orphanMessageId(entry))).sort(), [1, 1, 1, 1, 1, 1, 1, 1, 1, 2]);
+  assert.equal(orphanSends(), 10, 'each orphan is sent once');
+  assert.deepEqual(keptMessageIds(await f.read()), [unanswered], 'the one without a definite answer waits 10 minutes');
+  // Due again, it could be sent only signed again, and its owner is gone: it is settled unsent.
+  await sharedLater(11, async () => { await b.pollTask(); await sharedSettled(f.config); });
+  assert.equal(orphanSends(), 10);
+  assert.deepEqual(kept.map(entry => sentTimes(f.calls, orphanMessageId(entry))), kept.map(() => 1));
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
 
@@ -2962,14 +2974,19 @@ test('a file full of kept orphans refuses only a new kept request and drains one
   assert.equal(f.calls.filter(call => !orphanIds.has(call.messageId) && call.path !== '/agent-fabric/sessions').length, 0,
     'a refused request is not sent');
   down = false;
-  await sharedLater(11, async () => { await c.pollTask(); await sharedSettled(f.config); });
+  // The same requests as left by commands that exited just now: due at once, and recent enough to send as signed.
+  const due = await f.read();
+  for (const entry of Object.values(due.outboxes ?? {})) delete (entry as { adoptedAt?: string }).adoptedAt;
+  await writeFile(f.statePath, JSON.stringify(due));
+  await c.pollTask();
+  await sharedSettled(f.config);
   assert.equal(f.calls.filter(call => orphanIds.has(call.messageId)).length, 2,
     'once orphans are due, one is sent to make room before the request and one more after it');
   assert.equal(f.calls.filter(call => !orphanIds.has(call.messageId) && call.path === '/agent-fabric/workspaces').length, 0,
     'the refused request is not kept for a later replay');
   for (let open = 1; open <= 5; open++) {
     const d = await f.open();
-    await sharedLater(11, () => d.openSession());
+    await d.openSession();
     assert.equal(keptMessageIds(await f.read()).length, 254 - open, 'each later session open sends one more and makes room');
   }
   assert.deepEqual(orphans.filter(entry => sentTimes(f.calls, orphanMessageId(entry)) > 1), [], 'no orphan is sent twice');
@@ -3141,9 +3158,10 @@ await client.openSession();process.stdout.write('done;');`,
   const a = await f.open();
   await a.openSession();
   assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'the next client does not send it within 10 minutes');
+  // 10 minutes later it could be sent only signed again, and its owner is gone: it is settled unsent.
   const b = await f.open();
   await sharedLater(11, () => b.openSession());
-  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'it is sent again once 10 minutes have passed');
+  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'it is not sent again, as signed or signed again');
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
 
@@ -3161,13 +3179,11 @@ test('a long-lived client returns its own answer before it sends a due orphan, a
   const dead = await exitedPid();
   const orphans = [sharedOrphan(f.config.deviceId, dead), sharedOrphan(f.config.deviceId, dead)];
   for (const entry of orphans) slow.add(orphanMessageId(entry));
-  // Entries of workspace loops that are gone become due only after 10 minutes, so the session open leaves them.
-  await writeSharedOutboxes(f.statePath, { 'relay:gone-a': orphans[0], 'relay:gone-b': orphans[1] });
   const loop = await f.open('relay:workspace-loop');
   await loop.openSession();
+  // Commands that exited left their kept requests after the loop opened its session.
+  await writeSharedOutboxes(f.statePath, { ...(await f.read()).outboxes, [`cli:${dead}:x:1`]: orphans[0], [`cli:${dead}:x:2`]: orphans[1] });
   assert.equal(f.calls.filter(call => isOrphanCall(orphans, call)).length, 0);
-  const now = Date.now;
-  Date.now = () => now() + 11 * 60_000;
   try {
     const first = await Promise.race([loop.pollTask().then(() => 'answered'), sharedDelay(2_000).then(() => 'held')]);
     assert.equal(first, 'answered', 'the poll returns its own answer while the orphan send is still open');
@@ -3181,7 +3197,8 @@ test('a long-lived client returns its own answer before it sends a due orphan, a
       ['/agent-fabric/sessions', '/agent-fabric/tasks/poll', 'orphan', '/agent-fabric/tasks/poll'],
       'one orphan per section, after the request has its answer');
     await loop.pollTask();
-  } finally { Date.now = now; gate.open(); }
+    await sharedSettled(f.config);
+  } finally { gate.open(); }
   assert.deepEqual(orphans.map(entry => sentTimes(f.calls, orphanMessageId(entry))), [1, 1]);
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
@@ -3191,24 +3208,25 @@ test('no client of a process sends orphans after its requests while a task lease
   let leased = true;
   const f = await sharedStateFixture('fabric-shared-orphan-lease-', call => call.path === '/agent-fabric/tasks/poll' && leased
     ? sharedOk({ task: { envelope: { taskId } } }) : sharedOk());
-  const orphan = sharedOrphan(f.config.deviceId, await exitedPid());
-  await writeSharedOutboxes(f.statePath, { 'relay:gone': orphan });
+  const dead = await exitedPid();
+  const orphan = sharedOrphan(f.config.deviceId, dead);
   const a = await f.open('relay:workspace-a'), b = await f.open('relay:workspace-b');
   await a.openSession();
   await b.openSession();
-  await sharedLater(11, async () => {
-    await a.pollTask();
-    leased = false;
-    await b.pollTask();
-    await a.postTaskEvent(taskId, 'started', {});
-    await a.postTaskEvent(taskId, 'lease_extended', { taskId });
-    await b.pollTask();
-    await b.pollTask();
-    await (await f.open('relay:workspace-c')).openSession();
-    assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'no orphan is sent while the task lease is held, not even by a session open');
-    await a.postTaskEvent(taskId, 'completed', {});
-    await b.pollTask();
-  });
+  // A command that exited left its kept request after both loops opened their sessions.
+  await writeSharedOutboxes(f.statePath, { ...(await f.read()).outboxes, [`cli:${dead}:x:1`]: orphan });
+  await a.pollTask();
+  leased = false;
+  await b.pollTask();
+  await a.postTaskEvent(taskId, 'started', {});
+  await a.postTaskEvent(taskId, 'lease_extended', { taskId });
+  await b.pollTask();
+  await b.pollTask();
+  await (await f.open('relay:workspace-c')).openSession();
+  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'no orphan is sent while the task lease is held, not even by a session open');
+  await a.postTaskEvent(taskId, 'completed', {});
+  await b.pollTask();
+  await sharedSettled(f.config);
   assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'once the task ends, it is sent after the next request');
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
@@ -3269,9 +3287,12 @@ test('the copy for an earlier version holds only a request that is due, never a 
     'the earlier version finds the kept request at the top level, exactly as signed');
   assert.equal(state.pending?.headers['x-dharma-message-id'], kept.messageId);
   assert.deepEqual(keptMessageIds(state), [kept.messageId], 'this version never takes that copy for an orphan of its own');
+  // It was signed as long ago: another client leaves it to its owner, which sends it itself.
   const c = await f.open();
   await sharedLater(11, () => c.openSession());
-  assert.equal(sentTimes(f.calls, kept.messageId), 2, 'it is sent once when its entry is due');
+  assert.equal(sentTimes(f.calls, kept.messageId), 1, 'another client does not send it, as signed or signed again');
+  await sharedLater(11, () => a.pollTask());
+  assert.equal(sentTimes(f.calls, kept.messageId), 2, 'its owner sends it once');
   let after = await f.read();
   assert.deepEqual([after.pending, keptMessageIds(after)], [null, []]);
   // A kept request whose command exited is due at once, and is copied; another live client's fresh one is not.
@@ -3372,12 +3393,12 @@ await client.openSession();process.stdout.write('done;');`,
 });
 
 /** The CLI's admission line (admitSignedRequests): each signed request takes signing control before the client's
- * own queue, so the request runs inside a root hold that is not the client's. */
+ * own queue, so the request runs inside a root hold that is not the client's, one hold per network send. */
 function sharedAdmitted(client: AgentFabricClient): AgentFabricClient {
   const { signedGet, signedPost } = client;
   let line: Promise<unknown> = Promise.resolve();
   const admit = <T>(request: () => Promise<T>) => {
-    const turn = line.then(() => withDeviceSigningControl({ config: client.config }, request));
+    const turn = line.then(() => withSigningControlPerSend({ config: client.config }, request));
     line = turn.catch(() => undefined);
     return turn;
   };
@@ -3388,12 +3409,14 @@ function sharedAdmitted(client: AgentFabricClient): AgentFabricClient {
 
 test('a client whose requests go through the admission line still sends a due orphan after its own request (shared protocol state)', async () => {
   const f = await sharedStateFixture('fabric-shared-orphan-admitted-', () => sharedOk());
-  const orphan = sharedOrphan(f.config.deviceId, await exitedPid());
-  await writeSharedOutboxes(f.statePath, { 'relay:gone': orphan });
+  const dead = await exitedPid();
+  const orphan = sharedOrphan(f.config.deviceId, dead);
   const loop = sharedAdmitted(await f.open('relay:workspace-a'));
   await loop.openSession();
-  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'a workspace loop that is gone waits 10 minutes');
-  await sharedLater(11, async () => { await loop.pollTask(); await sharedSettled(f.config); });
+  // A command that exited left its kept request after the loop opened its session.
+  await writeSharedOutboxes(f.statePath, { ...(await f.read()).outboxes, [`cli:${dead}:x:1`]: orphan });
+  await loop.pollTask();
+  await sharedSettled(f.config);
   assert.deepEqual(f.calls.slice(-2).map(call => call.messageId === orphanMessageId(orphan) ? 'orphan' : call.path),
     ['/agent-fabric/tasks/poll', 'orphan'], 'the orphan is sent once, after the poll');
   assert.deepEqual(keptMessageIds(await f.read()), []);
@@ -3404,19 +3427,19 @@ test('an orphan section queued behind a sibling\'s poll sends nothing once that 
   const f = await sharedStateFixture('fabric-shared-orphan-lease-queued-', call =>
     call.path === '/agent-fabric/tasks/poll' && JSON.parse(call.body).leaseSeconds === 121
       ? sharedOk({ task: { envelope: { taskId } } }) : sharedOk());
-  const orphan = sharedOrphan(f.config.deviceId, await exitedPid());
-  await writeSharedOutboxes(f.statePath, { 'relay:gone': orphan });
+  const dead = await exitedPid();
+  const orphan = sharedOrphan(f.config.deviceId, dead);
   const a = await f.open('relay:workspace-a'), b = await f.open('relay:workspace-b');
   await a.openSession();
   await b.openSession();
-  await sharedLater(11, async () => {
-    // A's orphan section waits in line behind B's poll, which returns a task.
-    await Promise.all([a.pollTask(120), b.pollTask(121)]);
-    await sharedSettled(f.config);
-    assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'nothing is sent while the lease B took is held');
-    await b.postTaskEvent(taskId, 'failed', {});
-    await sharedSettled(f.config);
-  });
+  // A command that exited left its kept request after both loops opened their sessions.
+  await writeSharedOutboxes(f.statePath, { ...(await f.read()).outboxes, [`cli:${dead}:x:1`]: orphan });
+  // A's orphan section waits in line behind B's poll, which returns a task.
+  await Promise.all([a.pollTask(120), b.pollTask(121)]);
+  await sharedSettled(f.config);
+  assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 0, 'nothing is sent while the lease B took is held');
+  await b.postTaskEvent(taskId, 'failed', {});
+  await sharedSettled(f.config);
   assert.equal(sentTimes(f.calls, orphanMessageId(orphan)), 1, 'once the task ends, it is sent after the next request');
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
@@ -3430,14 +3453,11 @@ const sharedFullOfLiveEntries = (deviceId: string) => {
   return outboxes;
 };
 
-test('a new kept request an earlier version left at the top level of a full file stays there until it is sent (shared protocol state)', async () => {
-  let down = true;
+test('a new kept request an earlier version left at the top level of a full file stays there until it is settled (shared protocol state)', async () => {
   const legacy = sharedPending('', '/agent-fabric/workspaces');
-  const f = await sharedStateFixture('fabric-shared-rollback-overflow-', call =>
-    down && call.messageId === legacy.headers['x-dharma-message-id'] ? sharedUnavailable() : sharedOk());
+  const f = await sharedStateFixture('fabric-shared-rollback-overflow-', () => sharedOk());
   legacy.headers['x-dharma-device-id'] = f.config.deviceId;
-  // The earlier version signed it 11 minutes ago and stopped; the live entries are not due within this test.
-  legacy.headers['x-dharma-timestamp'] = new Date(Date.now() - 11 * 60_000).toISOString();
+  // The earlier version signed it just now and stopped; the live entries are not due within this test.
   const outboxes = sharedFullOfLiveEntries(f.config.deviceId);
   for (const entry of Object.values(outboxes)) entry.updatedAt = new Date(Date.now() + 60 * 60_000).toISOString();
   await writeFile(f.statePath, JSON.stringify({ schema: 'dharma.protocol-state/v1',
@@ -3446,14 +3466,13 @@ test('a new kept request an earlier version left at the top level of a full file
   let after = await f.read();
   assert.equal(Object.keys(after.outboxes ?? {}).length, 256, 'the file never holds more entries than a reader accepts');
   assert.equal(after.pending?.headers['x-dharma-message-id'], legacy.headers['x-dharma-message-id'], 'it stays at the top level');
-  assert.equal(sentTimes(f.calls, legacy.headers['x-dharma-message-id']), 1);
-  down = false;
-  assert.equal((await (await f.open()).openSession()).ok, true);
-  assert.equal(sentTimes(f.calls, legacy.headers['x-dharma-message-id']), 1, 'a send without an answer waits 10 minutes');
+  assert.equal(sentTimes(f.calls, legacy.headers['x-dharma-message-id']), 0, 'a command of the earlier version may still send it');
+  // 10 minutes later its signature is older than the server accepts, and no process of this version opened its
+  // session: a client settles it unsent.
   assert.equal((await sharedLater(11, async () => (await f.open()).openSession())).ok, true,
-    'a client 10 minutes later opens the file and sends it');
+    'a client 10 minutes later opens the file');
   after = await f.read();
-  assert.equal(sentTimes(f.calls, legacy.headers['x-dharma-message-id']), 2);
+  assert.equal(sentTimes(f.calls, legacy.headers['x-dharma-message-id']), 0, 'it is never sent, as signed or signed again');
   assert.notEqual(after.pending?.headers['x-dharma-message-id'], legacy.headers['x-dharma-message-id']);
   assert.equal(Object.keys(after.outboxes ?? {}).length, 256);
 });
@@ -3983,10 +4002,10 @@ test('an owner whose entry an earlier version wrote back holding another call re
   f.down.add(`/${first}/events`);
   await assert.rejects(a.postTaskEvent(first, 'started', {}),
     error => error instanceof AgentFabricRequestError && error.status === 503);
-  // 11 minutes later another client takes the entry, and its send gets no definite answer.
+  // 11 minutes later another client finds the entry due and leaves it to its owner: it could be sent only signed again.
   await sharedLater(11, async () => { const c = await f.open('relay:c'); await c.openSession(); });
   f.down.clear();
-  // An earlier version reads the file: the owner's entry holds the first event and the other client's attempt.
+  // An earlier version reads the file: the owner's entry holds the first event.
   const snapshot = await f.read();
   // The owner's next call sends the first event, then signs the second and keeps it after a 503.
   f.down.add(`/${second}/events`);

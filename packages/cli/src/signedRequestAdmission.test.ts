@@ -71,9 +71,7 @@ function orphan(deviceId: string, ownerPid: number) {
       'x-dharma-nonce': 'orphan-nonce', 'x-dharma-sequence': '1', 'x-dharma-signature': 'orphan-signature'}}};
 }
 
-// Held while the relay-client cases run red in CI: the workspace test runner stops at the first failing package, and
-// this package runs before relay-client. The fix commit runs it again.
-test.skip('an admitted request makes at most one network send per hold of signing control while another client waits: own recovery and a full file', async t => {
+test('an admitted request makes at most one network send per hold of signing control while another client waits: own recovery and a full file', async t => {
   const d = await device(t);
   let down = false;
   let other: ReturnType<typeof waitingClient> | undefined;
