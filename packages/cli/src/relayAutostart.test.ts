@@ -612,44 +612,155 @@ test('Windows task registration uses the enrolled user without an embedded passw
   assert.match(calls.at(-1) || '', /Unregister-ScheduledTask/);
 });
 
-test('Windows task action starts PowerShell without a visible console and replaces the earlier visible action', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-headless-'));
-  const calls: string[] = [];
-  let legacyAction = false;
-  const run = async (_file: string, args: string[]) => {
+// A mocked Task Scheduler: no task exists before setup, and the registered task reads back enabled.
+function windowsTaskRunner(calls: string[], legacyAction = () => false) {
+  return async (_file: string, args: string[]) => {
     const decoded = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
     calls.push(decoded);
     return { stdout: decoded.includes("'exists'") ? 'absent\n'
-      : legacyAction && decoded.includes("'legacy-action'") ? 'legacy-action\n'
+      : legacyAction() && decoded.includes("'legacy-action'") ? 'legacy-action\n'
       : decoded.includes('Get-ScheduledTask') ? 'enabled\n' : '' };
   };
-  const options = {
+}
+
+function windowsTaskOptions(root: string, run: (file: string, args: string[]) => Promise<{ stdout: string }>) {
+  return {
     platform: 'win32' as const, home: join(root, 'dharma'), userHome: root,
     workspace: 'C:\\first', launcher: 'C:\\first\\.dharma\\bin\\dharma.cmd',
     policy: 'C:\\first\\.dharma\\approved-policy.json', version: '0.2.119', run,
   };
+}
+
+const headlessActionVariables = (script: string) => "$system = Join-Path $env:SystemRoot 'System32'; "
+  + "$headlessExecute = Join-Path $system 'conhost.exe'; "
+  + `$headlessArguments = '--headless "' + (Join-Path $system 'WindowsPowerShell\\v1.0\\powershell.exe') + '" ' `
+  + `+ '-NoProfile -NonInteractive -WindowStyle Hidden -File "${script}"'; `;
+
+test('Windows task action starts PowerShell by absolute path without a visible console and replaces the earlier visible action', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-headless-'));
+  const calls: string[] = [];
+  let legacyAction = false;
+  const options = windowsTaskOptions(root, windowsTaskRunner(calls, () => legacyAction));
   assert.equal((await enableRelayAutostart(options)).state, 'enabled');
-  const action = /New-ScheduledTaskAction -Execute '([^']+)' -Argument '([^']+)'/
-    .exec(calls.find(call => call.includes('Register-ScheduledTask')) || '');
-  assert.ok(action, 'expected one fixed task action');
+  const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
   const script = join(options.home, 'relay', 'autostart.ps1');
   // A headless console host: no window opens at logon, and none can be closed to stop the supervisor.
-  assert.equal(action[1], 'conhost.exe');
-  assert.equal(action[2], `--headless powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File "${script}"`);
+  // Both programs are absolute paths under the Windows directory. conhost would otherwise look for
+  // powershell.exe in the task's working directory, the enrolled repository, before PATH.
+  assert.ok(registration.includes(headlessActionVariables(script)));
+  assert.ok(registration.includes("$action = New-ScheduledTaskAction -Execute $headlessExecute -Argument $headlessArguments -WorkingDirectory 'C:\\first'; "));
+  assert.doesNotMatch(registration, /-Execute '|--headless powershell\.exe/);
   // The ownership guard accepts the headless action and the earlier visible one, so enrolled devices keep working.
   const guard = calls.find(call => call.includes('$headlessAction')) || '';
-  assert.ok(guard.includes(`$actions[0].Execute -ceq 'conhost.exe' -and $actions[0].Arguments -ceq '${action[2]}'`));
-  assert.ok(guard.includes(`$actions[0].Execute -ceq 'powershell.exe' -and $actions[0].Arguments -ceq '-NoProfile -NonInteractive -File "${script}"'`));
+  assert.ok(guard.includes(headlessActionVariables(script)));
+  assert.ok(guard.includes('$headlessAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq $headlessExecute -and $actions[0].Arguments -ceq $headlessArguments; '));
+  assert.ok(guard.includes(`$legacyAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq 'powershell.exe' -and $actions[0].Arguments -ceq '-NoProfile -NonInteractive -File "${script}"'; `));
+
+  // A preserved anchor whose task already has the headless action is left as it is.
+  calls.length = 0;
+  const second = { ...options, workspace: 'C:\\second', launcher: 'C:\\second\\.dharma\\bin\\dharma.cmd',
+    policy: 'C:\\second\\.dharma\\approved-policy.json', preserveStandardAnchor: true };
+  assert.equal((await enableRelayAutostart(second)).state, 'enabled');
+  assert.ok(!calls.some(call => call.includes('Register-ScheduledTask')));
 
   // A preserved anchor whose task still has the earlier visible action is registered again with the headless one.
   calls.length = 0;
   legacyAction = true;
-  const second = { ...options, workspace: 'C:\\second', launcher: 'C:\\second\\.dharma\\bin\\dharma.cmd',
-    policy: 'C:\\second\\.dharma\\approved-policy.json', preserveStandardAnchor: true };
   assert.equal((await enableRelayAutostart(second)).state, 'enabled');
   const replaced = calls.find(call => call.includes('Register-ScheduledTask')) || '';
-  assert.match(replaced, /New-ScheduledTaskAction -Execute 'conhost\.exe' -Argument '--headless powershell\.exe /);
-  assert.ok(replaced.includes("-WorkingDirectory 'C:\\first'"));
+  assert.ok(replaced.includes("$action = New-ScheduledTaskAction -Execute $headlessExecute -Argument $headlessArguments -WorkingDirectory 'C:\\first'; "));
+});
+
+test('a Windows rollback registers the task action that the restored release owns', async () => {
+  for (const [version, legacy] of [['0.2.225', true], ['0.2.226', false], ['0.3.0', false]] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-windows-rollback-'));
+    const calls: string[] = [];
+    const options = { ...windowsTaskOptions(root, windowsTaskRunner(calls)), version: '0.2.230' };
+    assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+    calls.length = 0;
+    assert.equal((await enableRelayAutostart({ ...options, version, restoreCodexHome: null })).state, 'enabled');
+    const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+    const script = join(options.home, 'relay', 'autostart.ps1');
+    if (legacy) {
+      // A release before the headless action owns only the earlier action and reports any other as a conflict.
+      assert.ok(registration.includes(`$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        + `-Argument '-NoProfile -NonInteractive -File "${script}"' -WorkingDirectory 'C:\\first'; `), version);
+    } else {
+      assert.ok(registration.includes('$action = New-ScheduledTaskAction -Execute $headlessExecute -Argument $headlessArguments '), version);
+    }
+  }
+  // Setup and upgrade pass no restored provider context, so they always register the headless action.
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-upgrade-'));
+  const calls: string[] = [];
+  assert.equal((await enableRelayAutostart(windowsTaskOptions(root, windowsTaskRunner(calls)))).state, 'enabled');
+  assert.ok((calls.find(call => call.includes('Register-ScheduledTask')) || '')
+    .includes('$action = New-ScheduledTaskAction -Execute $headlessExecute -Argument $headlessArguments '));
+});
+
+// Runs a generated script in real Windows PowerShell against a synthetic task. Every ScheduledTasks
+// command the script can call is replaced by a function first, so the machine's Task Scheduler is
+// never read or changed.
+function syntheticTaskRunner(task: object) {
+  return async (_file: string, args: string[]) => {
+    const script = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
+    const stubs = `$fixtureTask = ConvertFrom-Json '${JSON.stringify(task).replace(/'/g, "''")}'; `
+      + 'function Get-ScheduledTask { $fixtureTask }; '
+      + "function Export-ScheduledTask { '<Task><Principals><Principal><UserId>' "
+      + "+ [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value + '</UserId></Principal></Principals></Task>' }; "
+      + ['Register', 'Unregister', 'Start', 'Stop', 'Enable', 'Disable', 'Set']
+        .map(verb => `function ${verb}-ScheduledTask { '${verb}-ScheduledTask' }; `).join('')
+      + ['Action', 'Trigger', 'Principal', 'SettingsSet'].map(kind => `function New-ScheduledTask${kind} { $null }; `).join('');
+    const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(stubs + script, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+    if (result.error || result.status !== 0) throw new Error(`${result.stderr || result.error}`);
+    return { stdout: result.stdout };
+  };
+}
+
+test('the generated Windows task action and ownership guard run in real PowerShell', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-guard-'));
+  const calls: string[] = [];
+  const options = windowsTaskOptions(root, windowsTaskRunner(calls));
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  const script = join(options.home, 'relay', 'autostart.ps1');
+  const system = join(process.env.SystemRoot || '', 'System32');
+  const headless = { Execute: join(system, 'conhost.exe'), WorkingDirectory: 'C:\\first',
+    Arguments: `--headless "${join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe')}" -NoProfile -NonInteractive -WindowStyle Hidden -File "${script}"` };
+  const legacy = { Execute: 'powershell.exe', Arguments: `-NoProfile -NonInteractive -File "${script}"`, WorkingDirectory: 'C:\\first' };
+
+  // The registered action names both programs by absolute path.
+  const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+  const variables = registration.slice(registration.indexOf('$system = '), registration.indexOf('$action = '));
+  const printed = await syntheticTaskRunner({})('powershell.exe', ['-EncodedCommand',
+    Buffer.from(`${variables}[Console]::Out.Write($headlessExecute + '|' + $headlessArguments)`, 'utf16le').toString('base64')]);
+  assert.equal(printed.stdout, `${headless.Execute}|${headless.Arguments}`);
+  assert.match(headless.Execute, /^[A-Za-z]:\\[^"]+\\System32\\conhost\.exe$/i);
+  assert.match(headless.Arguments, /^--headless "[A-Za-z]:\\[^"]+\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe" /i);
+
+  const task = (actions: object[]) => ({ TaskPath: '\\', State: 'Ready', Actions: actions });
+  for (const action of [headless, legacy]) {
+    const status = await relayAutostartStatus({ ...options, run: syntheticTaskRunner(task([action])) });
+    assert.equal(status.state, 'enabled', action.Execute);
+  }
+  const foreign = [
+    [{ ...headless, Arguments: `--headless powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File "${script}"` }],
+    [{ ...headless, Execute: 'conhost.exe' }],
+    [{ ...headless, Arguments: `${headless.Arguments} -Command calc` }],
+    [{ ...legacy, Arguments: headless.Arguments }],
+    [{ ...legacy, Execute: join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe') }],
+    [{ ...legacy, WorkingDirectory: 'C:\\other' }],
+    [{ ...headless, WorkingDirectory: 'C:\\other' }],
+    [headless, headless],
+  ];
+  const receipt = await readFile(join(options.home, 'relay', 'autostart.json'), 'utf8');
+  for (const actions of foreign) {
+    const run = syntheticTaskRunner(task(actions));
+    const status = await relayAutostartStatus({ ...options, run });
+    assert.deepEqual([status.state, status.reason], ['unavailable', 'autostart_conflict'], JSON.stringify(actions));
+    await assert.rejects(enableRelayAutostart({ ...options, run }), /autostart_conflict/);
+    await assert.rejects(disableRelayAutostart({ ...options, run }), /autostart_conflict/);
+    assert.equal(await readFile(join(options.home, 'relay', 'autostart.json'), 'utf8'), receipt);
+  }
 });
 
 test('failed OS registration remains unavailable instead of reporting completion', async () => {

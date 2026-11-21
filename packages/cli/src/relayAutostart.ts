@@ -204,15 +204,32 @@ function encodedPowerShell(command: string) {
 function registrationPath(home: string) { return join(home, 'relay', 'autostart.json'); }
 function unitPath(userHome: string) { return join(userHome, '.config', 'systemd', 'user', UNIT_NAME); }
 function scriptPath(home: string) { return join(home, 'relay', 'autostart.ps1'); }
-// The task action runs PowerShell under a headless console host, so no console
-// window opens at logon. Closing a visible window would also stop the supervisor.
-const WINDOWS_TASK_EXECUTE = 'conhost.exe';
-function windowsTaskArguments(home: string) {
-  return `--headless powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File "${scriptPath(home)}"`;
+// PowerShell that sets $headlessExecute and $headlessArguments to the task action.
+// It runs PowerShell under a headless console host, so no console window opens at
+// logon. Closing a visible window would also stop the supervisor. Both programs are
+// absolute paths under the Windows directory: conhost starts its client with the
+// normal search order, which tries the task's working directory (the enrolled
+// repository) before PATH.
+function windowsTaskAction(home: string) {
+  return `$system = Join-Path $env:SystemRoot 'System32'; `
+    + `$headlessExecute = Join-Path $system 'conhost.exe'; `
+    + `$headlessArguments = '--headless "' + (Join-Path $system 'WindowsPowerShell\\v1.0\\powershell.exe') + '" ' `
+    + `+ ${psLiteral(`-NoProfile -NonInteractive -WindowStyle Hidden -File "${scriptPath(home)}"`)}; `;
 }
 // Earlier releases registered this visible action. It is still owned, and the
 // next setup or upgrade registers the headless action in its place.
+const LEGACY_WINDOWS_TASK_EXECUTE = 'powershell.exe';
 function legacyWindowsTaskArguments(home: string) { return `-NoProfile -NonInteractive -File "${scriptPath(home)}"`; }
+// The first release whose ownership guard accepts the headless action. Earlier
+// releases own only the visible action, so a rollback to one registers that action.
+const WINDOWS_HEADLESS_TASK_SINCE = [0, 2, 226];
+function windowsHeadlessTaskOwned(version: string) {
+  const numbers = version.split('-')[0]!.split('.').map(Number);
+  for (let index = 0; index < WINDOWS_HEADLESS_TASK_SINCE.length; index++) {
+    if (numbers[index] !== WINDOWS_HEADLESS_TASK_SINCE[index]) return numbers[index]! > WINDOWS_HEADLESS_TASK_SINCE[index]!;
+  }
+  return true;
+}
 function taskName(home: string) {
   return `DharmaAgentFabric-${createHash('sha256').update(home.toLowerCase()).digest('hex').slice(0, 12)}`;
 }
@@ -374,10 +391,10 @@ function windowsTaskGuard(registration: Registration, home: string) {
     + `$principals = @($definition.Task.Principals.Principal); `
     + `$principalMatches = $principals.Count -eq 1 -and $principals[0].UserId -eq $identity.User.Value `
     + `} catch { $principalMatches = $false }; `
-    + `$actions = @($task.Actions); `
-    + `$headlessAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq ${psLiteral(WINDOWS_TASK_EXECUTE)} `
-    + `-and $actions[0].Arguments -ceq ${psLiteral(windowsTaskArguments(home))}; `
-    + `$legacyAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq 'powershell.exe' `
+    + `$actions = @($task.Actions); ${windowsTaskAction(home)}`
+    + `$headlessAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq $headlessExecute `
+    + `-and $actions[0].Arguments -ceq $headlessArguments; `
+    + `$legacyAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq ${psLiteral(LEGACY_WINDOWS_TASK_EXECUTE)} `
     + `-and $actions[0].Arguments -ceq ${psLiteral(legacyWindowsTaskArguments(home))}; `
     + `if ($null -eq $task -or -not ($headlessAction -or $legacyAction) `
     + `-or $actions[0].WorkingDirectory -cne ${psLiteral(registration.workspace)} `
@@ -576,9 +593,13 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
     await run('/bin/launchctl', ['enable', `${macDomain(options)}/${MAC_LABEL}`]);
     await run('/bin/launchctl', ['bootstrap', macDomain(options), destination]);
   } else {
-    const command = `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; `
-      + `$action = New-ScheduledTaskAction -Execute ${psLiteral(WINDOWS_TASK_EXECUTE)} `
-      + `-Argument ${psLiteral(windowsTaskArguments(options.home))} `
+    // A rollback restores the action that the restored release owns.
+    const legacyRollback = options.restoreCodexHome !== undefined && !windowsHeadlessTaskOwned(options.version);
+    const command = `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; ${windowsTaskAction(options.home)}`
+      + (legacyRollback
+        ? `$action = New-ScheduledTaskAction -Execute ${psLiteral(LEGACY_WINDOWS_TASK_EXECUTE)} `
+          + `-Argument ${psLiteral(legacyWindowsTaskArguments(options.home))} `
+        : `$action = New-ScheduledTaskAction -Execute $headlessExecute -Argument $headlessArguments `)
       + `-WorkingDirectory ${psLiteral(registration.workspace)}; `
       + `$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity; `
       + `$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited; `
