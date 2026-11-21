@@ -18,8 +18,8 @@ jobs:
   validate:
     name: Validate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Windows estimate: install 7m06s + validation 12m44s + overhead 43s = 20m33s.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 20 }}
+    # Windows measured after the relay-client stack: 24m48s (one run hit the old 25-minute limit).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 35 || 20 }}
     strategy:
       fail-fast: false
       matrix:
