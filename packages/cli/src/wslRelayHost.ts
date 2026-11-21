@@ -131,7 +131,8 @@ function lookup(receipt: Receipt, required = false) {
 }
 
 // Earlier releases registered PowerShell itself as the action. It is still owned,
-// and the next registration replaces it with the headless action.
+// and the next registration replaces it with the headless action. A rollback to one
+// of those releases puts it back, because they own only this action.
 function legacyTaskAction(receipt: Receipt) {
   // Direct WSL scheduled actions can exit before Linux starts. Preserve the
   // same limited identity while hosting the fixed native command in PowerShell.
@@ -193,7 +194,11 @@ export async function assertWslHostPreflight(options: WslHostOptions): Promise<v
   if (state.exists && !previous) return fail(true);
 }
 
-export async function enableWslRelayHost(options: WslHostOptions): Promise<void> {
+/**
+ * `restoreLegacyAction` is set when a rollback restores a release that owns only the
+ * earlier PowerShell action; the task then gets that action back.
+ */
+export async function enableWslRelayHost(options: WslHostOptions, restoreLegacyAction = false): Promise<void> {
   const current = await context(options); if (!current) return;
   const target = await expected(options, current), previous = await saved(options);
   if (previous && !sameReceipt(previous, target)) return fail(true);
@@ -201,15 +206,16 @@ export async function enableWslRelayHost(options: WslHostOptions): Promise<void>
   if (before.exists && !previous) return fail(true);
   await privateParent(options);
   if (!previous) await writeFile(receiptPath(options.home), `${JSON.stringify(target, null, 2)}\n`, {flag: 'wx', mode: 0o600});
-  if (before.exists && before.enabled && !before.legacy) return;
+  if (before.exists && before.enabled && Boolean(before.legacy) === restoreLegacyAction) return;
   // Preserve ownership before external mutation. Lost responses require readback,
-  // not replacement of a possibly foreign task. An owned task with the earlier
-  // action keeps its definition and gets the headless action in place.
-  const action = taskAction(target);
+  // not replacement of a possibly foreign task. An owned task with the other
+  // action keeps its definition and gets the wanted action in place.
+  const action = restoreLegacyAction ? legacyTaskAction(target) : taskAction(target);
+  const replace = restoreLegacyAction ? '-not (Test-LegacyAction $task)' : 'Test-LegacyAction $task';
   await invoke(options, taskPreamble(target, 'register')
     + `$action=New-ScheduledTaskAction -Execute ${literal(action.executable)} -Argument ${literal(action.arguments)}; `
     + `if ($null -ne $task) { Assert-OwnedTask $task; `
-    + `if (Test-LegacyAction $task) { Set-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)} -Action $action|Out-Null }; `
+    + `if (${replace}) { Set-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)} -Action $action|Out-Null }; `
     + `Enable-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)}|Out-Null } else { `
     + `$trigger=New-ScheduledTaskTrigger -AtLogOn -User $current.Name; `
     + `$principal=New-ScheduledTaskPrincipal -UserId $current.Name -LogonType Interactive -RunLevel Limited; `
@@ -218,7 +224,7 @@ export async function enableWslRelayHost(options: WslHostOptions): Promise<void>
     + `-Action $action -Trigger $trigger -Principal $principal -Settings $settings|Out-Null }; `
     + lookup(target, true) + renderState);
   const after = await query(options, target);
-  if (!after.exists || !after.enabled || after.legacy) return fail();
+  if (!after.exists || !after.enabled || Boolean(after.legacy) !== restoreLegacyAction) return fail();
 }
 
 export async function wslRelayHostStatus(options: WslHostOptions) {

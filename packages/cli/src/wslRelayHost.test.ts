@@ -111,7 +111,8 @@ async function fixture(t: TestContext) {
         if (script.includes('dharma-wsl-host:register')) {
           exists = true;
           enabled = true;
-          legacy = false;
+          // The task holds the action the registration asked for: PowerShell itself is the earlier action.
+          legacy = /New-ScheduledTaskAction -Execute '[^']*\\powershell\.exe'/.test(script);
           if (loseRegistrationResponse) throw new Error('registration response lost');
         }
         if (script.includes('dharma-wsl-host:start')) running = true;
@@ -207,6 +208,55 @@ test('an owned WSL host task with the earlier PowerShell action gets the headles
   const after = f.scripts.length;
   await enableRelayAutostart(f.options);
   assert(!f.scripts.slice(after).some(script => script.includes('dharma-wsl-host:register')));
+});
+
+test('a WSL rollback restores the earlier PowerShell action that the restored release owns', async t => {
+  const f = await fixture(t);
+  await enableRelayAutostart(f.options);
+  assert.equal(registeredTaskAction(f.scripts).execute, 'C:\\Windows\\System32\\conhost.exe');
+  // Releases before 0.2.226 own only the earlier action and refuse the headless one as a conflict.
+  const before = f.scripts.length;
+  assert.equal((await enableRelayAutostart({...f.options, version: '0.2.225', restoreCodexHome: null})).state, 'enabled');
+  const restored = f.scripts.slice(before).find(script => script.includes('dharma-wsl-host:register'));
+  assert.ok(restored, 'the rollback registers the earlier action again');
+  const action = registeredTaskAction([restored]);
+  assert.equal(action.execute, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+  assert.match(action.arguments, /^-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand [A-Za-z0-9+/=]+$/);
+  // The owned task keeps its definition and only its action is replaced.
+  assert.match(restored, /if \(-not \(Test-LegacyAction \$task\)\) \{ Set-ScheduledTask -TaskPath '\\' -TaskName '[^']+' -Action \$action\|Out-Null \}; /);
+  assert.doesNotMatch(restored, /Unregister-ScheduledTask|-Force/);
+  // A rollback to a release that owns the headless action registers that action.
+  const after = f.scripts.length;
+  await enableRelayAutostart({...f.options, version: '0.2.226', restoreCodexHome: null});
+  const forward = f.scripts.slice(after).find(script => script.includes('dharma-wsl-host:register'));
+  assert.ok(forward);
+  assert.equal(registeredTaskAction([forward]).execute, 'C:\\Windows\\System32\\conhost.exe');
+});
+
+// Waits for a file that a started program writes. conhost may return before its client finishes.
+async function readMarker(path: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {return await readFile(path, 'utf8');} catch {await new Promise(accept => setTimeout(accept, 100));}
+  }
+  return null;
+}
+
+test('the registered WSL host action starts PowerShell under the real headless console host', {skip: process.platform !== 'win32'}, async t => {
+  const f = await fixture(t); await enableRelayAutostart(f.options);
+  const action = registeredTaskAction(f.scripts);
+  // The real action runs wsl.exe; a harmless command that writes a marker takes its place.
+  const marker = join(await realpath(await mkdtemp(join(tmpdir(), 'dharma-wsl-headless-'))), 'started.txt');
+  t.after(() => rm(join(marker, '..'), {recursive: true, force: true}));
+  const command = `[System.IO.File]::WriteAllText('${marker.replace(/'/g, "''")}', 'started'); exit 0`;
+  const argumentsLine = action.arguments.replace(/[A-Za-z0-9+/=]+$/, Buffer.from(command, 'utf16le').toString('base64'));
+  assert.notEqual(argumentsLine, action.arguments);
+  // Task Scheduler passes the argument text as it is, so the test does too.
+  const result = spawnSync(action.execute, [argumentsLine], {
+    encoding: 'utf8', timeout: 60_000, windowsHide: true, windowsVerbatimArguments: true, cwd: tmpdir(),
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readMarker(marker), 'started');
 });
 
 test('optional WSL task lookup distinguishes exact absence from a failed scheduler read', async () => {

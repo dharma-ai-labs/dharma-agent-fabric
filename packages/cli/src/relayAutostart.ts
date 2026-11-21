@@ -220,8 +220,9 @@ function windowsTaskAction(home: string) {
 // next setup or upgrade registers the headless action in its place.
 const LEGACY_WINDOWS_TASK_EXECUTE = 'powershell.exe';
 function legacyWindowsTaskArguments(home: string) { return `-NoProfile -NonInteractive -File "${scriptPath(home)}"`; }
-// The first release whose ownership guard accepts the headless action. Earlier
-// releases own only the visible action, so a rollback to one registers that action.
+// The first release whose ownership guards accept the headless actions of the Windows
+// task and the WSL host task. Earlier releases own only the PowerShell actions, so a
+// rollback to one registers those actions again.
 const WINDOWS_HEADLESS_TASK_SINCE = [0, 2, 226];
 function windowsHeadlessTaskOwned(version: string) {
   const numbers = version.split('-')[0]!.split('.').map(Number);
@@ -583,18 +584,19 @@ export async function enableRelayAutostart(options: RelayAutostartOptions & {
   await mkdir(dirname(registrationPath(options.home)), { recursive: true, mode: 0o700 });
   await writeFile(destination, startupContents(options, registration), { mode: 0o600 });
   await writeFile(registrationPath(options.home), `${JSON.stringify(registration, null, 2)}\n`, { mode: 0o600 });
+  // A rollback restores the task action that the restored release owns, for the
+  // Windows task and for the WSL host task.
+  const legacyRollback = options.restoreCodexHome !== undefined && !windowsHeadlessTaskOwned(options.version);
   if (platform === 'linux') {
     await run('systemctl', ['--user', 'daemon-reload']);
     await run('systemctl', ['--user', options.pauseForSigningMaintenance?'disable':'enable', UNIT_NAME]);
     if(options.pauseForSigningMaintenance)await pauseWslRelayHost(options);
-    else await enableWslRelayHost(options);
+    else await enableWslRelayHost(options, legacyRollback);
   } else if (platform === 'darwin') {
     await run('/usr/bin/plutil', ['-lint', destination]);
     await run('/bin/launchctl', ['enable', `${macDomain(options)}/${MAC_LABEL}`]);
     await run('/bin/launchctl', ['bootstrap', macDomain(options), destination]);
   } else {
-    // A rollback restores the action that the restored release owns.
-    const legacyRollback = options.restoreCodexHome !== undefined && !windowsHeadlessTaskOwned(options.version);
     const command = `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; ${windowsTaskAction(options.home)}`
       + (legacyRollback
         ? `$action = New-ScheduledTaskAction -Execute ${psLiteral(LEGACY_WINDOWS_TASK_EXECUTE)} `
