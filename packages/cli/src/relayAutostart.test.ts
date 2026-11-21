@@ -763,10 +763,11 @@ test('the generated Windows task action and ownership guard run in real PowerShe
   }
 });
 
-// Starts a task action as Task Scheduler does, with its argument text passed as it is, and
-// waits for the marker file its client writes. In headless mode conhost reads terminal input
-// from its standard input and closes the console when that input ends. Task Scheduler gives
-// the action no input at all, so the input pipe stays open until the client is done.
+// Starts a task action from Node with its argument text passed as it is and with piped standard
+// handles, and waits for the marker file its client writes. Piped handles put the headless console
+// host in pseudoconsole mode: it reads terminal input from its standard input and closes the
+// console when that input ends, so the input pipe stays open until the client is done. Task
+// Scheduler gives the action no standard handles; runTaskActionWithoutHandles covers that mode.
 async function runTaskAction(execute: string, argumentsLine: string, cwd: string, marker: string) {
   const child = spawn(execute, [argumentsLine], { cwd, windowsHide: true, windowsVerbatimArguments: true });
   let output = '';
@@ -788,6 +789,66 @@ async function runTaskAction(execute: string, argumentsLine: string, cwd: string
   return { content, code, exitedBeforeMarker: content === null && exited, output };
 }
 
+// Starts a task action through Win32_Process.Create, which gives the new process no standard
+// handles and no console of a parent, as Task Scheduler does at logon. The client writes a
+// heartbeat about once a second and then a done marker. The heartbeats are sampled while the
+// console host is checked to be still running, and the host must exit once the client is done.
+async function runTaskActionWithoutHandles(execute: string, argumentsLine: string, cwd: string, heartbeat: string, done: string) {
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  const create = `$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ `
+    + `CommandLine = ${literal(`"${execute}" ${argumentsLine}`)}; CurrentDirectory = ${literal(cwd)} }; `
+    + 'if ($created.ReturnValue -ne 0) { throw "Win32_Process.Create returned $($created.ReturnValue)" }; '
+    + '[Console]::Out.Write($created.ProcessId)';
+  const started = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+    Buffer.from(create, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+  if (started.error || started.status !== 0) throw new Error(`${started.stderr || started.error}`);
+  const pid = Number(started.stdout.trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, started.stdout);
+  const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const isDone = () => readFile(done, 'utf8').then(() => true, () => false);
+  const beats: string[] = [];
+  let finished = false;
+  let hostStoppedEarly = false;
+  try {
+    for (const deadline = Date.now() + 60_000; !finished && !hostStoppedEarly && Date.now() < deadline;) {
+      finished = await isDone();
+      const beat = (await readFile(heartbeat, 'utf8').catch(() => '')).trim();
+      if (beat && beat !== beats.at(-1)) beats.push(beat);
+      if (!finished && !alive()) {
+        finished = await isDone();
+        hostStoppedEarly = !finished;
+      }
+      if (!finished) await new Promise(accept => setTimeout(accept, 200));
+    }
+    let hostExited = !alive();
+    for (const deadline = Date.now() + 15_000; finished && !hostExited && Date.now() < deadline;) {
+      await new Promise(accept => setTimeout(accept, 200));
+      hostExited = !alive();
+    }
+    return { beats, finished, hostStoppedEarly, hostExited };
+  } finally {
+    if (alive()) process.kill(pid);
+  }
+}
+
+// A client that stays alive for about ten seconds and writes a heartbeat about once a second.
+function heartbeatScript(heartbeat: string, done: string, separator: string) {
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  return [`for ($beat = 1; $beat -le 10; $beat++) { [System.IO.File]::WriteAllText(${literal(heartbeat)}, [string]$beat); Start-Sleep -Seconds 1 }`,
+    `[System.IO.File]::WriteAllText(${literal(done)}, 'done')`, 'exit 0'].join(separator);
+}
+
+function assertHeartbeatSurvived(result: { beats: string[]; finished: boolean; hostStoppedEarly: boolean; hostExited: boolean }) {
+  const detail = JSON.stringify(result);
+  assert.equal(result.hostStoppedEarly, false, detail);
+  assert.equal(result.finished, true, detail);
+  assert.equal(result.beats.at(-1), '10', detail);
+  assert.ok(result.beats.length >= 6, detail);
+  const numbers = result.beats.map(Number);
+  assert.ok(numbers.every((value, index) => index === 0 || value > numbers[index - 1]!), detail);
+  assert.equal(result.hostExited, true, detail);
+}
+
 test('the registered Windows task action starts the startup script under the real headless console host', { skip: process.platform !== 'win32' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-windows-headless-run-'));
   const calls: string[] = [];
@@ -805,6 +866,23 @@ test('the registered Windows task action starts the startup script under the rea
   const result = await runTaskAction(execute, argumentsLine, root, marker);
   assert.equal(result.content, 'started', JSON.stringify(result));
   assert.equal(result.code, 0, JSON.stringify(result));
+});
+
+test('the registered Windows task action keeps a long-running startup script alive with no standard handles', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-headless-handles-'));
+  const calls: string[] = [];
+  const options = windowsTaskOptions(root, windowsTaskRunner(calls));
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+  const variables = registration.slice(registration.indexOf('$system = '), registration.indexOf('$action = '));
+  const printed = await syntheticTaskRunner({})('powershell.exe', ['-EncodedCommand',
+    Buffer.from(`${variables}[Console]::Out.Write($headlessExecute + '|' + $headlessArguments)`, 'utf16le').toString('base64')]);
+  const [execute, argumentsLine] = printed.stdout.split('|') as [string, string];
+  // The real script runs the relay supervisor for the whole session; a script that keeps running and writes a heartbeat takes its place.
+  const heartbeat = join(root, 'heartbeat.txt');
+  const done = join(root, 'done.txt');
+  await writeFile(join(options.home, 'relay', 'autostart.ps1'), `${heartbeatScript(heartbeat, done, '\r\n')}\r\n`);
+  assertHeartbeatSurvived(await runTaskActionWithoutHandles(execute, argumentsLine, root, heartbeat, done));
 });
 
 test('failed OS registration remains unavailable instead of reporting completion', async () => {
