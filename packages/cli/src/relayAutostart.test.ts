@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, posix } from 'node:path';
@@ -763,12 +763,29 @@ test('the generated Windows task action and ownership guard run in real PowerShe
   }
 });
 
-// Waits for a file that a started program writes. conhost may return before its client finishes.
-async function readMarker(path: string): Promise<string | null> {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try { return await readFile(path, 'utf8'); } catch { await new Promise(accept => setTimeout(accept, 100)); }
+// Starts a task action as Task Scheduler does, with its argument text passed as it is, and
+// waits for the marker file its client writes. In headless mode conhost reads terminal input
+// from its standard input and closes the console when that input ends. Task Scheduler gives
+// the action no input at all, so the input pipe stays open until the client is done.
+async function runTaskAction(execute: string, argumentsLine: string, cwd: string, marker: string) {
+  const child = spawn(execute, [argumentsLine], { cwd, windowsHide: true, windowsVerbatimArguments: true });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  let exited = false;
+  const exit = new Promise<number | null>((accept, reject) => {
+    child.on('error', reject);
+    child.on('close', code => { exited = true; accept(code); });
+  });
+  let content: string | null = null;
+  for (let attempt = 0; attempt < 300 && content === null; attempt++) {
+    content = await readFile(marker, 'utf8').catch(() => null);
+    if (content === null) await new Promise(accept => setTimeout(accept, 100));
   }
-  return null;
+  child.stdin.end();
+  const timer = setTimeout(() => child.kill(), 30_000);
+  const code = await exit.finally(() => clearTimeout(timer));
+  return { content, code, exitedBeforeMarker: content === null && exited, output };
 }
 
 test('the registered Windows task action starts the startup script under the real headless console host', { skip: process.platform !== 'win32' }, async () => {
@@ -785,13 +802,9 @@ test('the registered Windows task action starts the startup script under the rea
   const marker = join(root, 'started.txt');
   await writeFile(join(options.home, 'relay', 'autostart.ps1'),
     `[System.IO.File]::WriteAllText('${marker.replace(/'/g, "''")}', 'started')\r\nexit 0\r\n`);
-  // Task Scheduler passes the argument text as it is, so the test does too.
-  const result = spawnSync(execute, [argumentsLine], {
-    encoding: 'utf8', timeout: 60_000, windowsHide: true, windowsVerbatimArguments: true, cwd: root,
-  });
-  assert.equal(result.error, undefined);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(await readMarker(marker), 'started');
+  const result = await runTaskAction(execute, argumentsLine, root, marker);
+  assert.equal(result.content, 'started', JSON.stringify(result));
+  assert.equal(result.code, 0, JSON.stringify(result));
 });
 
 test('failed OS registration remains unavailable instead of reporting completion', async () => {
