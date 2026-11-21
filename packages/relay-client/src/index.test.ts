@@ -3266,7 +3266,7 @@ test('an adopted answer stays in the file only for an owner that can read it, an
   assert.deepEqual(keptMessageIds(await f.read()), []);
 });
 
-test('the copy for an earlier version holds only a request that is due, never a live client\'s fresh request, and this version sends it once (shared protocol state)', async () => {
+test('the copy for an earlier version holds only a due request recent enough to replay exactly as signed, never a live client\'s fresh request, and this version sends it once (shared protocol state)', async () => {
   let down = false;
   const f = await sharedStateFixture('fabric-shared-rollback-', call =>
     down && call.path === '/agent-fabric/workspaces' ? sharedUnavailable() : sharedOk());
@@ -3279,14 +3279,14 @@ test('the copy for an earlier version holds only a request that is due, never a 
   down = false;
   await b.pollTask();
   assert.equal((await f.read()).pending, null, 'a live client\'s fresh request is never copied');
-  // 10 minutes later the request is due, and the next write copies it there exactly as signed.
+  // 10 minutes later the request is due, but it was signed at least that long ago. An earlier version gives a kept
+  // request signed more than 4 minutes ago a new time, nonce and signature in that request's session at its sequence,
+  // so after a rollback it would sign in the owner's session: the request is never copied there.
   await sharedLater(11, () => b.pollTask());
   const state = await f.read();
-  const entry = state.outboxes!['relay:w1']!;
-  assert.deepEqual([state.sessionId, state.nextSequence, state.pending], [entry.sessionId, entry.nextSequence, entry.pending],
-    'the earlier version finds the kept request at the top level, exactly as signed');
-  assert.equal(state.pending?.headers['x-dharma-message-id'], kept.messageId);
-  assert.deepEqual(keptMessageIds(state), [kept.messageId], 'this version never takes that copy for an orphan of its own');
+  assert.deepEqual([state.sessionId, state.nextSequence, state.pending], [null, 1, null],
+    'a request signed more than 4 minutes ago is never copied for an earlier version, which would sign it again');
+  assert.deepEqual(keptMessageIds(state), [kept.messageId], 'it stays in its owner\'s entry');
   // It was signed as long ago: another client leaves it to its owner, which sends it itself.
   const c = await f.open();
   await sharedLater(11, () => c.openSession());
@@ -3295,13 +3295,21 @@ test('the copy for an earlier version holds only a request that is due, never a 
   assert.equal(sentTimes(f.calls, kept.messageId), 2, 'its owner sends it once');
   let after = await f.read();
   assert.deepEqual([after.pending, keptMessageIds(after)], [null, []]);
-  // A kept request whose command exited is due at once, and is copied; another live client's fresh one is not.
+  // A kept request whose command exited is due at once, and is copied exactly as signed while its signature is recent
+  // enough to send unchanged. Another live client's fresh one is not copied, nor an exited command's request signed 5
+  // minutes ago, although it stood unchanged for longer.
   const dead = await exitedPid();
   const exited = sharedOrphan(f.config.deviceId, dead), fresh = sharedOrphan(f.config.deviceId, process.pid);
-  await writeSharedOutboxes(f.statePath, { ...after.outboxes, [`cli:${dead}:x:1`]: exited, [`cli:${process.pid}:fresh:1`]: fresh });
+  const stale = sharedOrphan(f.config.deviceId, dead, { minutesAgo: 5 });
+  stale.pending.headers['x-dharma-timestamp'] = new Date(Date.now() - 5 * 60_000).toISOString();
+  await writeSharedOutboxes(f.statePath, { ...after.outboxes, [`cli:${dead}:x:0`]: stale, [`cli:${dead}:x:1`]: exited,
+    [`cli:${process.pid}:fresh:1`]: fresh });
   await b.pollTask();
   after = await f.read();
-  assert.equal(after.pending?.headers['x-dharma-message-id'], orphanMessageId(exited), 'an exited command\'s kept request is copied');
+  assert.equal(after.pending?.headers['x-dharma-message-id'], orphanMessageId(exited),
+    'an exited command\'s recent kept request is copied, and one signed 5 minutes ago is not');
+  assert.deepEqual([after.sessionId, after.nextSequence, after.pending], [exited.sessionId, exited.nextSequence, exited.pending],
+    'every signed header and the body of the copy equal its entry\'s, so an earlier version replays it unchanged');
 });
 
 test('the README says what a rollback to an earlier version keeps (shared protocol state)', async () => {

@@ -213,8 +213,9 @@ test('a seeded model of owners, other clients, the earlier version, idle evictio
       },
       async earlierVersion() {
         if (!earlier) {
-          // It reads only the top level, replays the kept request there and re-signs a stale action acknowledgement one
-          // sequence higher in that request's session.
+          // It reads only the top level and replays the kept request there. It re-signs a stale action acknowledgement one
+          // sequence higher in that request's session, and gives any request signed more than 4 minutes ago a new time,
+          // nonce and signature at the same session and sequence.
           const snapshot = await read() ?? { schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null };
           const pending = snapshot.pending;
           if (pending) {
@@ -226,6 +227,11 @@ test('a seeded model of owners, other clients, the earlier version, idle evictio
                   headers: { ...pending.headers, 'x-dharma-message-id': randomUUID(),
                     'x-dharma-sequence': String(Number(pending.headers['x-dharma-sequence']) + 1) } };
               }
+            }
+            const signedAt = Date.parse(replay.headers['x-dharma-timestamp'] ?? '');
+            if (!Number.isFinite(signedAt) || Date.now() - signedAt > 4 * 60_000) {
+              replay = { ...replay, headers: { ...replay.headers, 'x-dharma-timestamp': new Date(Date.now()).toISOString(),
+                'x-dharma-nonce': randomUUID(), 'x-dharma-signature': randomUUID() } };
             }
             const status = earlierSend(replay);
             const answered = (status >= 200 && status < 300) || (status >= 400 && status < 500);
@@ -324,7 +330,8 @@ test('a seeded model of owners, other clients, the earlier version, idle evictio
     }
     // Only the process that opened a session signs in it; every other party sends there only exactly as signed: the
     // signed headers and the body byte for byte as its owner last signed them. A process with the same owner key (a
-    // restarted workspace loop) is that owner. The earlier version is checked by I1 only.
+    // restarted workspace loop) is that owner. The earlier version is held to the same rule: after a rollback it never
+    // signs in another party's session.
     const opener = new Map<string, string>(), first = new Map<string, Call>();
     const owner = (by: string) => by.startsWith('relay:') ? by.slice(0, by.indexOf('#')) : by;
     const signedByOwner = new Map<string, Set<string>>();
@@ -334,7 +341,6 @@ test('a seeded model of owners, other clients, the earlier version, idle evictio
       if (earliest) {
         assert.deepEqual([call.sessionId, call.sequence], [earliest.sessionId, earliest.sequence],
           `${where('end')}: ${call.by} sends another party's request only exactly as signed`);
-        if (call.by === 'earlier') continue;
         if (owner(call.by) === owner(earliest.by)) signedByOwner.get(call.messageId)!.add(call.envelope);
         else {
           assert.ok(signedByOwner.get(call.messageId)!.has(call.envelope),
