@@ -7,13 +7,12 @@ const workflow = parse(readFileSync(new URL('../.github/workflows/ci.yml', impor
 const validate = workflow.jobs.validate;
 
 test('only Windows receives a bounded allowance for measured cold-install and validation time', () => {
-  assert.equal(validate['timeout-minutes'], "${{ matrix.os == 'windows-latest' && 25 || 20 }}");
-  const coldInstallSeconds = 426;
-  const successfulValidationSeconds = 764;
-  const setupAuditCleanupSeconds = 43;
-  const estimatedSeconds = coldInstallSeconds + successfulValidationSeconds + setupAuditCleanupSeconds;
-  assert.ok(estimatedSeconds > 20 * 60);
-  assert.ok(estimatedSeconds * 1.2 < 25 * 60);
+  assert.equal(validate['timeout-minutes'], "${{ matrix.os == 'windows-latest' && 35 || 20 }}");
+  // Measured on windows-latest after the relay-client stack landed: one run was cancelled at the
+  // 25-minute limit and its rerun passed in 24m48s (install, validation, setup, audit and cleanup).
+  const observedWindowsSeconds = 24 * 60 + 48;
+  assert.ok(observedWindowsSeconds > 20 * 60);
+  assert.ok(observedWindowsSeconds * 1.2 < 35 * 60);
 });
 
 test('all operating systems and required security, packaging and container checks remain', () => {
