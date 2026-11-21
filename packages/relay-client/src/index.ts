@@ -88,10 +88,6 @@ interface OutboxEntry {
    * wrote them. Any client moves them to the list once it has room. Until then the entry stays like one with a kept
    * request, so a later write, a restart or another process never loses them. */
   keptCompletions?: RecoveredTaskCompletion[];
-  /** Set when the owner wrote its kept request back after its entry had left the file (see #reloadSharedState): the
-   * sequences signed in its session are unknown, so every client sends the request only exactly as signed, and drops
-   * an action acknowledgement past its time window instead of signing it again. */
-  asSignedOnly?: true;
 }
 
 interface AdoptedOutcome {
@@ -105,7 +101,7 @@ interface AdoptedOutcome {
 interface ProtocolState {
   schema: 'dharma.protocol-state/v1';
   /** In memory: this client's own session, sequence and kept request. In the file each client's own are in outboxes,
-   * and these hold a copy of the oldest kept request, for a session open of an earlier version to replay (see
+   * and these hold a copy of the oldest due kept request, for a session open of an earlier version to replay (see
    * #persist). */
   sessionId: string | null;
   nextSequence: number;
@@ -116,9 +112,9 @@ interface ProtocolState {
   outboxes?: Record<string, OutboxEntry>;
 }
 
-/** The most kept requests in one file. Entries without one fill only the room that is left. */
+/** The most entries in one file. Another client's entry stays only while it holds a kept request, kept completions or
+ * an answer of the last ORPHAN_RETRY_INTERVAL_MS (see #persist). */
 const OUTBOX_ENTRIES_MAX = 256;
-const IDLE_OUTBOX_ENTRIES_MAX = 32;
 /** The most recovered task completions in one file. */
 const RECOVERED_TASK_COMPLETIONS_MAX = 1_000;
 /** An entry whose kept request stood unchanged this long is orphaned, and another client sends an orphaned request
@@ -196,6 +192,7 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
     && (entry.adoptedOutcome === undefined || (entry.adoptedAt !== undefined && isAdoptedOutcome(entry.adoptedOutcome)))
     && (entry.keptCompletions === undefined || (Array.isArray(entry.keptCompletions)
       && entry.keptCompletions.length <= RECOVERED_TASK_COMPLETIONS_MAX && entry.keptCompletions.every(isRecoveredTaskCompletion)))
+    // A marker an earlier build of this version wrote; it is still read, and has no effect.
     && (entry.asSignedOnly === undefined || entry.asSignedOnly === true);
 }
 
@@ -222,34 +219,15 @@ function assertProtocolState(value: unknown): asserts value is ProtocolState {
 /** Every outbox entry of a file. The kept request of an earlier single-slot file becomes an orphan keyed by its
  * session, sent once by a later session open; a request that is always rebuilt is dropped as before. Such an entry has
  * no owner process, so it counts as unchanged from when its request was last signed or stamped: an earlier version
- * that still runs keeps 10 minutes to send its own request (see orphanDue). A top-level
- * request that is a copy of an entry's kept request (see #persist) is that entry's, not another orphan. So is one an
- * earlier version re-signed in place (a stale action acknowledgement gets a new message id, sequence and signature,
- * but keeps its session, path and idempotency key): it replaces the entry's request as the latest one signed. */
+ * that still runs keeps 10 minutes to send its own request (see orphanDue). A top-level request with the message id of
+ * an entry's kept request is that entry's copy (see #persist), not another orphan. The top-level session and next
+ * sequence are never read: only the process that opened a session signs in it, from the sequence it holds in memory. */
 function outboxesOf(state: ProtocolState): Record<string, OutboxEntry> {
   const outboxes: Record<string, OutboxEntry> = {};
   for (const [owner, entry] of Object.entries(state.outboxes ?? {})) outboxes[owner] = durableOutboxEntry(entry);
   const pending = state.pending;
-  const same = (kept: PendingRequest, name: string) => !!pending?.headers[name] && kept.headers[name] === pending.headers[name];
-  let copied = false;
-  for (const [owner, entry] of Object.entries(outboxes)) {
-    if (!pending || !entry.pending) continue;
-    copied = same(entry.pending, 'x-dharma-message-id');
-    if (!copied && entry.pending.pathname === pending.pathname && same(entry.pending, 'idempotency-key')
-      && same(entry.pending, 'x-dharma-session-id')) {
-      outboxes[owner] = {...entry, pending, nextSequence: Math.max(entry.nextSequence, state.nextSequence)};
-      copied = true;
-    }
-    if (copied) break;
-  }
-  // An earlier version that sent the top-level copy writes its session and next sequence back to the top level. That
-  // next sequence is above every sequence it signed in that session, so the entry of the session takes it, and its
-  // owner then sees that a sequence it does not know was signed there (see #reloadSharedState).
-  for (const [owner, entry] of Object.entries(outboxes)) {
-    if (state.sessionId && entry.sessionId === state.sessionId && state.nextSequence > entry.nextSequence) {
-      outboxes[owner] = {...entry, nextSequence: state.nextSequence};
-    }
-  }
+  const messageId = pending?.headers['x-dharma-message-id'];
+  const copied = !!messageId && Object.values(outboxes).some(entry => entry.pending?.headers['x-dharma-message-id'] === messageId);
   if (pending && !copied && !isExplicitlyRebuiltPath(pending.pathname) && !isSessionOpen(pending)) {
     const session = pending.headers['x-dharma-session-id'] || state.sessionId || '';
     const key = `migrated:${/^[A-Za-z0-9_-]{1,128}$/.test(session) ? session : sha256(session).slice(0, 32)}`;
@@ -271,7 +249,8 @@ function acknowledgementTimeStale(acknowledgedAt: string, now: number): boolean 
 
 /** Whether a kept request can be sent again only with a new signature at a new sequence, or not at all: a
  * content-bearing request, which is never replayed implicitly, or an action acknowledgement that is invalid or outside
- * its time window (see #sendPendingWithSigningControl). */
+ * its time window. Only the process that opened a session signs in it (see #sendPendingWithSigningControl), so another
+ * client never sends such a request. */
 function cannotResendAsSigned(pending: PendingRequest, now: number): boolean {
   if (isContentBearingPath(pending.pathname)) return true;
   if (!ACTION_ACKNOWLEDGEMENT_PATH.test(pending.pathname)) return false;
@@ -1404,12 +1383,13 @@ export class AgentFabricClient {
   #unwrittenCompletions = new Map<string, RecoveredTaskCompletion>();
   /** The completions in this client's own entry that wait for room in the queue, as of the last read or write. */
   #keptCompletions: RecoveredTaskCompletion[] = [];
-  /** Whether this client's kept request is in its own entry in the file, as of the last read or write. */
+  /** Whether this client's kept request is in its own entry in the file, as of the last read or write. A kept request
+   * that is not there is written back before it is sent (see #sendPendingWithSigningControl). */
   #keptOnDisk: boolean;
-  /** Set when this client's entry left the file while it kept a request (see #reloadSharedState): the sequences other
-   * clients signed in this session are unknown, so its kept request is sent only as signed and nothing new is signed
-   * in this session (see #sendKeptAsSigned). */
-  #sequenceFloorLost = false;
+  /** An action acknowledgement past its time window that this client kept from an earlier session, while openSession
+   * opens a new one: it stays in this client's entry, and is signed again only in the new session once the server
+   * answered its session open (see openSession). */
+  #deferredAcknowledgement: PendingRequest | null = null;
   /** Opened with an owner key, as a workspace loop is: it also sends due orphans after its own requests. */
   readonly #longLived: boolean;
   #serial: Promise<unknown> = Promise.resolve();
@@ -1418,7 +1398,6 @@ export class AgentFabricClient {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
     state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean; isolatedSession?: boolean;
     ownerKey: string; longLived: boolean; otherOutboxes: Record<string, OutboxEntry>; keptOnDisk: boolean;
-    sequenceFloorLost: boolean;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -1436,7 +1415,6 @@ export class AgentFabricClient {
     this.#longLived = input.longLived;
     this.#otherOutboxes = input.otherOutboxes;
     this.#keptOnDisk = input.keptOnDisk;
-    this.#sequenceFloorLost = input.sequenceFloorLost;
   }
 
   #binding() {
@@ -1495,7 +1473,7 @@ export class AgentFabricClient {
       recoveredTaskCompletions: [],
     };
     let otherOutboxes: Record<string, OutboxEntry> = {};
-    let keptOnDisk = false, sequenceFloorLost = false;
+    let keptOnDisk = false;
     if (!readOnly && !isolatedSession) try {
       const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
       const parsed = JSON.parse(bytes) as unknown;
@@ -1503,12 +1481,11 @@ export class AgentFabricClient {
       const {[ownerKey]: own, ...others} = outboxesOf(parsed);
       otherOutboxes = others;
       keptOnDisk = !!own?.pending;
-      // A request an earlier client with this owner key wrote back after its entry left the file is sent only as signed,
-      // as is one in a session an earlier version signed in after it was kept (see outboxesOf).
-      sequenceFloorLost = !!own?.pending && (own.asSignedOnly === true
-        || own.nextSequence > Number(own.pending.headers['x-dharma-sequence'] || 0));
+      // Only the kept request of this owner key is taken over, to be sent again exactly as signed (or, an action
+      // acknowledgement past its time window, signed again in this process's own session; see openSession). The
+      // session that signed it belongs to the process that opened it, so this client opens its own and never signs there.
       state = {
-        schema: 'dharma.protocol-state/v1', sessionId: own?.sessionId ?? null, nextSequence: own?.nextSequence ?? 1,
+        schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1,
         pending: own?.pending ?? null, recoveredTaskCompletions: parsed.recoveredTaskCompletions ?? [],
       };
     } catch (error) {
@@ -1522,7 +1499,7 @@ export class AgentFabricClient {
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
       statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession, ownerKey,
-      longLived: input.ownerKey !== undefined, otherOutboxes, keptOnDisk, sequenceFloorLost,
+      longLived: input.ownerKey !== undefined, otherOutboxes, keptOnDisk,
     });
   }
 
@@ -1536,9 +1513,14 @@ export class AgentFabricClient {
     // latest file, all in one signing-control section. It calls the sends directly: waiting on #serial while holding
     // control could deadlock. The section ends before the session POST, which takes control again through #serial.
     const replace = async () => {
+      const pending = this.#state.pending;
+      // An action acknowledgement past its time window can be sent again only signed again. Only the process that
+      // opened a session signs in it, and this one may have taken the acknowledgement over from another process with
+      // its owner key, so it is signed again only in the new session, after its session open (see below).
+      const deferred = !!pending && ACTION_ACKNOWLEDGEMENT_PATH.test(pending.pathname) && cannotResendAsSigned(pending, Date.now());
       // Not while a task lease is held in this process, so the lease heartbeat of a sibling loop never waits on them,
       // and not when this section replays this client's own kept request, so it holds signing control for one send.
-      const replays = !!this.#state.pending && !isExplicitlyRebuiltPath(this.#state.pending.pathname);
+      const replays = !!pending && !deferred && !isExplicitlyRebuiltPath(pending.pathname);
       if (this.#durable && !replays && !taskLeaseHeld(Date.now())) await this.#adoptOrphans();
       if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
         // Content-bearing requests require refreshed consent. Repository connect
@@ -1546,22 +1528,34 @@ export class AgentFabricClient {
         // their explicit workflows instead of replayed from stale prerequisites.
         this.#state.pending = null;
         await this.#persist();
-      } else if (this.#state.pending && this.#sequenceFloorLost) {
-        await this.#sendKeptAsSigned();
-      } else if (this.#state.pending) {
+      } else if (this.#state.pending && !deferred) {
         await this.#sendPendingWithSigningControl(this.#state);
       }
+      if (deferred) this.#deferredAcknowledgement = this.#state.pending;
       this.#state.sessionId = randomUUID();
       this.#state.nextSequence = 1;
       this.#state.pending = null;
-      this.#sequenceFloorLost = false;
       await this.#persist();
     };
     if (this.#durable || this.#state.pending) await this.#withProtocolState(replace);
     else await replace();
-    return this.signedPost('/agent-fabric/sessions', {
+    const opened = await this.signedPost('/agent-fabric/sessions', {
       connectionId: randomBytes(24).toString('base64url'), durableCursor: null, relayVersion, deviceTelemetry,
     });
+    if (this.#deferredAcknowledgement) {
+      // In a section of its own, as this client's next request: the acknowledgement is signed again at the next
+      // sequence of the new session, with its idempotency key, and sent. Its outcome is never this caller's: a
+      // retryable failure keeps it for this client's next request.
+      const reissue = this.#serial.then(() => this.#withProtocolState(async () => {
+        if (!this.#deferredAcknowledgement || this.#state.pending) return;
+        this.#state.pending = this.#deferredAcknowledgement;
+        this.#deferredAcknowledgement = null;
+        try { await this.#sendPendingWithSigningControl(this.#state); } catch { await this.#assertHostScope(); }
+      }));
+      this.#serial = reissue.catch(() => undefined);
+      await reissue;
+    }
+    return opened;
   }
 
   async registerWorkspace(body: Record<string, unknown>, telemetry: DeviceTelemetryOptions = {}) {
@@ -1777,47 +1771,37 @@ export class AgentFabricClient {
       if (waiting?.length) entry.keptCompletions = waiting; else delete entry.keptCompletions;
     }
     this.#state.recoveredTaskCompletions = merged;
-    // This client's kept request left the file, although no write by this client drops one: its entry was removed (by
-    // the idle cap, by an earlier version that rewrote the file without outboxes, or with the file), or came back in an
-    // older state (an earlier version writes back the whole file it read when it opened) that holds another call, or no
-    // request and no other client's attempt. Or an earlier version signed in this session after the request was kept:
-    // the entry then shows a next sequence above this client's (see outboxesOf). Another client or an earlier version
-    // may have sent it, and an earlier version may have signed in this session. The file no longer shows which
-    // sequences were signed there. So this client keeps the request and
-    // sends it again only exactly as signed, signs nothing new in this session, and then closes it (see
-    // #sendKeptAsSigned), which writes the request back to the file, marked so, before it sends it.
+    // This client's session, sequence and kept request are its own, and only it signs in its session, so the file never
+    // changes them, with one exception below: another client's answer to its kept request.
     const kept = this.#state.pending;
-    if (kept && this.#keptOnDisk && (!own || (own.pending
-      ? !sameKeptRequest(own.pending, kept) || own.nextSequence > this.#state.nextSequence : !own.adoptedAt))) {
-      this.#sequenceFloorLost = true;
-      this.#keptOnDisk = false;
-      // The same call can still be in the file: its top-level copy, moved to a migrated entry, or as an earlier version
-      // re-signed it. It joins this client's entry, as the one signed last, so no other entry holds it.
-      const sequence = (request: PendingRequest) => Number(request.headers['x-dharma-sequence'] || 0);
-      const holders: Array<[string | null, OutboxEntry]> = [...(own ? [[null, own] as [null, OutboxEntry]] : []),
-        ...Object.entries(others)];
-      for (const [owner, entry] of holders) {
-        if (!entry.pending || !sameKeptRequest(entry.pending, kept)) continue;
-        if (sequence(entry.pending) > sequence(this.#state.pending!)) this.#state.pending = entry.pending;
-        this.#state.nextSequence = Math.max(this.#state.nextSequence, entry.nextSequence);
-        if (owner !== null) others[owner] = {...entry, pending: null, nextSequence: entry.nextSequence + 1};
-      }
-    }
-    // Another client sent this client's kept request after it stood unchanged (see orphanDue). The file then holds
-    // its outcome: no kept request once it was answered, with the answer, or the request as last sent. When the
-    // answer is not there (never kept, or removed after ORPHAN_RETRY_INTERVAL_MS), this client keeps its signed
-    // request, so a retry sends it again with the same message id and idempotency key instead of signing the call again.
-    // The file's next sequence counts any sequence the other client signed in this session, so none is signed again.
-    else if (own?.adoptedAt && this.#state.pending) {
-      const signed = this.#state.pending;
+    if (!kept) return;
+    if (own?.adoptedAt && (own.pending ? sameKeptRequest(own.pending, kept) : true)) {
+      // Another client sent this client's kept request after it stood unchanged (see orphanDue). The file then holds
+      // its outcome: no kept request once it was answered, with the answer, or the request as last sent. When the
+      // answer is not there (never kept, or removed after ORPHAN_RETRY_INTERVAL_MS), this client keeps its signed
+      // request, so a retry sends it again with the same message id and idempotency key instead of signing the call
+      // again. That client sent it only exactly as signed, so no sequence in this session is new to this client.
       const outcome = own.adoptedOutcome;
-      const answered = !own.pending && !!outcome && outcome.messageId === signed.headers['x-dharma-message-id'];
-      this.#state.nextSequence = Math.max(this.#state.nextSequence, own.nextSequence);
-      if (own.pending || answered) this.#state.pending = own.pending;
+      const answered = !own.pending && !!outcome && outcome.messageId === kept.headers['x-dharma-message-id'];
+      if (answered) {
+        this.#state.pending = null;
+        this.#state.nextSequence = Math.max(this.#state.nextSequence, Number(kept.headers['x-dharma-sequence'] || 0) + 1);
+      } else if (own.pending) this.#state.pending = own.pending;
+      else this.#keptOnDisk = false;
       this.#adoptedOutcome = answered
-        ? {method: signed.method, pathname: signed.pathname, body: signed.body, status: outcome!.status,
-          response: outcome!.response}
+        ? {method: kept.method, pathname: kept.pathname, body: kept.body, status: outcome!.status, response: outcome!.response}
         : null;
+      return;
+    }
+    if (own?.pending && sameKeptRequest(own.pending, kept)) return;
+    // The kept request left this client's entry, although no write by this client drops one: the entry was removed (by
+    // an earlier version that rewrote the file without outboxes, or with the file), or came back in an older state (an
+    // earlier version writes back the whole file it read when it opened) without it. This client keeps it, in its
+    // session, and writes it back to its own entry before it sends it again exactly as signed. Another entry that holds
+    // the same call (the top-level copy, moved to a migrated entry) gives it up, so only this client's entry holds it.
+    this.#keptOnDisk = false;
+    for (const [owner, entry] of Object.entries(others)) {
+      if (entry.pending && sameKeptRequest(entry.pending, kept)) others[owner] = {...entry, pending: null};
     }
   }
 
@@ -1831,16 +1815,20 @@ export class AgentFabricClient {
    * that still runs), so a live owner takes the outcome from the file, and #persist drops that answer after
    * ORPHAN_RETRY_INTERVAL_MS. A request without a definite answer stays and is due again after
    * ORPHAN_RETRY_INTERVAL_MS. An orphan is sent only exactly as signed, so this client never signs in another client's
-   * session; a stale action acknowledgement is dropped unsent. While more are due, this client's next request sends
-   * the next one. An orphaned request only its owner can use is dropped without sending. */
+   * session. While more are due, this client's next request sends the next one. A kept request only its owner can use
+   * (see isOwnerOnlyRequest), or one that could be sent only signed again (see cannotResendAsSigned), is never sent by
+   * another client: it stays in its entry while its owner can come back (a workspace loop that restarts, or a process
+   * that still runs), and is settled unsent once that owner is gone (a command that exited, or a migrated entry). */
   async #adoptOrphans(): Promise<void> {
     const now = Date.now();
     this.#orphansDueAt = now + ORPHAN_RETRY_INTERVAL_MS;
     const due = Object.entries(this.#otherOutboxes).filter(([owner, entry]) => orphanDue(owner, entry, now));
+    const ownerOnly = (entry: OutboxEntry) => isOwnerOnlyRequest(entry.pending!) || cannotResendAsSigned(entry.pending!, now);
+    const ownerGone = (owner: string, entry: OutboxEntry) => owner.startsWith('migrated:')
+      || (owner.startsWith('cli:') && !ownerProcessAlive(entry.ownerPid));
     let unwritten = false;
-    for (const [, entry] of due) {
-      if (!isOwnerOnlyRequest(entry.pending!)) continue;
-      entry.nextSequence += 1;
+    for (const [owner, entry] of due) {
+      if (!ownerOnly(entry) || !ownerGone(owner, entry)) continue;
       entry.pending = null;
       entry.adoptedAt = entry.updatedAt = new Date().toISOString();
       delete entry.adoptedOutcome;
@@ -1848,7 +1836,7 @@ export class AgentFabricClient {
     }
     let sent = 0;
     for (const [owner, entry] of due) {
-      if (!entry.pending) continue;
+      if (!entry.pending || ownerOnly(entry)) continue;
       if (sent === ORPHAN_SENDS_PER_SECTION) { this.#orphansDueAt = now; break; }
       sent += 1;
       const messageId = entry.pending.headers['x-dharma-message-id'] ?? '';
@@ -1865,7 +1853,7 @@ export class AgentFabricClient {
         });
       } catch { await this.#assertHostScope(); }
       entry.adoptedAt = new Date().toISOString();
-      if (!entry.pending) { entry.updatedAt = entry.adoptedAt; delete entry.asSignedOnly; }
+      if (!entry.pending) entry.updatedAt = entry.adoptedAt;
       await this.#persist();
       if (entry.pending) break;
     }
@@ -1893,15 +1881,6 @@ export class AgentFabricClient {
       // Another client delivered this call's kept request: the retry gets that answer, as a recovery of its own would.
       if (adopted.status >= 200 && adopted.status < 300) return adopted.response;
       throw new AgentFabricRequestError(adopted.response, adopted.status, true);
-    }
-    if (this.#sequenceFloorLost) {
-      // This client's entry left the file (see #reloadSharedState): its kept request is sent only as signed, and
-      // nothing new is signed in this session, which is then closed.
-      const kept = this.#state.pending;
-      const sameRequest = !!kept && kept.method === method && kept.pathname === pathname && kept.body === serialized;
-      const recovered = await this.#sendKeptAsSigned();
-      if (sameRequest && recovered) return recovered;
-      throw new Error('Relay session is not open.');
     }
     if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
       // An ambiguous content delivery is never replayed implicitly. The next
@@ -1958,39 +1937,16 @@ export class AgentFabricClient {
     return this.#sendPendingWithSigningControl(this.#state);
   }
 
-  /** Sends this client's kept request after its entry left the file (see #reloadSharedState), only exactly as signed:
-   * the same message id, sequence and idempotency key, with at most a fresh timestamp. A request that could be sent
-   * only at a new sequence, or never replayed (see cannotResendAsSigned), is settled unsent. Once the request has a
-   * definite answer or is settled, the session is closed, so the next call needs a new session. A retryable failure
-   * keeps both the request and the session for the next call. The request is back in this client's entry before it is
-   * sent, so after a failed send, a crash or a new client with the same owner key, its owner replays it, or another
-   * client sends it once it is due (see orphanDue). Returns the answer when the request was sent. */
-  async #sendKeptAsSigned(): Promise<Record<string, unknown> | undefined> {
-    try {
-      const kept = this.#state.pending;
-      if (kept && !cannotResendAsSigned(kept, Date.now())) {
-        if (!this.#keptOnDisk) await this.#persist();
-        return await this.#sendPendingWithSigningControl(this.#state);
-      }
-      this.#state.pending = null;
-      return undefined;
-    } finally {
-      if (!this.#state.pending) {
-        this.#sequenceFloorLost = false;
-        this.#state.sessionId = null;
-        this.#adoptedOutcome = null;
-        await this.#persist();
-      }
-    }
-  }
-
   /** Sends the kept request of one outbox entry: this client's own, or an orphan in #adoptOrphans. answered sees a
-   * definite answer before the entry is written without its request. */
+   * definite answer before the entry is written without its request. This client's own kept request is in its entry
+   * in the file before it is sent: when the entry left the file (see #reloadSharedState), it is written back first, so
+   * after a failed send, a crash or a new client with the same owner key, it is still there to send again. */
   async #sendPendingWithSigningControl(slot: Pick<OutboxEntry, 'nextSequence' | 'pending'>,
     answered?: (status: number, response: Record<string, unknown>) => void): Promise<Record<string, unknown>> {
     await this.#assertHostScope();
     const pending = slot.pending;
     if (!pending) throw new Error('No pending protocol request.');
+    if (slot === this.#state && !this.#keptOnDisk) await this.#persist();
     // A kept completion is sent again even when the queue is full: the server may already have accepted it, and its
     // receipt then waits in this client's entry for room (see #recordRecoveredTaskCompletion).
     if (ACTION_ACKNOWLEDGEMENT_PATH.test(pending.pathname)) {
@@ -2010,19 +1966,19 @@ export class AgentFabricClient {
         await this.#persist();
         throw new Error('Stale action acknowledgement is invalid and was discarded.');
       }
-      if (acknowledgementTimeStale(acknowledgement.acknowledgedAt, Date.now())
-        && (slot !== this.#state || this.#sequenceFloorLost)) {
-        // Only its owner signs in a session, and only while it knows every sequence signed there: another client sends
-        // an orphan only exactly as signed, as does an owner whose entry left the file (see #reloadSharedState). A stale
-        // acknowledgement cannot be sent so, and is dropped unsent. A live owner keeps its own copy and re-signs it.
-        slot.pending = null;
-        await this.#persist();
-        throw new Error('Stale action acknowledgement can be sent only as signed and was discarded.');
-      }
       if (acknowledgementTimeStale(acknowledgement.acknowledgedAt, Date.now())) {
+        // Only the process that opened a session signs in it, from the sequences it holds in memory: this client signs
+        // the acknowledgement again only as its own kept request, in its own open session, at its next sequence. It
+        // keeps the idempotency key, so the server can tell it is the same acknowledgement. Every other client sends a
+        // kept request only exactly as signed (see #adoptOrphans), so nothing else signs here.
+        const sessionId = this.#state.sessionId;
+        if (slot !== this.#state || !sessionId) {
+          throw new Error('Stale action acknowledgement can be signed again only in its owner\'s own session.');
+        }
         const refreshed = refreshActionDecisionAcknowledgement(acknowledgement);
-        // Above every sequence used in this session, including one an earlier version signed when it sent this entry.
-        const sequence = Math.max(Number(pending.headers['x-dharma-sequence'] || 0) + 1, slot.nextSequence);
+        // The next sequence of this session, above the acknowledgement's own when it was signed in this session too.
+        const sequence = Math.max(this.#state.nextSequence, pending.headers['x-dharma-session-id'] === sessionId
+          ? Number(pending.headers['x-dharma-sequence'] || 0) + 1 : 0);
         const timestamp = new Date().toISOString();
         const messageId = randomUUID();
         const nonce = randomBytes(24).toString('base64url');
@@ -2031,8 +1987,9 @@ export class AgentFabricClient {
           bodyHash: `sha256:${sha256(pending.body)}`,
           deviceId: this.config.deviceId, messageId, method: pending.method, nonce,
           organizationId: this.config.organizationId, pathname: pending.pathname,
-          sequence, sessionId: pending.headers['x-dharma-session-id'], timestamp,
+          sequence, sessionId, timestamp,
         }), 'utf8');
+        pending.headers['x-dharma-session-id'] = sessionId;
         pending.headers['x-dharma-message-id'] = messageId;
         pending.headers['x-dharma-timestamp'] = timestamp;
         pending.headers['x-dharma-nonce'] = nonce;
@@ -2246,26 +2203,20 @@ export class AgentFabricClient {
     // Authorized content and state-dependent repository connects are rebuilt
     // from their governed source. Do not retain them as an automatic replay
     // that can outlive consent or the workspace registration they depend on.
-    // Each other client's entry is written back as read; an idle entry of an
-    // owner process that has exited is dropped once no other client took its
-    // request in the last ORPHAN_RETRY_INTERVAL_MS (an owner that read the
-    // entry earlier still finds the answer), and the newest idle entries are
-    // kept up to IDLE_OUTBOX_ENTRIES_MAX. A kept request is never dropped.
-    // The entry limit counts kept requests only: a write is refused only when
-    // it would add one to a full file, and idle entries, this client's own
-    // included, take only the room that is left.
+    // Each other client's entry is written back as read while it holds a kept
+    // request, kept completions, or an answer another client got for it in the
+    // last ORPHAN_RETRY_INTERVAL_MS (its owner may still retry the call); every
+    // other entry is dropped, so entries of clients that come and go never fill
+    // the file. A kept request is never dropped.
     const outboxes: Record<string, OutboxEntry> = {};
-    const idle: Array<[string, OutboxEntry]> = [];
     const now = Date.now();
     for (const [owner, read] of Object.entries(this.#otherOutboxes)) {
       let entry = durableOutboxEntry(read);
       if (entry.adoptedOutcome && !recentlyAdopted(entry, now)) {
-        // An adopted answer stays only while its owner may still retry the call (see recentlyAdopted).
         const {adoptedOutcome: _answer, ...rest} = entry;
         entry = rest;
       }
-      if (entry.pending || entry.keptCompletions) outboxes[owner] = entry;
-      else if (ownerProcessAlive(entry.ownerPid) || recentlyAdopted(entry, now)) idle.push([owner, entry]);
+      if (entry.pending || entry.keptCompletions || entry.adoptedOutcome) outboxes[owner] = entry;
     }
     // A file never holds more entries than a reader accepts. Only a new kept request an earlier version left at the
     // top level of a full file can exceed them (see outboxesOf); it stays at the top level until it is sent.
@@ -2275,27 +2226,31 @@ export class AgentFabricClient {
       leftover = outboxes[migrated];
       delete outboxes[migrated];
     }
-    const {sessionId, nextSequence, pending} = this.#state;
+    const {sessionId, nextSequence} = this.#state;
+    // An acknowledgement kept from an earlier session while a new one opens stays in this client's entry.
+    const pending = this.#state.pending ?? this.#deferredAcknowledgement;
     // A completion this client recorded that the queue has no room for waits in its own entry, which is then kept.
     const listed = this.#state.recoveredTaskCompletions ?? [];
     const waiting = [...this.#keptCompletions, ...[...this.#unwrittenCompletions.values()].filter(item =>
       !listed.some(other => other.taskId === item.taskId) && !this.#keptCompletions.some(other => other.taskId === item.taskId))];
+    // The next sequence is written only because the file format has it; no client reads another's.
     const own = durableOutboxEntry({sessionId, nextSequence, pending, ownerPid: process.pid,
-      updatedAt: new Date().toISOString(), ...(waiting.length ? {keptCompletions: waiting} : {}),
-      ...(pending && this.#sequenceFloorLost ? {asSignedOnly: true as const} : {})});
-    let room = OUTBOX_ENTRIES_MAX - Object.keys(outboxes).length;
+      updatedAt: new Date().toISOString(), ...(waiting.length ? {keptCompletions: waiting} : {})});
+    const room = OUTBOX_ENTRIES_MAX - Object.keys(outboxes).length;
     if (room < 1 && (waiting.length || (own.pending && !isSessionOpen(own.pending)))) {
       throw new Error('relay_protocol_state_outbox_full');
     }
-    if (room > 0) { outboxes[this.#ownerKey] = own; room -= 1; }
-    idle.sort(([, a], [, b]) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-    for (const [owner, entry] of idle.slice(0, Math.min(IDLE_OUTBOX_ENTRIES_MAX, room))) outboxes[owner] = entry;
+    if (room > 0) outboxes[this.#ownerKey] = own;
     // An earlier version reads only the top-level session, sequence and kept request, and its session open replays
-    // that request and then writes a file without outboxes. So the oldest kept request, exactly as signed, also goes
-    // there: after a rollback the earlier version still sends that one, with the same message id. outboxesOf never
-    // takes this copy for another orphan.
-    const [copy] = leftover ? [leftover] : Object.values(outboxes)
-      .filter(entry => entry.pending && !isOwnerOnlyRequest(entry.pending))
+    // that request and then writes a file without outboxes. So the oldest kept request that is already due (see
+    // orphanDue) also goes there, exactly as signed: after a rollback the earlier version still sends that one, with
+    // the same message id. A live client's fresh request is never handed to it, nor a request only its owner can use,
+    // nor an action acknowledgement, which the earlier version would sign again in its owner's session. outboxesOf
+    // never takes this copy for another orphan.
+    const [copy] = leftover ? [leftover] : Object.entries(outboxes)
+      .filter(([owner, entry]) => entry.pending && orphanDue(owner, entry, now) && !isOwnerOnlyRequest(entry.pending)
+        && !ACTION_ACKNOWLEDGEMENT_PATH.test(entry.pending.pathname))
+      .map(([, entry]) => entry)
       .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt));
     await atomicJson(this.#statePath, {
       schema: 'dharma.protocol-state/v1', sessionId: copy?.sessionId ?? null, nextSequence: copy?.nextSequence ?? 1,

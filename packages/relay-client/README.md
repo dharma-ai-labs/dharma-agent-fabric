@@ -110,17 +110,21 @@ read the per-client outbox entries described below. The relay upgrade stops
 the relay before it switches versions, but a command of the earlier version
 that is still running can overwrite the file until it exits.
 
-An earlier version reads only one kept request, at the top level of the file.
-Every write of this version copies the oldest kept request there, exactly as
-signed (a session open, poll or read is never copied); this version never sends
+Only the process that opened a session signs in it, from the sequence it holds
+in memory: no client reads another's session or sequence from the file, and a
+restarted process with the same owner key opens a session of its own. Every
+other client sends a kept request only exactly as signed, with the same message
+id, session, sequence and idempotency key. An earlier version reads only one
+kept request, at the top level of the file. Every write of this version copies
+there, exactly as signed, the oldest kept request that is already due (see
+below). A live client's fresh request, a session open, poll or read, and an
+action acknowledgement are never copied, so an earlier version never signs an
+acknowledgement again in this version's sessions. This version never sends
 that copy on its own. After a rollback to an earlier version, the first
-session open of that version sends the copied request again and then writes a
-file without the per-client entries. It sends it with the same message id,
-except an action acknowledgement older than 8 minutes, which v0.2.225 and
-earlier sign again with a new message id and the same idempotency key. Every
-other kept request is then discarded, and whether the server received it stays
-unknown. The completion receipts that wait in an entry (see below) are
-discarded too.
+session open of that version sends the copied request again, with the same
+message id, and then writes a file without the per-client entries. A rollback
+loses at most the rest: every other kept request, whose outcome then stays
+unknown, and the completion receipts that wait in an entry (see below).
 
 Each client keeps its own outbox entry in the protocol-state file: its
 session, its next sequence and at most one kept request. A relay workspace
@@ -155,11 +159,15 @@ refusal without signing the call again. Only an answer whose body is a JSON
 object is kept. When no answer is there (any other answer, or one removed
 after its 10 minutes), the owner sends the request it signed again, with the
 same message id and idempotency key; it never signs that call again. Only an
-action acknowledgement older than 8 minutes is signed again, by its owner only,
-with a new message id, at a sequence above every one already used in its
-session. Another client sends a kept request only exactly as signed and drops
-such an acknowledgement unsent, so it never signs in another client's session;
-an owner that still runs keeps its own copy and signs it again. The
+action acknowledgement older than 8 minutes is signed again, with a new message
+id and the same idempotency key, and only by its owner process in its own open
+session, at its next sequence. A process that took it over with its owner key
+signs it again only in the session it opens, once the server answered that
+session open. Another client never sends such an acknowledgement, nor a kept
+session open, poll or read: it leaves them in the entry while their owner can
+come back (a workspace loop that restarts, or a process that still runs), and
+removes them unsent once that owner is gone (a command that exited, or an
+entry moved from an earlier version's file). The
 client records each such send in
 the file before it starts, so a request without a definite answer, including
 one whose sender stopped during the send, stays in the file and is sent again
@@ -167,42 +175,23 @@ after at least 10 minutes. A session open sends at most one such request in
 its signing-control section, and none when it replays its own kept request
 there, so another process that waits for signing control waits for at most
 one such send; while more are due, each next request of a client opened with
-an owner key sends one more. A kept session open, poll or read matters only to its
-owner: another client removes an orphaned one without sending it, so the task
-or content a poll or read returns is never written to the file. A kept request
-in a file written by an earlier version is moved to such an entry when the file
-is first read, unless it is the copy of a kept request in an entry, or that
-request as the earlier version re-signed it (same session, path and
-idempotency key), which then replaces the entry's request. Such an entry has
+an owner key sends one more. A kept session open, poll or read matters only to
+its owner, so the task or content a poll or read returns is never written to
+the file. A kept request in a file written by an earlier version is moved to
+such an entry when the file is first read, unless it has the message id of a
+kept request in an entry (it is then that entry's copy). Such an entry has
 no owner process: another client sends its request only once it has stood
 unchanged for 10 minutes, counted from when it was last signed or stamped, so
 a command of the earlier version that still runs sends its own request first.
-Entries without a kept request are removed once
-their owner process has exited, except that an entry whose request another
-client answered stays for 10 minutes, so an owner that read the entry before
-still finds the answer. At most 32 entries without a kept request stay, the
-newest first, in the room the kept requests leave. When the entry of an owner
-that still runs leaves the file while it keeps a request (the idle cap removed
-it after another client answered it, an earlier version rewrote the file, or
-the file was removed), comes back holding another request, or no request and no
-other client's attempt (an earlier version writes back the whole file it read
-when it opened), or shows that an
-earlier version signed in the owner's session after the request was kept (it
-sent the copy at the top level of the file and wrote back a higher next
-sequence), the file no longer shows whether another client sent
-that request, nor which sequences were signed in the owner's session. The owner
-then sends its kept request again only exactly as signed, with the same message
-id, sequence and idempotency key. It drops unsent a request that could be sent
-only at a new sequence or never replayed (an action acknowledgement past its
-time window, or a content-bearing request). Before it sends the request, it
-writes it back to its own entry, marked to be sent only as signed, and no
-other entry then holds it: a new client with the same owner key, or another
-client once the entry is due, also sends it only as signed and drops an action
-acknowledgement past its time window. It signs nothing new in that
-session: once the request has an answer or is dropped, the session is closed.
-The call that sent it gets the answer only when it is the same call as the
-kept request; otherwise, and for every later call until the owner opens a new
-session, it fails with `Relay session is not open.`
+Another client's entry stays in the file only while it holds a kept request,
+waiting completion receipts, or an answer another client got for it in the
+last 10 minutes; every other entry is removed on the next write, so clients
+that come and go never fill the file. When the kept request of an owner that
+still runs leaves its entry (an earlier version rewrote the file or wrote back
+an older copy, or the file was removed), the owner keeps the request and its
+session: it writes the request back to its own entry before it sends it again,
+exactly as signed, and signs its next call at the next sequence it holds in
+memory.
 
 The file holds at most 1,000 recovered task completions. A new completion is
 refused while that list is full, but a kept completion is still sent again,

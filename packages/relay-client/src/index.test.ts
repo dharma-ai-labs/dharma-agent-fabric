@@ -1135,12 +1135,14 @@ test('signed outbox retries the exact message after an unknown network outcome',
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   state.outboxes['relay:restart'].pending.headers['x-dharma-timestamp'] = '2026-01-01T00:00:00.000Z';
   await writeFile(statePath, JSON.stringify(state));
+  // A restarted process never signs in the session it inherited: its session open sends the kept request again,
+  // exactly as signed, before it opens its own session.
   const resumed = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
-  await resumed.registerWorkspace({ name: 'Work', workspaceId: 'workspace' });
-  assert.equal(messageIds.at(-2), messageIds.at(-1));
+  await resumed.openSession();
+  assert.equal(messageIds.at(-3), messageIds.at(-2));
+  assert.equal(idempotencyKeys.at(-3), messageIds.at(-3));
   assert.equal(idempotencyKeys.at(-2), messageIds.at(-2));
-  assert.equal(idempotencyKeys.at(-1), messageIds.at(-1));
-  assert.notEqual(timestamps.at(-2), timestamps.at(-1));
+  assert.notEqual(timestamps.at(-3), timestamps.at(-2));
 });
 
 for (const scenario of [
@@ -1173,13 +1175,13 @@ for (const scenario of [
       if (failures > 0) { failures -= 1; throw new Error('unknown delivery outcome'); }
       return new Response(JSON.stringify({ ok: true, organizationId: 'org_a', rollout: null, observed: call }), { status: 200 });
     };
-    let client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
+    const client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
     await client.openSession();
     const send = (method: string, route: string, body: unknown) => method === 'GET' ? client.signedGet(route) : client.signedPost(route, body);
     failures = 1;
     await assert.rejects(send(scenario.oldMethod, scenario.oldRoute, scenario.oldBody), /unknown delivery/);
     const original = calls.at(-1)!;
-    client = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
+    // The same process continues: only the process that opened a session signs in it.
     const pendingBytes = await readFile(statePath, 'utf8');
     const count = calls.length;
     const invalid: Record<string, unknown> = {};
@@ -1560,6 +1562,7 @@ test('an ambiguous evidence response is neither persisted nor implicitly replaye
   assert.doesNotMatch(persisted, /customer-content/);
   assert.equal(JSON.parse(persisted).outboxes['relay:restart'].nextSequence, 3);
   const resumed = await AgentFabricClient.open(withOwner({ configPath, statePath, store, fetcher }, 'relay:restart'));
+  await resumed.openSession();
   await resumed.registerWorkspace({ workspaceId: 'control-operation' });
   assert.equal(paths.filter((path) => path.endsWith('/responses')).length, 1);
 });
