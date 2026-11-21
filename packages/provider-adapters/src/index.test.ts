@@ -742,6 +742,115 @@ test('Claude task execution exposes only bounded edit tools and registered comma
   assert.equal(argv.includes('--dangerously-skip-permissions'), false);
 });
 
+async function claudeTaskArgv(allowWrites: boolean, allowedCommandArgv: string[][]): Promise<string[]> {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-claude-tools-'));
+  let argv: string[] = [];
+  try {
+    await executeProviderTask({
+      provider: 'claude', workspace: root, instructions: 'Change note.txt to say changed.', timeoutSeconds: 30,
+      allowedCommandArgv, allowWrites,
+      runner: async (input) => {
+        argv = input.argv;
+        return { exitCode: 0, signal: null, timedOut: false, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+  return argv;
+}
+
+function singleFlagValue(argv: string[], flag: string): string {
+  assert.equal(argv.filter(argument => argument === flag).length, 1, `${flag} appears exactly once`);
+  return String(argv[argv.indexOf(flag) + 1]);
+}
+
+const claudeEditingTools = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit'];
+
+test('Claude read-only tasks get only read and search tools and no auto-approved edits', async () => {
+  const argv = await claudeTaskArgv(false, []);
+  // Glob and Grep only read and need no approval inside the worktree; keeping
+  // them avoids a search regression for every task.
+  assert.equal(singleFlagValue(argv, '--tools'), 'Read,Glob,Grep');
+  assert.equal(singleFlagValue(argv, '--allowedTools'), 'Read');
+  assert.equal(singleFlagValue(argv, '--disallowedTools'), 'WebFetch,WebSearch');
+  for (const tool of singleFlagValue(argv, '--tools').split(',')) {
+    assert.equal(claudeEditingTools.includes(tool), false, `${tool} must not be available to a read-only task`);
+  }
+  // acceptEdits auto-approves edits and filesystem shell commands; a read-only
+  // task must only run what --allowedTools pre-approves.
+  assert.equal(singleFlagValue(argv, '--permission-mode'), 'dontAsk');
+  assert.equal(argv.includes('acceptEdits'), false);
+});
+
+test('Claude write tasks get read and search tools plus Edit and Write and keep acceptEdits', async () => {
+  const argv = await claudeTaskArgv(true, []);
+  assert.equal(singleFlagValue(argv, '--tools'), 'Read,Glob,Grep,Edit,Write');
+  assert.equal(singleFlagValue(argv, '--allowedTools'), 'Read,Edit,Write');
+  assert.equal(singleFlagValue(argv, '--disallowedTools'), 'WebFetch,WebSearch');
+  assert.equal(singleFlagValue(argv, '--permission-mode'), 'acceptEdits');
+});
+
+test('Claude registered commands add Bash to the tool list only when commands exist', async () => {
+  const readOnly = await claudeTaskArgv(false, [['npm', 'test']]);
+  assert.equal(singleFlagValue(readOnly, '--tools'), 'Read,Glob,Grep,Bash');
+  assert.equal(singleFlagValue(readOnly, '--allowedTools'), 'Read,Bash(npm test)');
+  assert.equal(singleFlagValue(readOnly, '--permission-mode'), 'dontAsk');
+  for (const tool of singleFlagValue(readOnly, '--tools').split(',')) {
+    assert.equal(claudeEditingTools.includes(tool), false, `${tool} must not be available to a read-only task`);
+  }
+  const write = await claudeTaskArgv(true, [['npm', 'test'], ['npm', 'run', 'lint']]);
+  assert.equal(singleFlagValue(write, '--tools'), 'Read,Glob,Grep,Edit,Write,Bash');
+  assert.equal(singleFlagValue(write, '--allowedTools'), 'Read,Edit,Write,Bash(npm test),Bash(npm run lint)');
+  assert.equal(singleFlagValue(write, '--permission-mode'), 'acceptEdits');
+  for (const argv of [await claudeTaskArgv(false, []), await claudeTaskArgv(true, [])]) {
+    assert.equal(singleFlagValue(argv, '--tools').split(',').includes('Bash'), false);
+  }
+});
+
+test('Claude read-only task reaches the CLI with the restricted tool list through the default runner', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dharma-fake-claude-'));
+  const workspace = await mkdtemp(join(tmpdir(), 'dharma-fake-claude-workspace-'));
+  // providerProcessEnvironment appends HOME/.local/bin to PATH, so the fake CLI lives
+  // there and PATH holds nothing else (plus System32 for taskkill on Windows):
+  // the real claude cannot be reached.
+  const bin = join(home, '.local', 'bin');
+  const script = 'process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, argv: process.argv.slice(2) }) + "\\n");\n';
+  await mkdir(bin, { recursive: true });
+  if (process.platform === 'win32') {
+    await mkdir(join(bin, 'node_modules', 'fake-claude'), { recursive: true });
+    await writeFile(join(bin, 'node_modules', 'fake-claude', 'cli.cjs'), script);
+    await writeFile(join(bin, 'claude.cmd'), '@ECHO off\r\n"%dp0%\\node_modules\\fake-claude\\cli.cjs" %*\r\n');
+  } else {
+    await writeFile(join(bin, 'claude'), `#!${process.execPath}\n${script}`, { mode: 0o755 });
+  }
+  const saved = { PATH: process.env.PATH, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.PATH = process.platform === 'win32'
+    ? [bin, join(process.env.SystemRoot || 'C:\\Windows', 'System32')].join(delimiter) : bin;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  let result;
+  try {
+    result = await executeProviderTask({
+      provider: 'claude', workspace, instructions: 'Change note.txt to say changed.', timeoutSeconds: 30,
+      allowedCommandArgv: [], allowWrites: false,
+    });
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await rm(home, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  }
+  assert.equal(result.exitCode, 0, result.stderr);
+  const recorded = (JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)!) as { argv: string[] }).argv;
+  assert.equal(singleFlagValue(recorded, '--tools'), 'Read,Glob,Grep');
+  assert.equal(singleFlagValue(recorded, '--allowedTools'), 'Read');
+  assert.equal(singleFlagValue(recorded, '--permission-mode'), 'dontAsk');
+  assert.equal(recorded.some(argument => /\b(?:Edit|Write|NotebookEdit)\b/.test(argument)), false);
+});
+
 test('Claude tasks with required skills fail unless each skill file was read', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-provider-skill-read-'));
   const skillPath = join(root, 'skills', 'dharma-agent-fabric', 'SKILL.md');
