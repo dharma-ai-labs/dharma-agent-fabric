@@ -100,7 +100,50 @@ dharma evidence sync --file <capsule.json> --workspace-id <id> --policy <path> -
 dharma evidence run-request --policy <policy.json> --workspace-id <id> --json
 dharma evidence disclosures --workspace <id> --json
 dharma evidence export-local <trajectory-id> --output <path> --json
+dharma evidence capture-segments --workspace <path> --provider claude|codex --policy <path> [--lookback-hours <n> | --since <iso>] [--maximum-sessions <n>] [--idle-minutes <n>] [--maximum-upload-bytes <n>] [--sync] [--output <path>]
 ```
+
+`capture-segments` reads whole Claude Code or Codex session files, without the
+8 MiB window that `capture` uses, and splits each session into consecutive
+segment capsules. Each segment is a complete run of turns under the policy's
+`maximumCapsuleBytes`, with its own trajectory and the `sessionId`
+`<session pseudonym>:segment:<six-digit index>`. The pseudonym comes from the
+session file's real path (lower-cased on Windows), so two spellings of one path
+are one session. Without `--sync` it only plans: it reports the segments and
+writes nothing. The last segment of a session that is still being written, or
+whose last tool call has no result yet, waits for `--idle-minutes` and the
+result. A session that fails reports `session_capture_failed` with a failure
+code, and the run continues with the next session.
+
+HQ opens an automatic organization-wide analysis window once enough observed
+trajectories wait. Segments are sent only to an HQ that counts a segmented
+session once. Every `--sync` run first refreshes the workspace policy through
+workspace registration, and continues only when that registration returns
+`serverCapabilities.sessionSegmentUpload` with the exact value `available`. A
+missing field (an older HQ) or any other value stops the run with
+`session_segment_upload_unavailable` before anything is written or sent. The
+answer is never kept between runs. When upload is available, `--sync` writes each
+segment to the local vault and the upload queue, records it in the local segment
+ledger and sends it; a second run skips the segments in the ledger, and one run
+never sends more than `--maximum-upload-bytes` or the policy's daily limit.
+
+`dharma relay start --capture-sessions` runs the same segmented capture with
+`--sync` on a timer for every registered workspace. Every tick refreshes the
+policy and asks HQ the same way; when HQ does not answer `available`, the tick
+captures nothing and logs `relay_session_capture_failed` with
+`session_segment_upload_unavailable`, and the relay keeps running. It is off unless that flag is given, and it applies
+only to a foreground `dharma relay start`: the supervised and autostart relay
+start with a fixed command line and do not pass it. `--capture-interval-minutes` (5 to 1440,
+default 15), `--capture-lookback-hours` (1 to 720, default 24),
+`--capture-idle-minutes` (5 to 1440, default 30) and
+`--capture-session-ids-file <path>` are accepted only together with
+`--capture-sessions`. When the workspace policy discloses content
+(`customer_authorized_content`), a tick captures only the sessions listed in
+`--capture-session-ids-file` (a JSON array of session ids from
+`dharma evidence preview`, read again on every tick); without it the tick
+captures nothing and logs `session_capture_requires_session_allowlist`. One tick
+holds the task lock for about 30 seconds at most, and continues after the next
+task poll.
 
 ## Tasks
 

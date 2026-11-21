@@ -903,6 +903,168 @@ async function parseSessionFile(
   };
 }
 
+export interface SessionTurn {
+  records: SourceRecord[];
+  coverage: EvidenceState;
+  startOffset: number;
+  endOffset: number;
+  atEndOfFile: boolean;
+}
+
+// A typed Claude prompt opens a turn; tool results, meta caveats and subagent
+// records continue the turn that is already open.
+function claudeTurnStart(native: Record<string, unknown>): boolean {
+  return native.type === 'user' && native.isMeta !== true && native.isSidechain !== true
+    && !contentBlockTypes(native).includes('tool_result');
+}
+
+/**
+ * Streams a whole Claude or Codex session file as consecutive turns, without
+ * the head/tail window used by discovery. Each turn is a contiguous byte range,
+ * so a caller can resume from any turn's end offset. A final line without its
+ * newline is still being written and is left for the next read.
+ */
+export async function* readSessionTurns(input: {
+  provider: 'claude' | 'codex'; path: string; workspace: string; startOffset?: number; maximumRecordBytes?: number;
+}): AsyncGenerator<SessionTurn> {
+  const maximumRecordBytes = Math.min(Math.max(input.maximumRecordBytes ?? 16 * 1_048_576, 4_096), 64 * 1_048_576);
+  const startOffset = input.startOffset ?? 0;
+  if (!Number.isSafeInteger(startOffset) || startOffset < 0) throw new Error('provider_session_offset_invalid');
+  const handle = await open(input.path, 'r');
+  let turn: SessionTurn | null = null;
+  let codexTurnId: string | null = null;
+  let opened = false;
+  let position = startOffset;
+  const pending: Buffer[] = [];
+  let pendingBytes = 0;
+  let oversizedLine = false;
+  const accept = (line: Buffer, lineStart: number, lineEnd: number): SessionTurn | null => {
+    let text = line.toString('utf8');
+    if (text.endsWith('\r')) text = text.slice(0, -1);
+    let native: Record<string, unknown> | null = null;
+    if (!oversizedLine && text.trim()) {
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          native = stripProtectedNativeContent(parsed) as Record<string, unknown>;
+        }
+      } catch { native = null; }
+    }
+    let starts = false;
+    if (native && input.provider === 'claude') starts = claudeTurnStart(native);
+    if (native && input.provider === 'codex') {
+      const turnId = recordTurnId({ native, sourcePath: input.path, line: 0, workspace: null, timestamp: null, kind: 'metadata' });
+      starts = Boolean(turnId && turnId !== codexTurnId);
+      if (turnId) codexTurnId = turnId;
+    }
+    // Records before the first turn start (a summary, a session header, or the
+    // rest of a turn a resumed read starts inside) belong to that first turn.
+    let completed: SessionTurn | null = null;
+    if (!turn || (starts && opened && turn.records.length > 0)) {
+      completed = turn;
+      turn = { records: [], coverage: 'observed', startOffset: lineStart, endOffset: lineStart, atEndOfFile: false };
+    }
+    if (starts) opened = true;
+    turn.endOffset = lineEnd;
+    if (!oversizedLine && !text.trim()) return completed;
+    if (!native) {
+      turn.coverage = 'partial';
+      return completed;
+    }
+    const cwd = findString(native, ['cwd', 'workspace', 'workspace_path', 'working_directory']);
+    if (cwd && !insideWorkspace(input.workspace, cwd)) {
+      turn.coverage = 'partial';
+      return completed;
+    }
+    turn.records.push({
+      native,
+      sourcePath: input.path,
+      line: lineStart,
+      workspace: cwd,
+      timestamp: findString(native, ['timestamp', 'created_at', 'createdAt', 'time']),
+      kind: input.provider === 'claude' ? claudeSessionRecordKind(native) : inferKind(native),
+      coverage: 'observed',
+    });
+    return completed;
+  };
+  try {
+    const chunk = Buffer.alloc(1_048_576);
+    let lineStart = startOffset;
+    for (;;) {
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+      if (bytesRead === 0) break;
+      let cursor = 0;
+      while (cursor < bytesRead) {
+        const newline = chunk.indexOf(0x0a, cursor);
+        const end = newline === -1 || newline >= bytesRead ? bytesRead : newline;
+        const piece = chunk.subarray(cursor, end);
+        if (!oversizedLine) {
+          if (pendingBytes + piece.length > maximumRecordBytes) {
+            oversizedLine = true;
+            pending.length = 0;
+            pendingBytes = 0;
+          } else {
+            pending.push(Buffer.from(piece));
+            pendingBytes += piece.length;
+          }
+        }
+        if (end === bytesRead) break;
+        const lineEnd = position + end + 1;
+        const completed = accept(Buffer.concat(pending, pendingBytes), lineStart, lineEnd);
+        if (completed) yield completed;
+        pending.length = 0;
+        pendingBytes = 0;
+        oversizedLine = false;
+        lineStart = lineEnd;
+        cursor = end + 1;
+      }
+      position += bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
+  const last = turn as SessionTurn | null;
+  if (last) yield { ...last, atEndOfFile: true };
+}
+
+/** The local session identifier that discovery uses for the same session file. */
+export function providerSessionId(provider: 'claude' | 'codex', path: string): string {
+  return `${provider}-${createHash('sha256').update(path).digest('hex').slice(0, 24)}`;
+}
+
+export async function listProviderSessionFiles(provider: 'claude' | 'codex', roots?: string[]):
+  Promise<Array<{ path: string; modifiedAt: Date; size: number }>> {
+  const files: Array<{ path: string; modifiedAt: Date; size: number }> = [];
+  for (const root of roots ?? defaultRoots(provider)) {
+    for (const path of await jsonlFiles(root)) {
+      const fileStat = await stat(path);
+      files.push({ path, modifiedAt: fileStat.mtime, size: fileStat.size });
+    }
+  }
+  return files.sort((left, right) => right.modifiedAt.getTime() - left.modifiedAt.getTime());
+}
+
+/** A session belongs to a workspace when its first recorded working directory is inside it. */
+export async function sessionWorkspaceQualified(_provider: 'claude' | 'codex', path: string, workspace: string): Promise<boolean> {
+  const handle = await open(path, 'r');
+  try {
+    const buffer = Buffer.alloc(4 * 1_048_576);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
+    lines.pop();
+    for (const line of lines) {
+      let native: unknown;
+      try { native = JSON.parse(line); } catch { continue; }
+      if (!native || typeof native !== 'object' || Array.isArray(native)) continue;
+      const cwd = findString(native as Record<string, unknown>, ['cwd', 'workspace', 'workspace_path', 'working_directory']);
+      if (cwd) return insideWorkspace(workspace, cwd);
+    }
+    return false;
+  } finally {
+    await handle.close();
+  }
+}
+
 function recordTurnId(record: SourceRecord): string | null {
   const payload = record.native.payload && typeof record.native.payload === 'object'
     ? record.native.payload as Record<string, unknown>
