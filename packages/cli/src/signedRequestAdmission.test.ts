@@ -248,11 +248,12 @@ test('every hold of signing control the CLI takes itself is one the caller-held 
       sites.push(`${name} ${match[0].slice(0, -1)}${/\{ ?perSend: true ?\}/.test(call.slice(0, 400)) ? ' perSend' : ''}`);
     }
   }
+  // The device signing maintenance hold sends only its own maintenance requests; the only CLI hold around a
+  // protocol-state request is the workspace policy sync, perSend. The named session activation boundary takes none.
   assert.deepEqual(sites, [
     'deviceSigningMaintenanceController.ts withDeviceSigningControl',
-    'index.ts withClientSigningControl',
     'index.ts withClientSigningControl perSend',
-  ], 'a new hold of signing control needs a decision: perSend, or covered by the client\'s rule for a caller\'s own hold');
+  ],'a new hold of signing control needs a decision: perSend, or covered by the client\'s rule for a caller\'s own hold');
 });
 
 // Owner review: the total send count per hold of signing control is at most 1, including recovery and capacity
@@ -279,13 +280,22 @@ async function namedSessionHome(t: {after(fn: () => Promise<void>): void}) {
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status});
 
+/** Records the hold of signing control each network send runs in: the fetcher runs inside that hold, so a nested
+ * withDeviceSigningControl reuses it and returns its lease. */
+function holdsOfSends(config: DeviceConfig) {
+  const holds: string[] = [];
+  return {holds, async record() {holds.push(await withDeviceSigningControl({config}, async lease => lease.controllerInstanceId));}};
+}
+
 test('the named session activation boundary is withNamedSessionActivationBoundary, which takes no hold of signing control', async () => {
   const text = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   assert.match(text, /withActivationBoundary: \(operation, work\) => withNamedSessionActivationBoundary\(workspaceId, async \(\) => \{/,
     'the named session service runs its turns in the exported boundary');
   const start = text.indexOf('export function withNamedSessionActivationBoundary<T>(');
   assert.ok(start >= 0, 'the boundary is exported from index.ts');
-  const boundary = text.slice(start, text.indexOf('\n}\n', start));
+  const rest = text.slice(start), end = rest.search(/\r?\n\}\r?\n/);
+  assert.ok(end > 0, 'the boundary function ends');
+  const boundary = rest.slice(0, end);
   assert.doesNotMatch(boundary, /SigningControl/, 'the boundary takes no hold of signing control');
   assert.match(boundary, /withWorkspaceSkillActivationLock\(workspaceId, 'codex', operation\)/);
 });
@@ -296,8 +306,10 @@ test('a named session work turn in its activation boundary makes at most one net
   await namedSessionHome(t);
   let down = false;
   let other: ReturnType<typeof waitingClient> | undefined;
+  const sends = holdsOfSends(d.config);
   const fabric = admitSignedRequests(await AgentFabricClient.open({configPath: d.configPath, statePath: d.statePath, store: d.store,
     ownerKey: 'relay:workspace-a', fetcher: async url => {
+      await sends.record();
       await other?.send();
       return down && String(url).endsWith('/agent-fabric/workspaces')
         ? json({ok: false, error: {code: 'upstream_unavailable', message: 'Try again.'}}, 503) : json({ok: true}, 201);
@@ -315,12 +327,15 @@ test('a named session work turn in its activation boundary makes at most one net
   });
   const waiter = waitingClient(d.config);
   other = waiter;
-  const turn = async (name: string) => {
-    const from = waiter.behind.length;
+  // Every send runs in a hold of its own. Where only the turn's calls run, the waiting client also gets the control
+  // between any two of them; in a full file the client's own orphan sends after its calls may come first in line.
+  const turn = async (name: string, order = true) => {
+    const from = waiter.behind.length, first = sends.holds.length;
     const outcome = await workTurn().catch((error: unknown) => error instanceof Error ? error.message : String(error));
     await withDeviceSigningControl({config: d.config}, async () => undefined);
-    const behind = waiter.behind.slice(from);
-    assert.deepEqual(behind, behind.map(() => 0), `${name}: no send shares its hold with an earlier one`);
+    const behind = waiter.behind.slice(from), holds = sends.holds.slice(first);
+    assert.equal(new Set(holds).size, holds.length, `${name}: every send runs in a hold of its own`);
+    if (order) assert.deepEqual(behind, behind.map(() => 0), `${name}: the waiting client gets the control between sends`);
     return {outcome, sends: behind.length};
   };
   try {
@@ -335,7 +350,7 @@ test('a named session work turn in its activation boundary makes at most one net
     const dead = await exitedPid();
     await fs.writeFile(d.statePath, JSON.stringify({schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
       outboxes: Object.fromEntries(Array.from({length: 256}, (_, index) => [`cli:${dead}:x:${index}`, orphan(d.config.deviceId, dead)]))}));
-    const full = await turn('full file');
+    const full = await turn('full file', false);
     assert.equal(full.outcome, 'answered', 'full file: an orphan makes room in a hold of its own and every call is answered');
     assert.ok(full.sends >= 6, 'full file: the orphan sent to make room, then the five calls');
   } finally { await waiter.stop(); }
@@ -351,8 +366,10 @@ test('a kept call does not stop a named session: its inbox poll in the activatio
     endpointId: randomUUID(), membershipId: randomUUID(), deviceId: d.config.deviceId, bindingId: randomUUID(),
     provider: 'codex' as const, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), maximumProviderCostCents: 0};
   const {expiresAt: _expiresAt, maximumProviderCostCents: _cost, organizationId: _organizationId, ...registered} = scope;
+  const sends = holdsOfSends(d.config);
   const fabric = admitSignedRequests(await AgentFabricClient.open({configPath: d.configPath, statePath: d.statePath, store: d.store,
     ownerKey: 'relay:workspace-a', fetcher: async url => {
+      await sends.record();
       await other?.send();
       const path = String(url);
       if (path.endsWith('/agent-fabric/workspaces')) {
@@ -372,12 +389,13 @@ test('a kept call does not stop a named session: its inbox poll in the activatio
   const waiter = waitingClient(d.config);
   other = waiter;
   const poll = async (name: string) => {
-    const from = waiter.behind.length;
+    const from = waiter.behind.length, first = sends.holds.length;
     const outcome = await boundary(scope.workspaceId, () => channel.inbox())
       .then(offers => offers.length === 0 ? 'answered' : 'offers', (error: unknown) => error instanceof Error ? error.message : String(error));
     await withDeviceSigningControl({config: d.config}, async () => undefined);
-    const behind = waiter.behind.slice(from);
-    assert.deepEqual(behind, behind.map(() => 0), `${name}: no send shares its hold with an earlier one`);
+    const behind = waiter.behind.slice(from), holds = sends.holds.slice(first);
+    assert.equal(new Set(holds).size, holds.length, `${name}: every send runs in a hold of its own`);
+    assert.deepEqual(behind, behind.map(() => 0), `${name}: the waiting client gets the control between sends`);
     return {outcome, sends: behind.length};
   };
   try {
