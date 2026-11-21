@@ -101,7 +101,7 @@ test('a denied evidence worker reports only its repository, stage, and safe cate
     },
   });
   assert.deepEqual(started, ['a', 'b']);
-  assert.deepEqual(events, [{ workspaceId: 'a', code: 'repository_relay_failed',
+  assert.deepEqual(events, [{ workspaceId: 'a', at: new Date(0).toISOString(), code: 'repository_relay_failed',
     stage: 'evidence_sync', category: 'policy_boundary' }]);
   assert.ok(!JSON.stringify(events).includes('private-payload'));
 });
@@ -116,7 +116,7 @@ test('nested evidence substages retain the original safe cause without leaking i
     observe: event => { events.push(event); },
     wait: async () => { await Promise.resolve(); await Promise.resolve(); if (++tick === 3) controller.abort(); },
   });
-  assert.deepEqual(events, [{ workspaceId: 'a', code: 'repository_relay_failed',
+  assert.deepEqual(events, [{ workspaceId: 'a', at: new Date(0).toISOString(), code: 'repository_relay_failed',
     stage: 'pending_capsule_sync', category: 'policy_boundary' }]);
   assert.ok(!JSON.stringify(events).includes('private-payload'));
 });
@@ -331,4 +331,100 @@ test('an unreadable WSL vault entry backs off like any unreadable store', async 
   assert.ok(mixed.slice(4).every(gap => gap >= 600_000), `WSL unreadable with identity loss: ${mixed}`);
   const otherText = await failedSessionOpenStarts(() => Error('Windows Credential Manager failed: Credential write unavailable.'), 7);
   assert.ok(otherText.every(gap => gap <= 60_000), `other helper text stays busy: ${otherText}`);
+});
+
+// #513: every stage line carries a time and, without a typed failure code, a safe error class.
+async function observedEvents(error: () => unknown, clock = 1_790_000_000_000) {
+  const controller = new AbortController();
+  const events: unknown[] = [];
+  let tick = 0;
+  await runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a], now: () => clock,
+    run: () => withRepositoryRelayStage('task_poll', async () => { throw error(); }),
+    observe: event => { events.push(event); },
+    wait: async () => { await Promise.resolve(); await Promise.resolve(); if (++tick === 3) controller.abort(); } });
+  return events;
+}
+
+test('repository relay events carry an ISO time from the supervisor clock', async () => {
+  const clock = Date.parse('2026-11-20T10:15:30.250Z');
+  assert.deepEqual(await observedEvents(() => Error('private'), clock), [{ workspaceId: 'a', at: '2026-11-20T10:15:30.250Z',
+    code: 'repository_relay_failed', stage: 'task_poll', category: 'unexpected' }]);
+  const controller = new AbortController();
+  const events: unknown[] = [];
+  let reads = 0;
+  await runRegisteredRepositoryRelays({ signal: controller.signal, now: () => clock,
+    list: async () => { if (++reads > 1) controller.abort(); throw Error('private registry path'); },
+    run: async () => {}, observe: event => { events.push(event); }, wait: async () => { await Promise.resolve(); } });
+  assert.deepEqual(events[0], { workspaceId: null, at: '2026-11-20T10:15:30.250Z', code: 'repository_registry_unavailable' });
+});
+
+test('an HTTP rejection reports its status and server code, never its message', async () => {
+  const rejection = () => Object.assign(Error('upstream_unavailable: private server text'),
+    { name: 'AgentFabricRequestError', status: 503, definitive: false, serverCode: 'upstream_unavailable' });
+  const events = await observedEvents(rejection);
+  assert.deepEqual(events, [{ workspaceId: 'a', at: new Date(1_790_000_000_000).toISOString(), code: 'repository_relay_failed',
+    stage: 'task_poll', category: 'unexpected', httpStatus: 503, errorCode: 'upstream_unavailable' }]);
+  assert.doesNotMatch(JSON.stringify(events), /private/);
+});
+
+test('an errno code is found on the cause of a wrapped network error', async () => {
+  const fetchFailed = () => new TypeError('fetch failed', { cause: Object.assign(Error('connect ECONNREFUSED 192.0.2.1:443'),
+    { code: 'ECONNREFUSED', errno: -111, syscall: 'connect', address: '192.0.2.1', port: 443 }) });
+  const events = await observedEvents(fetchFailed);
+  assert.deepEqual(events.map(event => (event as { errorCode?: string }).errorCode), ['ECONNREFUSED']);
+  assert.doesNotMatch(JSON.stringify(events), /192\.0\.2\.1|fetch failed|connect/);
+});
+
+test('the relay acknowledgement timeout reports its own code', async () => {
+  const events = await observedEvents(() => Object.assign(Error('Relay response timed out.'), { code: 'relay_response_timeout' }));
+  assert.deepEqual(events.map(event => (event as { errorCode?: string }).errorCode), ['relay_response_timeout']);
+  assert.doesNotMatch(JSON.stringify(events), /timed out/);
+});
+
+test('unsafe status and code values are dropped, and free text never becomes a code', async () => {
+  for (const error of [Error('plain_lowercase_words'), Error('sk_live_token_value'),
+    Object.assign(Error('x'), { code: 'C:/Users/someone/.secret' }), Object.assign(Error('x'), { code: 'has space' }),
+    Object.assign(Error('x'), { code: 'a'.repeat(81) }), Object.assign(Error('x'), { code: 7 }),
+    Object.assign(Error('x'), { serverCode: 'Request-Failed: private' }), Object.assign(Error('x'), { serverCode: 42 }),
+    Object.assign(Error('x'), { status: 42 }), Object.assign(Error('x'), { status: '503' }),
+    Object.assign(Error('x'), { status: 700 }), Object.assign(Error('x'), { status: 503.5 }), 'raw string failure',
+    Object.defineProperty(Error('x'), 'code', { get() { throw Error('hostile getter'); } })]) {
+    const events = await observedEvents(() => error);
+    assert.deepEqual(events, [{ workspaceId: 'a', at: new Date(1_790_000_000_000).toISOString(), code: 'repository_relay_failed',
+      stage: 'task_poll', category: 'unexpected' }], `unexpected class for ${String((error as Error).message ?? error)}`);
+  }
+});
+
+// #515: the restart gap after a loop that ran for runMs and then failed, following six quick failures (30 s backoff).
+async function restartGapAfterRun(runMs: number) {
+  const controller = new AbortController();
+  let clock = 0, failedAt = 0;
+  const starts: number[] = [];
+  await runRegisteredRepositoryRelays({ signal: controller.signal, list: async () => [a], now: () => clock,
+    run: async (_row, signal) => {
+      if (starts.push(clock) === 7) {
+        const begin = clock;
+        while (clock - begin < runMs && !signal.aborted) await new Promise(accept => setImmediate(accept));
+        failedAt = clock;
+      }
+      throw Error('worker failed');
+    },
+    wait: async () => {
+      await new Promise(accept => setImmediate(accept));
+      clock += 1_000;
+      if (starts.length > 7 || clock > 5_000_000) controller.abort();
+    } });
+  assert.equal(starts.length, 8, `the loop restarted after its long run: ${starts}`);
+  assert.ok(starts[6]! - starts[5]! >= 30_000, `six quick failures reach the 30 s backoff: ${starts}`);
+  return starts[7]! - failedAt;
+}
+
+test('a loop that ran healthy for ten minutes restarts on the short schedule again', async () => {
+  const gap = await restartGapAfterRun(10 * 60_000);
+  assert.ok(gap <= 3_000, `restart after a ten-minute healthy run waited ${gap} ms`);
+});
+
+test('a loop that failed before ten minutes keeps its backoff', async () => {
+  const gap = await restartGapAfterRun(9 * 60_000);
+  assert.ok(gap >= 30_000, `restart after a nine-minute run waited only ${gap} ms`);
 });

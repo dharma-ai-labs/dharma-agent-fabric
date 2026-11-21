@@ -9180,11 +9180,11 @@ async function relayStart(flags: Map<string, string | boolean>,
     observe: async event => {
       process.stderr.write(`${JSON.stringify({ event: 'repository_relay', ...event })}\n`);
       if (event.code === 'repository_relay_failed' && event.workspaceId && UUID_PATTERN.test(event.workspaceId)) {
-        const at = new Date().toISOString();
         const pidState = await relayPidState;
         if (!pidState) return;
+        // The receipt keeps the time of the stage line it records.
         const failure = repositoryRelayFailureReceipt(event, { organizationId: config.organizationId,
-          deviceId: config.deviceId, pid: process.pid, ...pidState }, at);
+          deviceId: config.deviceId, pid: process.pid, ...pidState }, event.at);
         let writer = diagnosticWriters.get(event.workspaceId);
         if (!writer) {
           writer = serializeRelayWork();

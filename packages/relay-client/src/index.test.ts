@@ -1589,6 +1589,7 @@ test('deterministic client rejection advances the outbox instead of blocking the
   await assert.rejects(client.registerWorkspace({ workspaceId: 'oversized' }), (error) => {
     assert.ok(error instanceof AgentFabricRequestError);
     assert.equal(error.status, 413);
+    assert.equal((error as AgentFabricRequestError & { serverCode?: string }).serverCode, 'trajectory_capsule_too_large');
     assert.equal(isDefinitiveAgentFabricRejection(error), true);
     return true;
   });
@@ -1622,6 +1623,7 @@ test('retryable server rejection is an ambiguous delivery outcome', async () => 
   await assert.rejects(client.registerWorkspace({ workspaceId: 'retryable' }), (error) => {
     assert.ok(error instanceof AgentFabricRequestError);
     assert.equal(error.status, 503);
+    assert.equal((error as AgentFabricRequestError & { serverCode?: string }).serverCode, 'upstream_unavailable');
     assert.equal(isDefinitiveAgentFabricRejection(error), false);
     return true;
   });
@@ -1737,6 +1739,55 @@ test('relay acknowledgement settles once when close emits another socket event',
 
 test('relay acknowledgement timeout accommodates managed runtime cold starts', () => {
   assert.equal(RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS, 90_000);
+});
+
+test('a relay that never acknowledges fails with the stable relay_response_timeout code', async (t) => {
+  const store = memoryStore();
+  const root = await mkdtemp(resolve(tmpdir(), 'fabric-relay-timeout-'));
+  const identity = await loadOrCreateDeviceIdentity({ hqUrl: 'https://hq.example', organizationId: 'org_a', store });
+  const configPath = resolve(root, 'device.json');
+  await saveDeviceConfig(configPath, {
+    schema: 'dharma.device-config/v1', hqUrl: 'https://hq.example', organizationId: 'org_a',
+    deviceId: 'c72c7f13-e420-49f7-a818-c07f6f9d0915', deviceName: 'Test', platform: 'linux',
+    publicKeyEd25519: identity.publicKeyEd25519, serverPublicKeyEd25519: identity.publicKeyEd25519,
+    relayUrl: 'wss://relay.example', enrolledAt: new Date().toISOString(),
+  });
+  await anchorConfig(configPath, store);
+
+  const originalWebSocket = globalThis.WebSocket;
+  // Opens and accepts the request, then never answers: only the acknowledgement timer can settle it.
+  class SilentSocket {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    readyState = SilentSocket.CONNECTING;
+    readonly #listeners = new Map<string, Array<(event: object) => void>>();
+    constructor(_url: string | URL) {
+      queueMicrotask(() => {
+        this.readyState = SilentSocket.OPEN;
+        for (const listener of this.#listeners.get('open') || []) listener({});
+      });
+    }
+    addEventListener(type: string, listener: (event: object) => void) {
+      this.#listeners.set(type, [...(this.#listeners.get(type) || []), listener]);
+    }
+    send(_serialized: string) { queueMicrotask(() => t.mock.timers.tick(RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS)); }
+    close(_code?: number) { this.readyState = SilentSocket.CLOSED; }
+  }
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: SilentSocket, writable: true });
+  try {
+    const client = await AgentFabricClient.open({ configPath, statePath: resolve(root, 'state.json'), store });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    await assert.rejects(client.openSession(), (error: Error & { code?: unknown }) => {
+      assert.equal(error.code, 'relay_response_timeout');
+      assert.equal(error.message, 'Relay response timed out.');
+      return true;
+    });
+  } finally {
+    t.mock.timers.reset();
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: originalWebSocket, writable: true });
+  }
 });
 
 test('missing-anchor restoration preserves current, legacy, corrupt, cached and unavailable protected state', async () => {

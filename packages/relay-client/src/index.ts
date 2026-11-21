@@ -737,12 +737,16 @@ function errorMessage(body: unknown, status: number) {
 export class AgentFabricRequestError extends Error {
   readonly status: number;
   readonly definitive: boolean;
+  /** The server's error code, kept only in the stable form diagnostics may record. The message stays free text. */
+  readonly serverCode?: string;
 
   constructor(body: unknown, status: number, definitive: boolean) {
     super(errorMessage(body, status));
     this.name = 'AgentFabricRequestError';
     this.status = status;
     this.definitive = definitive;
+    const code = body && typeof body === 'object' ? (body as { error?: { code?: unknown } }).error?.code : undefined;
+    if (typeof code === 'string' && /^[a-z0-9_]{1,80}$/.test(code)) this.serverCode = code;
   }
 }
 
@@ -1652,7 +1656,7 @@ export class AgentFabricClient {
         if (closeSocket && socket.readyState < WebSocket.CLOSING) socket.close(1000);
       };
       const timeout = setTimeout(
-        () => finish(() => reject(new Error('Relay response timed out.'))),
+        () => finish(() => reject(Object.assign(new Error('Relay response timed out.'), {code: 'relay_response_timeout'}))),
         RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS,
       );
       const abort = () => finish(() => reject(new Error('relay_host_scope_unavailable')));

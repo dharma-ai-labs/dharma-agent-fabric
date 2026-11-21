@@ -19,8 +19,12 @@ const DEVICE_CREDENTIAL_FAILURES: ReadonlySet<string> = new Set(['connection_ide
   'connection_identity_store_unavailable']);
 const DEVICE_CREDENTIAL_FAILURE_LIMIT = 5;
 const DEVICE_CREDENTIAL_RETRY_MS = 600_000;
+// A loop that ran this long before it failed starts its restart backoff again from the first step.
+export const REPOSITORY_RELAY_HEALTHY_RUN_MS = 10 * 60_000;
 interface Observation { workspaceId: string | null; code: string; stage?: RepositoryRelayStage;
-  category?: RepositoryRelayFailureCategory; failureCode?: string }
+  category?: RepositoryRelayFailureCategory; failureCode?: string; httpStatus?: number; errorCode?: string }
+/** One repository_relay line. `at` is the supervisor clock when the event happened. */
+export type RepositoryRelayObservation = Observation & { at: string };
 
 class StagedRepositoryRelayError extends Error {
   constructor(readonly stage: RepositoryRelayStage, cause: unknown) {
@@ -41,6 +45,35 @@ function failureMessage(error: unknown) {
   const cause = failureCause(error);
   try { return cause instanceof Error ? cause.message : ''; }
   catch { return ''; }
+}
+
+// The same rule as a relay child failure code (relayChildFailure.ts), for a code a server or a local store sets.
+const SAFE_LOWER_CODE = /^[a-z0-9_]{1,80}$/;
+// Node errno and system codes, such as ECONNRESET or UND_ERR_CONNECT_TIMEOUT.
+const SAFE_SYSTEM_CODE = /^[A-Z][A-Z0-9_]{1,79}$/;
+
+function field(value: unknown, name: string): unknown {
+  try { return value && typeof value === 'object' ? (value as Record<string, unknown>)[name] : undefined; }
+  catch { return undefined; }
+}
+
+// A safe class for a failure with no typed code: an HTTP status and one stable code, found on the error or
+// on the causes it wraps (fetch keeps its errno on the cause). Error text is never read here.
+function failureClass(error: unknown): { httpStatus?: number; errorCode?: string } {
+  let httpStatus: number | undefined, errorCode: string | undefined;
+  let current = failureCause(error);
+  for (let depth = 0; depth < 3 && current && typeof current === 'object'; depth++) {
+    const status = field(current, 'status'), code = field(current, 'code'), serverCode = field(current, 'serverCode');
+    if (httpStatus === undefined && typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) {
+      httpStatus = status;
+    }
+    if (errorCode === undefined && typeof code === 'string' && (SAFE_SYSTEM_CODE.test(code) || SAFE_LOWER_CODE.test(code))) {
+      errorCode = code;
+    }
+    if (errorCode === undefined && typeof serverCode === 'string' && SAFE_LOWER_CODE.test(serverCode)) errorCode = serverCode;
+    current = field(current, 'cause');
+  }
+  return { ...(httpStatus !== undefined ? { httpStatus } : {}), ...(errorCode !== undefined ? { errorCode } : {}) };
 }
 
 function failureCategory(error: unknown): RepositoryRelayFailureCategory {
@@ -157,19 +190,19 @@ export async function runRegisteredRepositoryRelays(input: {
   signal: AbortSignal;
   list: () => Promise<readonly RepositoryRelayRegistration[]>;
   run: (registration: RepositoryRelayRegistration, signal: AbortSignal) => Promise<unknown>;
-  observe?: (observation: Observation) => void | Promise<void>;
+  observe?: (observation: RepositoryRelayObservation) => void | Promise<void>;
   wait?: (ms: number, signal: AbortSignal) => Promise<void>;
   now?: () => number;
 }) {
   const now = input.now ?? Date.now;
   const wait = input.wait ?? waitForRelayRefresh;
   type Worker = { row: RepositoryRelayRegistration; controller: AbortController;
-    flight: Promise<void>; done: boolean; failed: boolean; failureCode?: string };
+    flight: Promise<void>; done: boolean; failed: boolean; failureCode?: string; startedAt: number; endedAt: number };
   const workers = new Map<string, Worker>();
   const failures = new Map<string, { count: number; credentialCount: number; retryAt: number }>();
   // Diagnostics must never turn a caught worker failure into an unhandled rejection.
   const observe = (event: Observation) => {
-    try { void Promise.resolve(input.observe?.(event)).catch(() => {}); }
+    try { void Promise.resolve(input.observe?.({ ...event, at: new Date(now()).toISOString() })).catch(() => {}); }
     catch { /* Preserve worker lifecycle. */ }
   };
   const abort = () => { for (const worker of workers.values()) worker.controller.abort(); };
@@ -191,7 +224,8 @@ export async function runRegisteredRepositoryRelays(input: {
         if (!worker.done) continue;
         workers.delete(id);
         if (worker.failed && !worker.controller.signal.aborted) {
-          const previous = failures.get(id), count = (previous?.count ?? 0) + 1;
+          const previous = worker.endedAt - worker.startedAt >= REPOSITORY_RELAY_HEALTHY_RUN_MS ? undefined : failures.get(id);
+          const count = (previous?.count ?? 0) + 1;
           const credentialCount = DEVICE_CREDENTIAL_FAILURES.has(worker.failureCode ?? '') ? (previous?.credentialCount ?? 0) + 1 : 0;
           failures.set(id, { count, credentialCount, retryAt: now() + (credentialCount >= DEVICE_CREDENTIAL_FAILURE_LIMIT
             ? DEVICE_CREDENTIAL_RETRY_MS : relayRestartDelayMs(count)) });
@@ -200,7 +234,8 @@ export async function runRegisteredRepositoryRelays(input: {
       for (const row of rows) {
         if (workers.has(row.workspaceId) || (failures.get(row.workspaceId)?.retryAt ?? 0) > now()) continue;
         const controller = new AbortController();
-        const worker: Worker = { row, controller, done: false, failed: false, flight: Promise.resolve() };
+        const startedAt = now();
+        const worker: Worker = { row, controller, done: false, failed: false, flight: Promise.resolve(), startedAt, endedAt: startedAt };
         workers.set(row.workspaceId, worker);
         worker.flight = Promise.resolve().then(async () => {
           if (controller.signal.aborted || input.signal.aborted) return;
@@ -217,10 +252,12 @@ export async function runRegisteredRepositoryRelays(input: {
               const stage = error instanceof StagedRepositoryRelayError ? error.stage : 'worker_run';
               worker.failureCode = typedFailure(failureMessage(error)).failureCode
                 ?? (stage === 'session_open' ? relayOpenFailureCode(failureCause(error)) : undefined);
+              // A typed failure code already names the failure; the safe class explains the rest.
               observe({ workspaceId: row.workspaceId, code: 'repository_relay_failed', stage,
-                category: failureCategory(error), ...(worker.failureCode ? { failureCode: worker.failureCode } : {}) });
+                category: failureCategory(error), ...(worker.failureCode ? { failureCode: worker.failureCode } : failureClass(error)) });
             }
           } finally {
+            worker.endedAt = now();
             worker.done = true;
           }
         });
