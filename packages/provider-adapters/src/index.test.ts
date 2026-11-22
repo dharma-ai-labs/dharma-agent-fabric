@@ -49,7 +49,8 @@ test('failed provider execution returns only a diagnostic category alongside pri
 
 test('provider task readiness distinguishes installation from authenticated execution', async () => {
   const environment = { HOME: '/home/customer', PATH: '/usr/bin:/bin' };
-  const authenticatedClaude = await providerTaskReadiness('claude', 'claude', environment, (_command, argv) => {
+  const authenticatedClaude = await providerTaskReadiness('claude', 'claude', environment, (_command, argv, options) => {
+    assert.equal(options.windowsHide, true);
     assert.deepEqual(argv, ['auth', 'status']);
     return { status: 0, stdout: JSON.stringify({ loggedIn: true }), stderr: '' };
   });
@@ -84,6 +85,7 @@ test('provider discovery finds supported per-user CLI installations outside the 
     (executable, argv, options) => {
       assert.equal(executable, 'agy');
       assert.deepEqual(argv, ['--version']);
+      assert.equal(options.windowsHide, true);
       observedPath = String(options.env.PATH || '');
       return { status: 0, stdout: '1.1.15\n', stderr: '' };
     },

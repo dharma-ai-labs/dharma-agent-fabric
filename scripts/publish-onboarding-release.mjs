@@ -187,9 +187,9 @@ export async function verifyPublishedProvenance(item, packed, expectedHead, read
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   const root = resolve(import.meta.dirname, '..');
-  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true }).trim();
   const npm = (...args) => execFileSync(process.execPath, [process.env.npm_execpath, ...args], {
-    cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000,
+    cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000, windowsHide: true,
   }).trim();
   assert.ok(process.env.npm_execpath, 'invoke through npm exec');
   const directory = mkdtempSync(join(tmpdir(), 'dharma-approved-release-'));
@@ -216,7 +216,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
         baselineLock: JSON.parse(git('show', `${source}:package-lock.json`)),
         lock: JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8')),
         baselineCliSource: execFileSync('git', ['show', `${source}:packages/cli/src/index.ts`],
-          {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024}),
+          {cwd: root, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, windowsHide: true}),
         cliSource: readFileSync(join(root, 'packages/cli/src/index.ts'), 'utf8'),
         productSourceHashes: Object.fromEntries(Object.keys(approvedProductSourceHashes).map(path =>
           [path, sourceTextSha256(readFileSync(join(root,path),'utf8'))])),

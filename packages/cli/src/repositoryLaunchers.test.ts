@@ -51,7 +51,7 @@ test('new Linux launcher overrides a permissive parent umask before invoking npm
   try {
     const run = promisify(execFile);
     const output = JSON.parse((await run('/bin/sh', ['-c', 'umask 002; exec /bin/sh "$1" status "$2"',
-      'fixture', launcher, 'space and ; $argument'], {cwd: root, env: {PATH: '/usr/bin:/bin', HOME: root, npm_config_umask: '002'}})).stdout);
+      'fixture', launcher, 'space and ; $argument'], {cwd: root, env: {PATH: '/usr/bin:/bin', HOME: root, npm_config_umask: '002'}, windowsHide: true})).stdout);
     assert.equal(output.umask, 0o077);
     assert.equal(output.mode, 0o600);
     assert.equal(output.directoryMode, 0o700);
@@ -128,10 +128,10 @@ test('actual Linux service-style startup retains Codex with a minimal inherited 
   await writeFile(old, stableRepositoryLauncherContents('0.2.180', {...runtime, providerDirectory: undefined}).shell);
   const launchers = stableRepositoryLauncherContents('0.2.180', runtime); await writeFile(fixed, launchers.shell);
   const run = promisify(execFile), env = {PATH: join(root, 'absent'), HOME: root, UNRELATED_SECRET: 'not-in-launcher'};
-  const before = JSON.parse((await run('/bin/sh', [old], {env})).stdout);
+  const before = JSON.parse((await run('/bin/sh', [old], {env, windowsHide: true})).stdout);
   assert.equal(before.status, null);
   await writeFile(join(nodeDirectory, 'codex'), '#!/bin/sh\nprintf "wrong-node-directory-codex\\n"\n', {mode: 0o700});
-  assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env})).stdout), {status: 0, stdout: 'fixture-codex\n'});
+  assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env, windowsHide: true})).stdout), {status: 0, stdout: 'fixture-codex\n'});
   await rm(join(nodeDirectory, 'codex'));
   assert.ok(!launchers.shell.includes('UNRELATED_SECRET') && !launchers.shell.includes('not-in-launcher'));
   assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
@@ -142,13 +142,13 @@ test('actual Linux service-style startup retains Codex with a minimal inherited 
   const shebang = join(root, 'child');
   await writeFile(shebang, '#!' + envNode + 'console.log(process.version);\n', {mode: 0o700});
   await writeFile(npmCliPath, `const r=require('node:child_process').spawnSync(${JSON.stringify(shebang)},[],{encoding:'utf8'});process.stdout.write(JSON.stringify({status:r.status,stdout:r.stdout}));`, {mode: 0o600});
-  assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env})).stdout), {status: 0, stdout: 'unapproved-node\n'});
+  assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env, windowsHide: true})).stdout), {status: 0, stdout: 'unapproved-node\n'});
   await assert.rejects(resolveRepositoryProviderDirectory({searchPath: providerDirectory}), /relay_startup_codex_path_invalid/);
   assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), false);
   assert.equal(await verifyRollbackRepositoryLaunchers('0.2.180', launchers), false);
   await copyFile(process.execPath, shadow); await chmod(shadow, 0o700);
   assert.equal(await resolveRepositoryProviderDirectory({searchPath: providerDirectory}), providerDirectory);
-  assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env})).stdout), {status: 0, stdout: process.version + '\n'});
+  assert.deepEqual(JSON.parse((await run('/bin/sh', [fixed], {env, windowsHide: true})).stdout), {status: 0, stdout: process.version + '\n'});
   assert.equal(await verifyRecordedRepositoryLaunchers('0.2.180', launchers, {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
   assert.equal(await verifyRollbackRepositoryLaunchers('0.2.180', launchers), true);
   await rm(shadow);
@@ -185,8 +185,8 @@ test('actual Linux launcher starts with no npm on PATH and preserves argument bo
   const launchers = stableRepositoryLauncherContents('0.2.177', runtime);
   await writeFile(fixed, launchers.shell);
   const run = promisify(execFile), env = {PATH: join(root, 'absent'), HOME: root};
-  await assert.rejects(run('/bin/sh', [old, 'status'], {env}), (error: unknown) => (error as {code: number}).code === 127);
-  const result = await run('/bin/sh', [fixed, 'status', 'space and ; $argument'], {env});
+  await assert.rejects(run('/bin/sh', [old, 'status'], {env, windowsHide: true}), (error: unknown) => (error as {code: number}).code === 127);
+  const result = await run('/bin/sh', [fixed, 'status', 'space and ; $argument'], {env, windowsHide: true});
   assert.deepEqual(JSON.parse(result.stdout), ['exec', '--yes', '--', '@dharma-ai-labs/agent-fabric@0.2.177', 'status', 'space and ; $argument']);
   assert.equal(await verifyRecordedRepositoryLaunchers('0.2.177', launchers,
     {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
@@ -326,8 +326,8 @@ test('actual Linux service-style startup finds the set-up Claude provider with a
     const after = stableLauncher(launchers, runtime);
     const run = promisify(execFile), env = {PATH: join(root, 'absent'), HOME: root};
     await writeFile(join(root, 'before.sh'), before.shell); await writeFile(join(root, 'after.sh'), after.shell);
-    assert.equal(JSON.parse((await run('/bin/sh', [join(root, 'before.sh')], {env})).stdout).status, null);
-    assert.deepEqual(JSON.parse((await run('/bin/sh', [join(root, 'after.sh')], {env})).stdout), {status: 0, stdout: 'fixture-claude\n'});
+    assert.equal(JSON.parse((await run('/bin/sh', [join(root, 'before.sh')], {env, windowsHide: true})).stdout).status, null);
+    assert.deepEqual(JSON.parse((await run('/bin/sh', [join(root, 'after.sh')], {env, windowsHide: true})).stdout), {status: 0, stdout: 'fixture-claude\n'});
     assert.equal(await launchers.verifyRecordedRepositoryLaunchers('0.2.224', after, {platform: 'linux', nodePath: process.execPath, npmCliPath}), true);
     assert.equal(await launchers.verifyRollbackRepositoryLaunchers('0.2.224', after), true);
     await chmod(join(providerDirectory, 'claude'), 0o722);
@@ -407,7 +407,7 @@ test('actual Linux launcher with two set-up providers reaches both and verifies 
     assert.deepEqual(providerDirectory, [claudeDirectory, codexDirectory]);
     const after = launchers.stableRepositoryLauncherContents('0.2.224', {platform: 'linux', nodeDirectory, npmCliPath, providerDirectory});
     await writeFile(join(root, 'after.sh'), after.shell);
-    const {stdout} = await promisify(execFile)('/bin/sh', [join(root, 'after.sh')], {env: {PATH: join(root, 'absent'), HOME: root}});
+    const {stdout} = await promisify(execFile)('/bin/sh', [join(root, 'after.sh')], {env: {PATH: join(root, 'absent'), HOME: root}, windowsHide: true});
     assert.deepEqual(JSON.parse(stdout), ['own-claude', 'own-codex'], 'the relay reaches both set-up providers');
     const verify = () => launchers.verifyRecordedRepositoryLaunchers('0.2.224', after, {platform: 'linux', nodePath: process.execPath, npmCliPath});
     assert.equal(await verify(), true);
@@ -567,7 +567,7 @@ async function grantOtherUserByAcl(path: string) {
   const script = 'import os,struct,sys\n'
     + 'e=[(1,7,0xffffffff),(2,7,65534),(4,5,0xffffffff),(16,7,0xffffffff),(32,5,0xffffffff)]\n'
     + "os.setxattr(sys.argv[1],'system.posix_acl_access',struct.pack('<I',2)+b''.join(struct.pack('<HHI',*x) for x in e))\n";
-  try {await promisify(execFile)('python3', ['-I', '-c', script, path], {timeout: 10000}); return true;} catch {return false;}
+  try {await promisify(execFile)('python3', ['-I', '-c', script, path], {timeout: 10000, windowsHide: true}); return true;} catch {return false;}
 }
 
 // CLI 0.2.224 review A1 (1x7=7): with a POSIX ACL, the group bits of st_mode are the ACL mask, which also bounds named
@@ -920,7 +920,7 @@ test('the real directory of a symlinked entry keeps the place on PATH of the ent
     assert.deepEqual(providerDirectory, [real, local], 'claude keeps the first place its fnm entry has on PATH');
     const after = launchers.stableRepositoryLauncherContents('0.2.224', {platform: 'linux', nodeDirectory, npmCliPath, providerDirectory});
     await writeFile(join(root, 'after.sh'), after.shell);
-    const {stdout} = await promisify(execFile)('/bin/sh', [join(root, 'after.sh')], {env: {PATH: join(root, 'absent'), HOME: root}});
+    const {stdout} = await promisify(execFile)('/bin/sh', [join(root, 'after.sh')], {env: {PATH: join(root, 'absent'), HOME: root}, windowsHide: true});
     assert.equal(stdout, 'fnm-claude', 'the relay runs the claude setup checked');
     const kept = join(root, 'kept', 'bin');
     assert.deepEqual(await launchers.providerDirectoriesInPathOrder([kept, real, local], searchPath), [real, local, kept],

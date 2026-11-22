@@ -147,7 +147,7 @@ test('actual supervisor declaration drains its fresh C-only session child before
   t.after(async () => {signal.abort(); if (child) await watchOwnedChild(child).stop({graceMs: 1000}); await rm(root, {recursive: true, force: true});});
   const baseline = process.env.DHARMA_SUPERVISOR_BASELINE_SHA;
   if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('fixture_baseline_invalid');
-  const source = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding: 'utf8'})
+  const source = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding: 'utf8', windowsHide: true})
     : await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const functions = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'superviseNamedSessions');
@@ -164,7 +164,7 @@ test('actual supervisor declaration drains its fresh C-only session child before
       assert.equal(action, 'start'); assert.equal(flags.get('name'), 'reviewer');
       assert.equal(flags.get('workspace-id'), 'synthetic_workspace'); assert.equal(flags.get('apply'), true);
       const owner = currentNamedSessionChildOwner();
-      const start = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {cwd: root, stdio: 'ignore'});
+      const start = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {cwd: root, stdio: 'ignore', windowsHide: true});
       child = owner ? await owner.spawn('reviewer', start) : start();
       signal.abort(); return {ok: true};
     }};

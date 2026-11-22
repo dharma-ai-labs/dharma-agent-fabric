@@ -6,7 +6,7 @@ import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import * as util from 'node:util';
 import * as asyncHooks from 'node:async_hooks';
-import * as childProcess from 'node:child_process';
+import {spawn, type SpawnOptions} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {runInNewContext} from 'node:vm';
 import ts from 'typescript';
@@ -55,7 +55,9 @@ async function module(overrides: Record<string, unknown> = {}) {
         if (id === 'node:util') return util;
         if (id === 'node:crypto') return crypto;
         if (id === 'node:path') return path;
-        if (id === 'node:child_process') return childProcess;
+        // The module under test imports only spawn; this one adds the flag like its own call does.
+        if (id === 'node:child_process') return {spawn: (command: string, argv: readonly string[], options: SpawnOptions) =>
+          spawn(command, argv, {...options, windowsHide: true})};
         if (id === '@dharma-ai-labs/agent-fabric-contracts') return contracts;
         if (id === '@dharma-ai-labs/agent-fabric-policy') return policyModule;
         if (id === './installationScope.js') return scope;

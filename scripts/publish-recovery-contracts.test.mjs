@@ -10,7 +10,7 @@ const root = resolve(import.meta.dirname, '..');
 const baseline = '544ead13a212f1ba6253a3845def61baf5c92dbb';
 const head = 'a'.repeat(40), name = '@dharma-ai-labs/agent-fabric-contracts';
 const paths = ['packages/contracts/package.json', 'packages/cli/package.json', 'packages/lifecycle-adapter/package.json', 'package-lock.json', 'packages/cli/src/index.ts','package.json'];
-const git = path => execFileSync('git', ['show', `${baseline}:${path}`], {cwd: root, encoding: 'utf8', maxBuffer: 4*1024*1024});
+const git = path => execFileSync('git', ['show', `${baseline}:${path}`], {cwd: root, encoding: 'utf8', maxBuffer: 4*1024*1024, windowsHide: true});
 function snapshot() {
   const original = Object.fromEntries(paths.map(path => [path, path.endsWith('.json') ? JSON.parse(git(path)) : git(path)]));
   const current = structuredClone(original);

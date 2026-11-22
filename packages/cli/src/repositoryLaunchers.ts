@@ -187,7 +187,7 @@ export type AccountFiles = {group?: string; passwd?: string;
 // The NSS group entry for `gid`, as `getent group` prints it, run without a shell. Undefined when there is none.
 async function nssGroupEntry(gid: number) {
   try {
-    const {stdout} = await promisify(execFile)('getent', ['group', String(gid)], {timeout: 5000, maxBuffer: 64 * 1024});
+    const {stdout} = await promisify(execFile)('getent', ['group', String(gid)], {timeout: 5000, maxBuffer: 64 * 1024, windowsHide: true});
     return stdout.split('\n')[0] || undefined;
   } catch {return undefined;}
 }
@@ -249,7 +249,7 @@ class UnsafeProviderEntry extends Error {
 async function withoutAccessAcl(path: string) {
   for (const ls of ['/usr/bin/ls', '/bin/ls']) {
     try {
-      const {stdout} = await promisify(execFile)(ls, ['-ld', '--', path], {timeout: 5000, maxBuffer: 64 * 1024, env: {LC_ALL: 'C'}});
+      const {stdout} = await promisify(execFile)(ls, ['-ld', '--', path], {timeout: 5000, maxBuffer: 64 * 1024, env: {LC_ALL: 'C'}, windowsHide: true});
       return /^[-d][r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-]\.? /.test(stdout);
     } catch {}
   }

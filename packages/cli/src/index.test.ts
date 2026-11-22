@@ -462,7 +462,7 @@ test('managed POSIX launcher selects its pinned npm even under a minimal startup
     platform: 'linux', nodeDirectory: bin,
   }).shell, { mode: 0o700 });
   const { stdout } = await execFileAsync('/bin/sh', [launcher, 'relay', 'supervise', '--demo-only'], {
-    env: { PATH: '/usr/bin:/bin' },
+    env: { PATH: '/usr/bin:/bin' }, windowsHide: true,
   });
   assert.deepEqual(stdout.trim().split('\n'), ['verified-runtime', 'exec', '--yes', '--',
     '@dharma-ai-labs/agent-fabric@0.2.103', 'relay', 'supervise', '--demo-only']);
@@ -470,8 +470,8 @@ test('managed POSIX launcher selects its pinned npm even under a minimal startup
 
 test('Demo watch controls support no-write plans through the actual CLI dispatch', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-watch-cli-plan-'));
-  await execFileAsync('git', ['init', root]);
-  await execFileAsync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/example/repo']);
+  await execFileAsync('git', ['init', root], { windowsHide: true });
+  await execFileAsync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/example/repo'], { windowsHide: true });
   for (const command of ['watch-enable', 'watch-status', 'watch-disable']) {
     const receipt = await run(['demo', command, '--dry-run', '--portal-url', 'https://example.com',
       '--organization-id', 'org_test', '--repository-id', '00000000-0000-4000-8000-000000000001',
@@ -497,7 +497,7 @@ test('all startup mutations share one user-level lock and release it on failure'
 
 test('bootstrap validates stable repository identity before grant redemption', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-bootstrap-preflight-'));
-  await execFileAsync('git', ['init', root]);
+  await execFileAsync('git', ['init', root], { windowsHide: true });
 
   await assert.rejects(
     preflightBootstrapWorkspaceIdentity(root),
@@ -506,7 +506,7 @@ test('bootstrap validates stable repository identity before grant redemption', a
   const explicit = await preflightBootstrapWorkspaceIdentity(root, 'customer/repository-a');
   assert.equal(explicit.source, 'explicit_key');
 
-  await execFileAsync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/dharma-ai-labs/repository-a.git']);
+  await execFileAsync('git', ['-C', root, 'remote', 'add', 'origin', 'https://github.com/dharma-ai-labs/repository-a.git'], { windowsHide: true });
   const hosted = await preflightBootstrapWorkspaceIdentity(root);
   assert.equal(hosted.source, 'remote');
   assert.match(hosted.fingerprint, /^sha256:[a-f0-9]{64}$/);
@@ -764,12 +764,12 @@ test('help is successful and direct basic commands keep stdout and stderr clean'
   assert.equal(String(await run(['--help'])), CLI_USAGE);
   const entrypoint = new URL('./index.js', import.meta.url);
   for (const argv of [['--help'], ['--version']]) {
-    const result = await execFileAsync(process.execPath, [fileURLToPath(entrypoint), ...argv], { encoding: 'utf8' });
+    const result = await execFileAsync(process.execPath, [fileURLToPath(entrypoint), ...argv], { encoding: 'utf8', windowsHide: true });
     assert.equal(result.stderr, '');
     assert.equal(result.stdout.includes('ExperimentalWarning'), false);
   }
   const bin = new URL('./bin.js', import.meta.url);
-  const help = await execFileAsync(process.execPath, [fileURLToPath(bin), '--help'], { encoding: 'utf8' });
+  const help = await execFileAsync(process.execPath, [fileURLToPath(bin), '--help'], { encoding: 'utf8', windowsHide: true });
   assert.equal(help.stdout.trim(), CLI_USAGE);
   assert.equal(help.stderr, '');
 });
@@ -1102,10 +1102,10 @@ test('workspace registration reuses a normalized repository identity across loca
   }));
   for (const repository of [first, second, unhosted]) {
     await mkdir(repository);
-    await execFileAsync('git', ['init', repository]);
+    await execFileAsync('git', ['init', repository], { windowsHide: true });
   }
-  await execFileAsync('git', ['-C', first, 'remote', 'add', 'origin', 'git@github.com:Dharma-AI-Labs/Northstar.git']);
-  await execFileAsync('git', ['-C', second, 'remote', 'add', 'origin', 'https://token@github.com/dharma-ai-labs/northstar.git']);
+  await execFileAsync('git', ['-C', first, 'remote', 'add', 'origin', 'git@github.com:Dharma-AI-Labs/Northstar.git'], { windowsHide: true });
+  await execFileAsync('git', ['-C', second, 'remote', 'add', 'origin', 'https://token@github.com/dharma-ai-labs/northstar.git'], { windowsHide: true });
   const previous = process.env.DHARMA_HOME;
   process.env.DHARMA_HOME = home;
   try {

@@ -15,9 +15,9 @@ let cachedSnapshot;
 function sourceSnapshot() {
   if(!cachedSnapshot) {
     const root=new URL('../',import.meta.url),read=path=>readFileSync(new URL(path,root),'utf8');
-    const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8*1024*1024}).trim();
+    const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8*1024*1024, windowsHide: true}).trim();
     const qualified=path=>execFileSync('git',['show',qualifiedSecuritySource+':'+path],
-      {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024});
+      {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024, windowsHide: true});
     const baseline=path=>JSON.parse(git('show',securityRelease.baseline.commit+':'+path));
     const paths=git('ls-tree','-r','--name-only',securityRelease.baseline.commit,'packages').split('\n')
       .filter(path=>/^packages\/[^/]+\/package.json$/.test(path));
@@ -58,7 +58,9 @@ test('security source admission binds main, baseline, exact hashes, package mani
   assert.throws(()=>assertSecuritySource(head,{...snapshot,lock:snapshot.lock+'foreign'}),/lock delta/);
   const packages=structuredClone(snapshot);packages.packageManifests['packages/cli/package.json'].version='0.0.0';
   assert.throws(()=>assertSecuritySource(head,packages),/package manifest/);
-  assert.deepEqual(JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8')),snapshot.manifest);
+  const currentManifest=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8'));
+  assert.notDeepEqual(currentManifest,snapshot.manifest);
+  assert.throws(()=>assertSecuritySource(head,{...snapshot,manifest:currentManifest}),/root manifest/);
 });
 
 test('historical security admission does not admit later lock or release-test candidates',()=>{
@@ -330,7 +332,7 @@ test('security command accepts only fixed plan, admission and explicit publicati
 test('unconfigured security CLI fails closed without successful output',()=>{
   const child=spawnSync(process.execPath,[fileURLToPath(new URL('./publish-security-recovery.mjs',import.meta.url)),
     '--expected-head',head,'--publish'],{encoding:'utf8',timeout:10_000,
-    env:{...process.env,SECURITY_PUBLISHER_SHA256:''}});
+    env:{...process.env,SECURITY_PUBLISHER_SHA256:''}, windowsHide: true});
   assert.equal(child.status,1);assert.equal(child.stdout,'');
   assert.match(child.stderr,/security_release_source_admission_not_qualified/);
 });

@@ -26,7 +26,7 @@ function privateTerms() {
 }
 
 function trackedFiles() {
-  return execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' })
+  return execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', windowsHide: true })
     .split('\0')
     .filter(Boolean);
 }

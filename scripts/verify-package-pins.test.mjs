@@ -10,7 +10,7 @@ const execute = promisify(execFile), sourceRoot = resolve(import.meta.dirname, '
 const baseline = process.env.DHARMA_PACK_VERIFIER_BASELINE_SHA;
 if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('verifier_baseline_invalid');
 const verifier = baseline
-  ? (await execute('git', ['show', `${baseline}:scripts/verify-package.mjs`], {cwd: sourceRoot})).stdout
+  ? (await execute('git', ['show', `${baseline}:scripts/verify-package.mjs`], {cwd: sourceRoot, windowsHide: true})).stdout
   : await readFile(new URL('./verify-package.mjs', import.meta.url));
 const workspaces = ['contracts', 'secure-store', 'policy', 'provider-adapters', 'better-harness-bridge',
   'evidence-reduction', 'relay-client', 'local-vault', 'task-runner', 'skill-manager', 'sdk', 'cli'];
@@ -43,7 +43,7 @@ for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy'
         await mkdir(resolve(root, 'scripts'), {recursive: true});
         await writeFile(resolve(root, 'scripts/verify.mjs'), verifier);
         await assert.rejects(execute(process.execPath, [resolve(root, 'scripts/verify.mjs')], {
-          cwd: root, timeout: 10_000, env: {...process.env, npm_execpath: resolve(root, 'must-not-execute.mjs')},
+          cwd: root, timeout: 10_000, env: {...process.env, npm_execpath: resolve(root, 'must-not-execute.mjs')}, windowsHide: true,
         }), error => error.code === 1 && error.stdout === ''
           && error.stderr.includes(suffix === 'unknown' ? 'cli_runtime_package_unknown' : `cli_runtime_package_pin_invalid:${suffix}`)
           && !error.stderr.includes('MODULE_NOT_FOUND'));
@@ -128,4 +128,20 @@ test('CLI pins a relay client published with the relay_connect_timeout limit', a
   // CLI gets the shorter hold only when it pins a later relay-client.
   assert.ok(relay.version.localeCompare('0.2.40', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} has no connect limit`);
   assert.equal(cli.dependencies[relay.name], relay.version);
+});
+
+test('CLI pins provider-adapters, evidence-reduction, task-runner and local-vault published with hidden child windows', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const [cli, provider, evidence, runner, vault] = await Promise.all(
+    ['cli', 'provider-adapters', 'evidence-reduction', 'task-runner', 'local-vault'].map(manifest));
+  const atLeast = (version, floor) => version.localeCompare(floor, undefined, {numeric: true}) >= 0;
+  // provider-adapters 0.1.41 is on npm with version and sign-in probes and a process run that start
+  // their children without windowsHide (#531), so on Windows each opens a console window. The CLI
+  // loads provider-adapters from npm, directly and through evidence-reduction, task-runner and
+  // local-vault, so each of those pins the later provider-adapters and the CLI pins them all.
+  assert.ok(atLeast(provider.version, '0.1.42'), `provider-adapters ${provider.version} is published without windowsHide`);
+  assert.equal(evidence.dependencies[provider.name], provider.version);
+  assert.equal(runner.dependencies[provider.name], provider.version);
+  assert.equal(vault.dependencies[evidence.name], evidence.version);
+  for (const runtime of [provider, evidence, runner, vault]) assert.equal(cli.dependencies[runtime.name], runtime.version);
 });

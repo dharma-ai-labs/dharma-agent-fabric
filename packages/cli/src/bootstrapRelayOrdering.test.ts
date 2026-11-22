@@ -15,7 +15,7 @@ async function fixture(options: {host?: boolean; sourceClaim?: boolean; noRelay?
   const baseline = process.env.DHARMA_BOOTSTRAP_ORDER_BASELINE_SHA;
   if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('bootstrap_order_baseline_invalid');
   const source = baseline ? (await promisify(execFile)('git', ['show', `${baseline}:packages/cli/src/index.ts`], {
-    cwd: resolve(import.meta.dirname, '../../..'), maxBuffer: 4 * 1024 * 1024,
+    cwd: resolve(import.meta.dirname, '../../..'), maxBuffer: 4 * 1024 * 1024, windowsHide: true,
   })).stdout : await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'bootstrap');

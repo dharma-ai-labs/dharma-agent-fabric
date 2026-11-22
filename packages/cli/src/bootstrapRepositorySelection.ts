@@ -52,7 +52,7 @@ export function decodeSelectedRepositoryUrl(encoded: string): string {
 
 async function gitValue(workspace: string, args: string[]): Promise<string | null> {
   try {
-    return (await execFileAsync('git', ['-C', workspace, ...args], { timeout: 10_000 })).stdout.trim() || null;
+    return (await execFileAsync('git', ['-C', workspace, ...args], { timeout: 10_000, windowsHide: true })).stdout.trim() || null;
   } catch { return null; }
 }
 
@@ -91,7 +91,7 @@ async function cloneSelectedRepository(remote: string, target: string): Promise<
   ], {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     timeout: 300_000,
-    maxBuffer: 16_384,
+    maxBuffer: 16_384, windowsHide: true,
   });
 }
 

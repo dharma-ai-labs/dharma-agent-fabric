@@ -16,7 +16,7 @@ type Acquire = (path: string, timeout: number, message: string) => Promise<() =>
 async function acquire(overrides: Record<string, unknown> = {}): Promise<Acquire> {
   const baseline = process.env.DHARMA_PID_LOCK_BASELINE;
   if (baseline && baseline !== '83034f4c2581279478aa9e7050cda8f9ae09facb') throw new Error('fixture_source_unqualified');
-  const text = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding:'utf8'})
+  const text = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding:'utf8', windowsHide: true})
     : await fs.readFile(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8');
   const source = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const nodes = source.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === 'acquirePidLock');

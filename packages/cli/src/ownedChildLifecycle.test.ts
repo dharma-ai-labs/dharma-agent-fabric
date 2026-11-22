@@ -93,7 +93,7 @@ test('owned child already terminal requires no signal or attribution lookup', as
 
 test('owned child cancellation drains a real C-only spawned process', async () => {
   const child = spawn(process.execPath, ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'],
-    {stdio: ['ignore', 'pipe', 'ignore']});
+    {stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true});
   const owned = watchOwnedChild(child);
   try {
     await new Promise<void>((resolveReady, reject) => {

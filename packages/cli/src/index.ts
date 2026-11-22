@@ -173,7 +173,7 @@ import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTo
 import {captureCredentialEnvironment, credentialVariable, relayChildEnvironment} from './credentialEnvironment.js';
 import {smokeCommandPolicy} from './smokeCommandEnvironment.js';
 
-const VERSION = '0.2.226';
+const VERSION = '0.2.227';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -1709,10 +1709,10 @@ async function readBootstrapSourceIdentityForRequalification(workspace: string, 
   const options = {timeout: 10_000, maxBuffer: 65_536, windowsHide: true, signal,
     env: providerProcessEnvironment(process.env)};
   signal.throwIfAborted();
-  const root = await execFileAsync('git', ['-C', workspace, 'rev-parse', '--show-toplevel'], options);
+  const root = await execFileAsync('git', ['-C', workspace, 'rev-parse', '--show-toplevel'], { ...options, windowsHide: true });
   signal.throwIfAborted();
   if (!root.stdout.trim()) throw new Error('Bootstrap workspace must be a Git repository.');
-  const remote = await execFileAsync('git', ['-C', workspace, 'config', '--get', 'remote.origin.url'], options);
+  const remote = await execFileAsync('git', ['-C', workspace, 'config', '--get', 'remote.origin.url'], { ...options, windowsHide: true });
   signal.throwIfAborted();
   return sourceRepositoryFingerprint(remote.stdout.trim() || null);
 }
@@ -1859,7 +1859,7 @@ async function gitValue(workspace: string, argv: string[]) {
   const operation = () => execFileAsync('git', args, scope ? {
     timeout: 10_000, maxBuffer: 65_536, windowsHide: true, signal: scope.signal,
     env: providerProcessEnvironment(process.env),
-  } : {timeout: 10_000});
+  } : {timeout: 10_000, windowsHide: true});
   try {
     const result = scope ? await scope.step(operation) : await operation();
     return result.stdout.trim() || null;
@@ -2442,7 +2442,7 @@ async function startRelayDaemon(policyPath: string) {
     } else {
       await step(async () => {
         const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
-          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: relayChildEnvironment(),
+          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: relayChildEnvironment(), windowsHide: true,
         });
         if (hostScope) captureBootstrapHostChild(hostScope, child);
         else child.unref();
@@ -2555,7 +2555,7 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
       start: () => spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
         cwd: dirname(dirname(policyPath)),
         stdio: 'ignore',
-        env: relayChildEnvironment(),
+        env: relayChildEnvironment(), windowsHide: true,
       }),
       onExit: async exit => {
         const path = relayChildFailurePath();
@@ -5690,7 +5690,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     await step(async () => {
       const start = () => {
         const child = spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner,
-          stdio: setupSessionScope ? ['ignore', 'ignore', 'pipe', 'ipc'] : ['ignore', 'ignore', 'pipe'], env: relayChildEnvironment() });
+          stdio: setupSessionScope ? ['ignore', 'ignore', 'pipe', 'ipc'] : ['ignore', 'ignore', 'pipe'], env: relayChildEnvironment(), windowsHide: true });
         startupChild = observeNamedSessionStartupChild(child);
         return child;
       };
@@ -5909,7 +5909,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
               const versionEnvironment = providerProcessEnvironment(process.env);
               const versionLaunch = providerLaunch('codex', ['--version'], versionEnvironment);
               const version = (await execFileAsync(versionLaunch.command, versionLaunch.argv, { timeout: 10_000, maxBuffer: 4096,
-                env: versionEnvironment })).stdout.trim();
+                env: versionEnvironment, windowsHide: true })).stdout.trim();
               if (!/^codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?$/.test(version)) {
                 throw new Error('named_session_runtime_version_unavailable');
               }
@@ -6150,10 +6150,10 @@ async function joinExistingRepository(flags: Map<string, string | boolean>, bind
   if (!await gitValue(workspace, ['rev-parse', '--verify', 'HEAD'])) {
     const template = resolve(workspace, '.dharma', 'empty-git-template');
     await mkdir(template, { recursive: true, mode: 0o700 });
-    await execFileAsync('git', ['-c', `init.templateDir=${template}`, 'init', '--initial-branch=main', workspace]);
+    await execFileAsync('git', ['-c', `init.templateDir=${template}`, 'init', '--initial-branch=main', workspace], { windowsHide: true });
     await execFileAsync('git', ['-C', workspace, '-c', 'user.name=Dharma Agent Fabric',
       '-c', 'user.email=agent-fabric@localhost', '-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${template}`,
-      'commit', '--allow-empty', '-m', 'Initialize isolated knowledge workspace']);
+      'commit', '--allow-empty', '-m', 'Initialize isolated knowledge workspace'], { windowsHide: true });
   }
   const workspaceId = workspaceIdForDevice({ organizationId: config.organizationId,
     deviceId: config.deviceId, path: workspace });
@@ -8096,7 +8096,7 @@ export async function trustHermesProject(input: {
   execute?: HermesSkillExecutor;
 }) {
   const workspace = await realpath(input.workspace);
-  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, { ...options, windowsHide: true }));
   await execute('hermes', ['skills', 'trust', workspace], {
     timeout: 30_000,
     env: providerProcessEnvironment(input.env),
@@ -8273,7 +8273,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     try {
       const listAgyPlugins = input.listAgyPlugins
         || ((executable: string, argv: string[], options: { timeout: number; env: NodeJS.ProcessEnv }) => (
-          execFileAsync(executable, argv, options)
+          execFileAsync(executable, argv, { ...options, windowsHide: true })
         ));
       const { stdout } = await listAgyPlugins('agy', ['plugin', 'list'], {
         timeout: 30_000,
@@ -8293,7 +8293,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     try {
       const listHermesSkills = input.listHermesSkills
         || ((executable: string, argv: string[], options: { timeout: number; env: NodeJS.ProcessEnv; cwd: string }) => (
-          execFileAsync(executable, argv, options)
+          execFileAsync(executable, argv, { ...options, windowsHide: true })
         ));
       const { stdout } = await listHermesSkills('hermes', ['skills', 'list', '--source', 'local', '--enabled-only'], {
         timeout: 30_000,
@@ -8376,7 +8376,7 @@ export async function attestHermesSkillBundleActivation(input: {
     };
   }
   const workspace = await realpath(input.workspace);
-  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, { ...options, windowsHide: true }));
   await trustHermesProject({ workspace, env: input.env, execute });
   let stdout: string | Buffer | undefined;
   try {
@@ -8441,7 +8441,7 @@ export async function activateAgyPlugin(input: {
 } = {}) {
   await ensureAgyReadOnlyAttestationPermission({ env: input.env, home: input.home });
   const root = resolve(nativeSkillDirectory('agy', input.env, input.home), '..');
-  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, { ...options, windowsHide: true }));
   const options = { timeout: 30_000, env: providerProcessEnvironment(input.env) };
   await mkdir(root, { recursive: true, mode: 0o700 });
   const manifest = resolve(root, 'plugin.json');
@@ -8541,7 +8541,7 @@ export async function attestAgySkillActivation(input: {
     },
   });
   const prompt = `/${input.skillId}\nDharma activation attestation. Do not use tools or inspect files. Return only JSON with fields challenge and activationToken. Challenge: ${challenge}`;
-  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, { ...options, windowsHide: true }));
   let stdout: string | Buffer;
   try {
     ({ stdout } = await execute('agy', [
@@ -8880,11 +8880,11 @@ export async function prepareSkillUpdate(input: {
     if (input.automatic) throw new Error('Automatic preparation requires bounded inline files or an authenticated complete repository package.');
     await rm(sourceRoot, { recursive: true, force: true });
     assertCurrent();
-    await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
+    await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000, windowsHide: true });
     assertCurrent();
-    await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
+    await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000, windowsHide: true });
     assertCurrent();
-    await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
+    await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000, windowsHide: true });
     assertCurrent();
   }
   for (const skill of bundle.skills) {

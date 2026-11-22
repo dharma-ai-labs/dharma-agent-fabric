@@ -14,10 +14,10 @@ const head='a'.repeat(40),digest='sha512-'+Buffer.alloc(64,7).toString('base64')
 const qualifiedReleaseSource='a44c6d776a35f130bd1c83982f061572e5bb9a18';
 const root=new URL('../',import.meta.url),read=p=>readFileSync(new URL(p,root),'utf8');
 function snapshot(){
-  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8388608}).trim();
+  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8388608, windowsHide: true}).trim();
   // The one-shot CLI211 contract is historical; later product work must not
   // alter its qualification fixture or make the old publisher admit new bytes.
-  const qualified=p=>execFileSync('git',['show',qualifiedReleaseSource+':'+p],{cwd:root,encoding:'utf8',maxBuffer:8388608});
+  const qualified=p=>execFileSync('git',['show',qualifiedReleaseSource+':'+p],{cwd:root,encoding:'utf8',maxBuffer:8388608, windowsHide: true});
   const baseline=p=>JSON.parse(git('show',release.baseline.commit+':'+p));
   return{head,remoteMain:head,ref:'refs/heads/main',baselineTree:release.baseline.tree,dirty:'',untracked:[],changed:release.allowedPaths,
     manifestHash:textHash(qualified('scripts/signing-upgrade-release.json')),
@@ -207,14 +207,14 @@ test('Linux packs keep historical artifacts immutable and reject replacement sou
         '--json','--pack-destination',directory],{cwd:root,encoding:'utf8',timeout:120000,maxBuffer:8388608,
         stdio:['ignore','pipe','pipe'],env:{...process.env,HOME:directory,XDG_CONFIG_HOME:directory,
           npm_config_userconfig:'/dev/null',npm_config_globalconfig:globalConfig,
-          npm_config_offline:'true',npm_config_audit:'false',npm_config_fund:'false'}}))[0];
+          npm_config_offline:'true',npm_config_audit:'false',npm_config_fund:'false'}, windowsHide: true}))[0];
       const current=JSON.parse(read(item.workspace+'/package.json'));
       assert.equal(packed.name,item.name);assert.equal(packed.version,current.version);
       assert.equal('sha512-'+createHash('sha512').update(readFileSync(join(directory,packed.filename))).digest('base64'),packed.integrity);
       if(item.name==='@dharma-ai-labs/agent-fabric-secure-store'&&current.version===item.version&&packed.integrity!==item.integrity){
         assert.notEqual(packed.integrity,item.integrity);
         const changed=execFileSync('git',['diff','--name-only',item.source,'HEAD','--',item.workspace],
-          {cwd:root,encoding:'utf8',maxBuffer:8388608}).trim().split('\n').filter(Boolean);
+          {cwd:root,encoding:'utf8',maxBuffer:8388608, windowsHide: true}).trim().split('\n').filter(Boolean);
         assert.deepEqual(changed,['packages/secure-store/src/windowsEnrollmentAnchor.test.ts']);
         const {io,events}=fixture(),originalPack=io.pack;
         io.pack=async candidate=>candidate.name===item.name?packed:originalPack(candidate);
@@ -224,7 +224,7 @@ test('Linux packs keep historical artifacts immutable and reject replacement sou
         assert.equal(packed.integrity,item.integrity,'immutable package changed: '+item.name);
       }else{
         const historical=JSON.parse(execFileSync('git',['show',qualifiedReleaseSource+':'+item.workspace+'/package.json'],
-          {cwd:root,encoding:'utf8',maxBuffer:8388608}));
+          {cwd:root,encoding:'utf8',maxBuffer:8388608, windowsHide: true}));
         assert.equal(historical.name,item.name);assert.equal(historical.version,item.version);
         assert.notEqual(packed.version,item.version);assert.notEqual(packed.integrity,item.integrity);
         const {io,events}=fixture(),originalPack=io.pack;
@@ -256,7 +256,7 @@ test('preserved original artifacts require exact runtime bytes, file set, manife
 
 test('Linux preserves SDK and skill-manager registry tarballs and verifies every shipped runtime byte', {skip:process.platform!=='linux'},async()=>{
   const directory=mkdtempSync(join(tmpdir(),'dharma-preserved-originals-'));
-  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:8388608}).trim();
+  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:8388608, windowsHide: true}).trim();
   try{for(const item of release.dependencies.filter(i=>i.preserveOriginal)){
     const packed=await packPreservedDependency(item,fileURLToPath(root),directory,{git});
     assert.equal(packed.integrity,item.integrity);assert.equal(packed.preservedOriginalArtifact,true);
