@@ -34,7 +34,7 @@ async function device(t: {after(fn: () => Promise<void>): void}) {
 
 /** The pid of a process that has exited, standing in for a command that left a kept request behind. */
 async function exitedPid(): Promise<number> {
-  const child = spawn(process.execPath, ['-e', ''], {stdio: 'ignore'});
+  const child = spawn(process.execPath, ['-e', ''], {stdio: 'ignore', windowsHide: true});
   await new Promise(accept => child.once('exit', accept));
   return child.pid!;
 }
