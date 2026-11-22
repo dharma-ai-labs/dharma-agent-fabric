@@ -149,7 +149,7 @@ test('three executor processes share one cohort, one phase claim and one in-flig
       ledger.close();process.stdout.write(JSON.stringify(result));`;
     const results = await executorResults(['local', 'roomote', 'gemini'].map(async executor =>
       // Longer than the ledger's 30 s busy timeout, so a starved executor reports finite_study_ledger_busy.
-      JSON.parse((await execute(process.execPath, ['--input-type=module', '-e', source, executor], { timeout: 60_000 })).stdout)));
+      JSON.parse((await execute(process.execPath, ['--input-type=module', '-e', source, executor], { timeout: 60_000, windowsHide: true })).stdout)));
     assert.equal(results.filter(result => result.ok && result.execute).length, 1);
     assert.equal(ledger.status().windowCount, 1);
     assert.equal(ledger.status().trajectoryCount, 100);
@@ -164,7 +164,7 @@ async function holdWriteLock(path: string, milliseconds: number): Promise<{ rele
   const holder = spawn(process.execPath, ['--no-warnings', '-e', `const {DatabaseSync}=require('node:sqlite');
     const db=new DatabaseSync(${JSON.stringify(path)});db.exec('begin immediate');require('node:fs').writeSync(1,'held');
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${milliseconds});db.exec('commit');db.close();`],
-  { stdio: ['ignore', 'pipe', 'inherit'] });
+  { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
   const exited = new Promise<number | null>(resolve => holder.once('exit', resolve));
   await new Promise<void>((resolve, reject) => {
     holder.stdout.once('data', () => resolve());
@@ -290,7 +290,7 @@ test('process death after committed reservation leaves a non-replayable durable 
     const source = `import {FiniteLearningStudyLedger} from ${JSON.stringify(new URL('./finiteLearningStudy.js', import.meta.url).href)};
       const ledger=new FiniteLearningStudyLedger(${JSON.stringify(path)},${JSON.stringify(config())},()=>${instant});
       ledger.reserve(${JSON.stringify(request(windowHash))});process.exit(73);`;
-    await assert.rejects(execute(process.execPath, ['--input-type=module', '-e', source], { timeout: 15_000 }),
+    await assert.rejects(execute(process.execPath, ['--input-type=module', '-e', source], { timeout: 15_000, windowsHide: true }),
       (error: unknown) => (error as { code: number }).code === 73);
     assert.equal(ledger.status().inFlight, 1);
     assert.equal(ledger.status().liabilityCents, 20);

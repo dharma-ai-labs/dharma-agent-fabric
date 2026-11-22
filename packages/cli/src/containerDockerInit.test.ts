@@ -150,7 +150,7 @@ test('Docker init controller fences its own supervisor and remains blocked while
   const result = lifecycle.runOwnedContainerEntrypoint({ home: f.home, uid: f.options.uid, signal: abort.signal,
     containerRuntime: { ...f.runtime, currentControllerPid: f.controller.pid }, pollMs: 10,
     consumerStoreReady: async () => ready,
-    spawnRelay: () => { const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); children.push(child); return child; } } as Parameters<typeof lifecycle.runOwnedContainerEntrypoint>[0]);
+    spawnRelay: () => { const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); children.push(child); return child; } } as Parameters<typeof lifecycle.runOwnedContainerEntrypoint>[0]);
   try {
     await receiptReady(join(f.home, 'relay', 'container-heartbeat.json'), heartbeat => heartbeat.lifecycle === 'blocked');
     const heartbeat = JSON.parse(await readFile(join(f.home, 'relay', 'container-heartbeat.json'), 'utf8'));

@@ -17,7 +17,7 @@ test('device maintenance tests have an explicit normal npm execution entry point
 
 async function snapshot(){
   const m=await load(),root=new URL('../',import.meta.url);
-  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8*1024*1024}).trim();
+  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',maxBuffer:8*1024*1024, windowsHide: true}).trim();
   const baseline=m.maintenanceBaseline.commit,manifest=JSON.parse(git('show',baseline+':package.json'));
   manifest.scripts['publish:device-maintenance']='node scripts/publish-device-maintenance.mjs';
   manifest.scripts['pack:verify']=manifest.scripts['pack:verify'].replace('scripts/publish-recovery-contracts.test.mjs',
@@ -173,7 +173,7 @@ test('Linux canonical packs keep historical artifacts immutable and reject repla
       for(const item of m.maintenancePackages.filter(item=>item.existingArtifact)){
         const packed=JSON.parse(execFileSync(process.execPath,[process.env.npm_execpath,'pack','--workspace',item.workspace,
           '--json','--pack-destination',directory],{cwd:root,encoding:'utf8',timeout:120000,maxBuffer:8*1024*1024,
-          stdio:['ignore','pipe','pipe'],env:{...process.env,npm_config_offline:'true',npm_config_audit:'false',npm_config_fund:'false'}}))[0];
+          stdio:['ignore','pipe','pipe'],env:{...process.env,npm_config_offline:'true',npm_config_audit:'false',npm_config_fund:'false'}, windowsHide: true}))[0];
         const current=JSON.parse(readFileSync(new URL(item.workspace+'/package.json',root),'utf8'));
         assert.equal(packed.name,item.name);assert.equal(packed.version,current.version);
         assert.equal('sha512-'+createHash('sha512').update(readFileSync(join(directory,packed.filename))).digest('base64'),packed.integrity);
@@ -181,7 +181,7 @@ test('Linux canonical packs keep historical artifacts immutable and reject repla
           &&packed.integrity!==item.existingArtifact.integrity){
           assert.notEqual(packed.integrity,item.existingArtifact.integrity);
           const changed=execFileSync('git',['diff','--name-only',item.existingArtifact.source,'HEAD','--',item.workspace],
-            {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024}).trim().split('\n').filter(Boolean);
+            {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024, windowsHide: true}).trim().split('\n').filter(Boolean);
           assert.deepEqual(changed,['packages/secure-store/src/index.test.ts',
             'packages/secure-store/src/windowsEnrollmentAnchor.test.ts']);
           const {io,events,packed:originalPack}=await fixture();
@@ -192,7 +192,7 @@ test('Linux canonical packs keep historical artifacts immutable and reject repla
           assert.equal(packed.integrity,item.existingArtifact.integrity,'immutable package bytes changed: '+item.name);
         }else{
           const historical=JSON.parse(execFileSync('git',['show','73793c2df81f6bf9c81fe276b37997fa2159c67d:'+item.workspace+'/package.json'],
-            {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024}));
+            {cwd:root,encoding:'utf8',maxBuffer:8*1024*1024, windowsHide: true}));
           assert.equal(historical.name,item.name);assert.equal(historical.version,item.version);
           assert.notEqual(packed.version,item.version);assert.notEqual(packed.integrity,item.existingArtifact.integrity);
           const {io,events,packed:originalPack}=await fixture();

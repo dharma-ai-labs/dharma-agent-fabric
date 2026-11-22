@@ -27,7 +27,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
 async function module(overrides: {fs?: Record<string, unknown>; crypto?: Record<string, unknown>; database?: typeof DatabaseSync} = {}) {
   const oldHead = process.env.DHARMA_FULL_VAULT_TEST_SOURCE_HEAD;
   if (oldHead && oldHead !== 'f9d37d1b94721a4a01e3c4716c2c316d822a0d24') throw new Error('fixture source not qualified');
-  const source = oldHead ? execFileSync('git', ['show', `${oldHead}:packages/local-vault/src/index.ts`], {encoding: 'utf8'})
+  const source = oldHead ? execFileSync('git', ['show', `${oldHead}:packages/local-vault/src/index.ts`], {encoding: 'utf8', windowsHide: true})
     : await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const result = ts.transpileModule(source, {compilerOptions: {
     target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.CommonJS}, reportDiagnostics: true});

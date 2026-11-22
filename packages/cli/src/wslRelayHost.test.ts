@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {mkdtemp, readFile, realpath, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -16,7 +16,10 @@ type PowerShellFixtureLaunch = (file: string, args: string[], options: {
   input?: string; encoding: 'utf8'; timeout: number; windowsHide: boolean; maxBuffer: number;
 }) => {error?: Error; status: number | null; stdout: string; stderr: string};
 
-function runPowerShellFixture(script: string, input?: string, launch: PowerShellFixtureLaunch = spawnSync): string {
+const launchPowerShellFixture: PowerShellFixtureLaunch = (file, args, options) =>
+  spawnSync(file, args, {...options, windowsHide: true});
+
+function runPowerShellFixture(script: string, input?: string, launch: PowerShellFixtureLaunch = launchPowerShellFixture): string {
   // Cold CI fixture hosts need a separate budget; production interop stays at 15s.
   const result = launch('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
     Buffer.from(script, 'utf16le').toString('base64')], {
@@ -90,6 +93,7 @@ async function fixture(t: TestContext) {
   let enabled = false;
   let running = false;
   let loseRegistrationResponse = false;
+  let legacy = false;
   let systemdEnabled=true;
   const options = {platform: 'linux' as const, home: join(root, 'device'), userHome: root,
     workspace: '/fixtures/repo', launcher: '/fixtures/repo/.dharma/bin/dharma',
@@ -107,16 +111,19 @@ async function fixture(t: TestContext) {
         if (script.includes('dharma-wsl-host:register')) {
           exists = true;
           enabled = true;
+          // The task holds the action the registration asked for: PowerShell itself is the earlier action.
+          legacy = /New-ScheduledTaskAction -Execute '[^']*\\powershell\.exe'/.test(script);
           if (loseRegistrationResponse) throw new Error('registration response lost');
         }
         if (script.includes('dharma-wsl-host:start')) running = true;
         if (script.includes('dharma-wsl-host:disable')) {exists = false;enabled=false;running = false;}
         if (script.includes('dharma-wsl-host:pause')) enabled=false;
-        return {stdout: JSON.stringify({exists, enabled, running})};
+        return {stdout: JSON.stringify({exists, enabled, running, ...(legacy ? {legacy} : {})})};
       },
     },
   };
-  return {options, scripts, foreignTask: () => {exists = true;enabled=true;}, loseResponse: () => {loseRegistrationResponse = true;}};
+  return {options, scripts, foreignTask: () => {exists = true;enabled=true;}, loseResponse: () => {loseRegistrationResponse = true;},
+    legacyTask: () => {exists = true;enabled = true;legacy = true;}};
 }
 
 test('WSL pause preserves its exact owned host receipt and remains independently verifiable',async t=>{
@@ -174,14 +181,170 @@ function registeredTaskAction(scripts: string[]) {
   return {execute: match[1]!, arguments: match[2]!};
 }
 
-test('WSL task uses the verified PowerShell host for its fixed native wait action', async t => {
+test('WSL task uses the verified PowerShell host under a headless console host for its fixed native wait action', async t => {
   const f = await fixture(t); await enableRelayAutostart(f.options);
   const action = registeredTaskAction(f.scripts);
-  assert.equal(action.execute, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-  assert.match(action.arguments, /^-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand [A-Za-z0-9+/=]+$/);
+  // No console window opens at logon, and none can be closed to stop the WSL host. Both programs are absolute paths.
+  assert.equal(action.execute, 'C:\\Windows\\System32\\conhost.exe');
+  assert.match(action.arguments, /^--headless C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand [A-Za-z0-9+/=]+$/);
   const script = Buffer.from(action.arguments.split(' ').at(-1)!, 'base64').toString('utf16le');
   assert.equal(script, "$ErrorActionPreference='Stop'; & 'C:\\Windows\\System32\\wsl.exe' --distribution 'Ubuntu' --user 'maatru' --cd / --exec /usr/bin/systemctl --user start --wait dharma-agent-fabric.service; exit $LASTEXITCODE");
   assert.doesNotMatch(script, /ExecutionPolicy|credential|password|token|grant|Start-Process|Invoke-Expression/i);
+});
+
+test('an owned WSL host task with the earlier PowerShell action gets the headless action at the next registration', async t => {
+  const f = await fixture(t);
+  await enableRelayAutostart(f.options);
+  f.legacyTask();
+  const before = f.scripts.length;
+  await enableRelayAutostart(f.options);
+  const registration = f.scripts.slice(before).find(script => script.includes('dharma-wsl-host:register'));
+  assert.ok(registration, 'an enabled owned task with the earlier action is registered again');
+  assert.equal(registeredTaskAction([registration]).execute, 'C:\\Windows\\System32\\conhost.exe');
+  // The owned task keeps its definition and only its action is replaced.
+  assert.match(registration, /if \(Test-LegacyAction \$task\) \{ Set-ScheduledTask -TaskPath '\\' -TaskName '[^']+' -Action \$action\|Out-Null \}; /);
+  assert.doesNotMatch(registration, /Unregister-ScheduledTask|-Force/);
+  // A task that already has the headless action is left as it is.
+  const after = f.scripts.length;
+  await enableRelayAutostart(f.options);
+  assert(!f.scripts.slice(after).some(script => script.includes('dharma-wsl-host:register')));
+});
+
+test('a WSL rollback restores the earlier PowerShell action that the restored release owns', async t => {
+  const f = await fixture(t);
+  await enableRelayAutostart(f.options);
+  assert.equal(registeredTaskAction(f.scripts).execute, 'C:\\Windows\\System32\\conhost.exe');
+  // Releases before 0.2.227 own only the earlier action and refuse the headless one as a conflict.
+  const before = f.scripts.length;
+  assert.equal((await enableRelayAutostart({...f.options, version: '0.2.226', restoreCodexHome: null})).state, 'enabled');
+  const restored = f.scripts.slice(before).find(script => script.includes('dharma-wsl-host:register'));
+  assert.ok(restored, 'the rollback registers the earlier action again');
+  const action = registeredTaskAction([restored]);
+  assert.equal(action.execute, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+  assert.match(action.arguments, /^-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand [A-Za-z0-9+/=]+$/);
+  // The owned task keeps its definition and only its action is replaced.
+  assert.match(restored, /if \(-not \(Test-LegacyAction \$task\)\) \{ Set-ScheduledTask -TaskPath '\\' -TaskName '[^']+' -Action \$action\|Out-Null \}; /);
+  assert.doesNotMatch(restored, /Unregister-ScheduledTask|-Force/);
+  // A rollback to a release that owns the headless action registers that action.
+  const after = f.scripts.length;
+  await enableRelayAutostart({...f.options, version: '0.2.227', restoreCodexHome: null});
+  const forward = f.scripts.slice(after).find(script => script.includes('dharma-wsl-host:register'));
+  assert.ok(forward);
+  assert.equal(registeredTaskAction([forward]).execute, 'C:\\Windows\\System32\\conhost.exe');
+});
+
+// Starts a task action from Node with its argument text passed as it is and with piped standard
+// handles, and waits for the marker file its client writes. Piped handles put the headless console
+// host in pseudoconsole mode: it reads terminal input from its standard input and closes the
+// console when that input ends, so the input pipe stays open until the client is done. Task
+// Scheduler gives the action no standard handles; runTaskActionWithoutHandles covers that mode.
+async function runTaskAction(execute: string, argumentsLine: string, cwd: string, marker: string) {
+  const child = spawn(execute, [argumentsLine], {cwd, windowsHide: true, windowsVerbatimArguments: true});
+  let output = '';
+  child.stdout.on('data', chunk => {output += chunk;});
+  child.stderr.on('data', chunk => {output += chunk;});
+  let exited = false;
+  const exit = new Promise<number | null>((accept, reject) => {
+    child.on('error', reject);
+    child.on('close', code => {exited = true; accept(code);});
+  });
+  let content: string | null = null;
+  for (let attempt = 0; attempt < 300 && content === null; attempt++) {
+    content = await readFile(marker, 'utf8').catch(() => null);
+    if (content === null) await new Promise(accept => setTimeout(accept, 100));
+  }
+  child.stdin.end();
+  const timer = setTimeout(() => child.kill(), 30_000);
+  const code = await exit.finally(() => clearTimeout(timer));
+  return {content, code, exitedBeforeMarker: content === null && exited, output};
+}
+
+// Starts a task action through Win32_Process.Create, which gives the new process no standard
+// handles and no console of a parent, as Task Scheduler does at logon. The client writes a
+// heartbeat about once a second and then a done marker. The heartbeats are sampled while the
+// console host is checked to be still running, and the host must exit once the client is done.
+async function runTaskActionWithoutHandles(execute: string, argumentsLine: string, cwd: string, heartbeat: string, done: string) {
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  const create = `$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{`
+    + `CommandLine = ${literal(`"${execute}" ${argumentsLine}`)}; CurrentDirectory = ${literal(cwd)}}; `
+    + 'if ($created.ReturnValue -ne 0) {throw "Win32_Process.Create returned $($created.ReturnValue)"}; '
+    + '[Console]::Out.Write($created.ProcessId)';
+  const started = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+    Buffer.from(create, 'utf16le').toString('base64')], {encoding: 'utf8', timeout: 60_000, windowsHide: true});
+  if (started.error || started.status !== 0) throw new Error(`${started.stderr || started.error}`);
+  const pid = Number(started.stdout.trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, started.stdout);
+  const alive = () => {try {process.kill(pid, 0); return true;} catch {return false;}};
+  const isDone = () => readFile(done, 'utf8').then(() => true, () => false);
+  const beats: string[] = [];
+  let finished = false;
+  let hostStoppedEarly = false;
+  try {
+    for (const deadline = Date.now() + 60_000; !finished && !hostStoppedEarly && Date.now() < deadline;) {
+      finished = await isDone();
+      const beat = (await readFile(heartbeat, 'utf8').catch(() => '')).trim();
+      if (beat && beat !== beats.at(-1)) beats.push(beat);
+      if (!finished && !alive()) {
+        finished = await isDone();
+        hostStoppedEarly = !finished;
+      }
+      if (!finished) await new Promise(accept => setTimeout(accept, 200));
+    }
+    let hostExited = !alive();
+    for (const deadline = Date.now() + 15_000; finished && !hostExited && Date.now() < deadline;) {
+      await new Promise(accept => setTimeout(accept, 200));
+      hostExited = !alive();
+    }
+    return {beats, finished, hostStoppedEarly, hostExited};
+  } finally {
+    if (alive()) process.kill(pid);
+  }
+}
+
+// A client that stays alive for about ten seconds and writes a heartbeat about once a second.
+function heartbeatScript(heartbeat: string, done: string, separator: string) {
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  return [`for ($beat = 1; $beat -le 10; $beat++) {[System.IO.File]::WriteAllText(${literal(heartbeat)}, [string]$beat); Start-Sleep -Seconds 1}`,
+    `[System.IO.File]::WriteAllText(${literal(done)}, 'done')`, 'exit 0'].join(separator);
+}
+
+function assertHeartbeatSurvived(result: {beats: string[]; finished: boolean; hostStoppedEarly: boolean; hostExited: boolean}) {
+  const detail = JSON.stringify(result);
+  assert.equal(result.hostStoppedEarly, false, detail);
+  assert.equal(result.finished, true, detail);
+  assert.equal(result.beats.at(-1), '10', detail);
+  assert.ok(result.beats.length >= 6, detail);
+  const numbers = result.beats.map(Number);
+  assert.ok(numbers.every((value, index) => index === 0 || value > numbers[index - 1]!), detail);
+  assert.equal(result.hostExited, true, detail);
+}
+
+test('the registered WSL host action starts PowerShell under the real headless console host', {skip: process.platform !== 'win32'}, async t => {
+  const f = await fixture(t); await enableRelayAutostart(f.options);
+  const action = registeredTaskAction(f.scripts);
+  // The real action runs wsl.exe; a harmless command that writes a marker takes its place.
+  const marker = join(await realpath(await mkdtemp(join(tmpdir(), 'dharma-wsl-headless-'))), 'started.txt');
+  t.after(() => rm(join(marker, '..'), {recursive: true, force: true}));
+  const command = `[System.IO.File]::WriteAllText('${marker.replace(/'/g, "''")}', 'started'); exit 0`;
+  const argumentsLine = action.arguments.replace(/[A-Za-z0-9+/=]+$/, Buffer.from(command, 'utf16le').toString('base64'));
+  assert.notEqual(argumentsLine, action.arguments);
+  const result = await runTaskAction(action.execute, argumentsLine, tmpdir(), marker);
+  assert.equal(result.content, 'started', JSON.stringify(result));
+  assert.equal(result.code, 0, JSON.stringify(result));
+});
+
+test('the registered WSL host action keeps a long-running PowerShell client alive with no standard handles', {skip: process.platform !== 'win32'}, async t => {
+  const f = await fixture(t); await enableRelayAutostart(f.options);
+  const action = registeredTaskAction(f.scripts);
+  // The real action blocks in wsl.exe for the whole session; a command that keeps running and writes a heartbeat takes its place.
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'dharma-wsl-headless-handles-')));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+  const heartbeat = join(directory, 'heartbeat.txt');
+  const done = join(directory, 'done.txt');
+  const command = heartbeatScript(heartbeat, done, '; ');
+  const argumentsLine = action.arguments.replace(/[A-Za-z0-9+/=]+$/, Buffer.from(command, 'utf16le').toString('base64'));
+  assert.notEqual(argumentsLine, action.arguments);
+  assertHeartbeatSurvived(await runTaskActionWithoutHandles(action.execute, argumentsLine, directory, heartbeat, done));
 });
 
 test('optional WSL task lookup distinguishes exact absence from a failed scheduler read', async () => {
@@ -252,20 +415,32 @@ test('the actual WSL guard validates the persisted SID rather than a normalized 
   const receipt=JSON.parse(await readFile(join(f.options.home,'relay','wsl-host.json'),'utf8'));
   const action=registeredTaskAction(f.scripts);
   task.Description=receipt.description;task.Actions[0]!.Execute=action.execute;task.Actions[0]!.Arguments=action.arguments;
-  for(const {foreign,legacyDirectAction} of [{foreign:false,legacyDirectAction:false},
-    {foreign:true,legacyDirectAction:false},{foreign:false,legacyDirectAction:true}]){
-    const rejected=foreign||legacyDirectAction;
+  const powershell='C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+  const legacyArguments=action.arguments.slice(`--headless ${powershell} `.length);
+  // The earlier action ran PowerShell itself. It is still owned and is reported as legacy.
+  const cases:{actions:{Execute:string;Arguments:string};foreign?:boolean;result:string}[]=[
+    {actions:{Execute:action.execute,Arguments:action.arguments},result:'owned'},
+    {actions:{Execute:action.execute,Arguments:action.arguments},foreign:true,result:'refused'},
+    {actions:{Execute:receipt.executable,Arguments:receipt.arguments},result:'refused'},
+    {actions:{Execute:powershell,Arguments:legacyArguments},result:'owned-legacy'},
+    {actions:{Execute:action.execute,Arguments:legacyArguments},result:'refused'},
+    {actions:{Execute:powershell,Arguments:action.arguments},result:'refused'},
+    {actions:{Execute:'conhost.exe',Arguments:action.arguments},result:'refused'},
+    {actions:{Execute:action.execute,Arguments:`--headless powershell.exe ${legacyArguments}`},result:'refused'},
+  ];
+  for(const {actions,foreign=false,result} of cases){
+    const rejected=result==='refused';
     const taskFixture=structuredClone(task);
-    if(legacyDirectAction){taskFixture.Actions[0]!.Execute=receipt.executable;taskFixture.Actions[0]!.Arguments=receipt.arguments;}
+    taskFixture.Actions[0]!.Execute=actions.Execute;taskFixture.Actions[0]!.Arguments=actions.Arguments;
     const script=`$ErrorActionPreference='Stop';$current=[System.Security.Principal.WindowsIdentity]::GetCurrent(); `
       + `$fixturePrincipalSid=${foreign?"'S-1-5-18'":'$current.User.Value'}; `
       + `function Export-ScheduledTask { '<Task><Principals><Principal><UserId>'+$fixturePrincipalSid+'</UserId></Principal></Principals></Task>' }; `
       + `$task=ConvertFrom-Json ([Console]::In.ReadToEnd());$task.Principal.UserId=($current.Name -split '\\\\')[-1]; `
       + `$task.Triggers[0].UserId=$current.Name; ${guard}; `
-      + `try{Assert-OwnedTask $task;[Console]::Out.Write('owned')}catch{[Console]::Out.Write('refused');`
-      + `if(!${rejected?'$true':'$false'}){[Console]::Error.Write($_.Exception.Message)}}`;
+      + `try{Assert-OwnedTask $task;[Console]::Out.Write('owned');if(Test-LegacyAction $task){[Console]::Out.Write('-legacy')}}`
+      + `catch{[Console]::Out.Write('refused');if(!${rejected?'$true':'$false'}){[Console]::Error.Write($_.Exception.Message)}}`;
     const stdout=runPowerShellFixture(script,JSON.stringify(taskFixture));
-    assert.equal(stdout,rejected?'refused':'owned');
+    assert.equal(stdout,result,JSON.stringify(actions));
   }
 });
 

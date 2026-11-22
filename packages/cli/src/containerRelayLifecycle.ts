@@ -460,12 +460,12 @@ export async function containerConsumerStoreReady(): Promise<boolean> {
   try {
     const alias = await execFileAsync('dbus-send', ['--session', '--print-reply', '--dest=org.freedesktop.secrets',
       '/org/freedesktop/secrets', 'org.freedesktop.Secret.Service.ReadAlias', 'string:default'],
-    { timeout: 5000, maxBuffer: 8192 });
+    { timeout: 5000, maxBuffer: 8192, windowsHide: true });
     const paths = [...alias.stdout.matchAll(/object path "([/a-zA-Z0-9_]+)"/g)];
     if (paths.length !== 1 || !paths[0]![1]!.startsWith('/org/freedesktop/secrets/collection/')) return false;
     const locked = await execFileAsync('dbus-send', ['--session', '--print-reply', '--dest=org.freedesktop.secrets',
       paths[0]![1]!, 'org.freedesktop.DBus.Properties.Get', 'string:org.freedesktop.Secret.Collection', 'string:Locked'],
-    { timeout: 5000, maxBuffer: 8192 });
+    { timeout: 5000, maxBuffer: 8192, windowsHide: true });
     return /variant\s+boolean false\s*$/.test(locked.stdout);
   } catch { return false; }
 }
@@ -517,7 +517,7 @@ export async function runOwnedContainerEntrypoint(options: ContainerLifecycleOpt
   const restartDelayMs = options.restartDelayMs ?? 5000;
   const spawnRelay = options.spawnRelay || ((registration: ContainerRelayRegistration) => spawn(process.execPath,
     [bin, 'relay', 'supervise', '--policy', registration.policy], { cwd: registration.workspace, stdio: 'ignore',
-      env: { ...relayChildEnvironment(), DHARMA_HOME: options.home } }));
+      env: { ...relayChildEnvironment(), DHARMA_HOME: options.home }, windowsHide: true }));
   try {
     await writePrivateJson(options, 'container-entrypoint.json', marker);
     while (!options.signal.aborted) {

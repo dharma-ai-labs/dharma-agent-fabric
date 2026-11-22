@@ -71,11 +71,11 @@ test('original scope rejects a forged drain and does not signal an uncaptured ch
 });
 
 test('direct original scope failure drains only its actual C-only spawned child', async () => {
-  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'ignore'});
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'ignore', windowsHide: true});
   let owned: ChildProcess | undefined;
   try {
     await assert.rejects(runCodexBootstrapHost(input(), async prepared => {
-      owned = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'ignore'});
+      owned = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'ignore', windowsHide: true});
       captureBootstrapHostChild(prepared.scope, owned);
       throw new Error('synthetic continuation failure');
     }), /^Error: synthetic continuation failure$/);

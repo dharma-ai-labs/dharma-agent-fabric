@@ -94,7 +94,7 @@ test('the default extractor installs a real pinned archive layout on POSIX (#398
   await writeFile(fake, `#!/bin/sh\necho v${PINNED_NODE_VERSION}\n`);
   await chmod(fake, 0o755);
   const tarball = join(root, archive.file);
-  assert.equal(spawnSync('tar', ['-czf', tarball, '-C', source, archive.directory]).status, 0);
+  assert.equal(spawnSync('tar', ['-czf', tarball, '-C', source, archive.directory], { windowsHide: true }).status, 0);
   const bytes = await import('node:fs/promises').then(fs => fs.readFile(tarball));
   const home = join(root, 'home');
   const executable = await ensurePinnedNodeRuntime({

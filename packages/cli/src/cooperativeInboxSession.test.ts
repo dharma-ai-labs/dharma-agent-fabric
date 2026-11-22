@@ -422,7 +422,7 @@ for (const phase of ['inline', 'handed_off'] as const) test(`an actual ${phase} 
     throw new Error('Crash fixture did not reach the consumer callback');
   `;
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', source],
-    {cwd: resolve(import.meta.dirname, '../../..'), encoding: 'utf8', timeout: 30000});
+    {cwd: resolve(import.meta.dirname, '../../..'), encoding: 'utf8', timeout: 30000, windowsHide: true});
   assert.equal(child.status, 77, child.stderr);
   const reopened = await LocalVault.open({root: f.root, masterKey: f.masterKey});
   const successor = await openCooperativeInboxSession({...f.input, vault: reopened});

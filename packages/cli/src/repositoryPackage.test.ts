@@ -675,7 +675,7 @@ test('actual process exit leaves a recoverable journal and dead writer lock', as
     const input = ${JSON.stringify({ workspace: f.workspace, organizationId: f.organizationId, workspaceId: f.workspaceId })};
     await writeRepositoryPackageSnapshot({ workspace: input.workspace, snapshot: await inventoryRepositoryPackage(input),
       onCopyCheckpoint(point) { if (point === 'file_backed_up') process.exit(86); } });`;
-  const exited = spawnSync(process.execPath, ['--input-type=module', '-e', script], { timeout: 10_000, encoding: 'utf8' });
+  const exited = spawnSync(process.execPath, ['--input-type=module', '-e', script], { timeout: 10_000, encoding: 'utf8', windowsHide: true });
   assert.equal(exited.status, 86, exited.stderr);
   assert.ok(await readFile(resolve(f.workspace, managedRoot, 'COPY-JOURNAL.json')));
   await writeRepositoryPackageSnapshot({ workspace: f.workspace, snapshot: await inventoryRepositoryPackage(f) });

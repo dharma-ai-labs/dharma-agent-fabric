@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, posix } from 'node:path';
@@ -408,7 +408,7 @@ test('macOS generated plist passes the native property-list parser', { skip: pro
   const root = await mkdtemp(join(tmpdir(), 'dharma-native-plist-'));
   const file = join(root, 'test.plist');
   await writeFile(file, macRelayLaunchAgent('/bin/true', '/Users/test/Policy & "quote"', '/Users/test/Repo Space', root));
-  const result = spawnSync('/usr/bin/plutil', ['-lint', file], { encoding: 'utf8', timeout: 15_000 });
+  const result = spawnSync('/usr/bin/plutil', ['-lint', file], { encoding: 'utf8', timeout: 15_000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
@@ -424,14 +424,14 @@ test('Linux startup invokes only the pinned launcher and canonical policy', () =
 });
 
 test('Linux generated unit passes the actual systemd parser with spaces and literal specifiers', {
-  skip: process.platform !== 'linux' || spawnSync('systemd-analyze', ['--version']).status !== 0,
+  skip: process.platform !== 'linux' || spawnSync('systemd-analyze', ['--version'], { windowsHide: true }).status !== 0,
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'dharma-unit-parser-'));
   const workspace = join(root, 'repo space % quote"');
   await mkdir(workspace);
   const file = join(root, 'dharma-parser-test.service');
   await writeFile(file, linuxRelayUnit('/bin/true', null, workspace, join(root, 'private home'), join(root, 'selected Codex%home')));
-  const result = spawnSync('systemd-analyze', ['--user', 'verify', file], { encoding: 'utf8', timeout: 15_000 });
+  const result = spawnSync('systemd-analyze', ['--user', 'verify', file], { encoding: 'utf8', timeout: 15_000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr || String(result.error));
 });
 
@@ -610,6 +610,279 @@ test('Windows task registration uses the enrolled user without an embedded passw
   assert.doesNotMatch(calls.join('\n'), /-Password|bootstrapGrant|--grant/);
   assert.equal((await disableRelayAutostart(options)).state, 'disabled');
   assert.match(calls.at(-1) || '', /Unregister-ScheduledTask/);
+});
+
+// A mocked Task Scheduler: no task exists before setup, and the registered task reads back enabled.
+function windowsTaskRunner(calls: string[], legacyAction = () => false) {
+  return async (_file: string, args: string[]) => {
+    const decoded = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
+    calls.push(decoded);
+    return { stdout: decoded.includes("'exists'") ? 'absent\n'
+      : legacyAction() && decoded.includes("'legacy-action'") ? 'legacy-action\n'
+      : decoded.includes('Get-ScheduledTask') ? 'enabled\n' : '' };
+  };
+}
+
+function windowsTaskOptions(root: string, run: (file: string, args: string[]) => Promise<{ stdout: string }>) {
+  return {
+    platform: 'win32' as const, home: join(root, 'dharma'), userHome: root,
+    workspace: 'C:\\first', launcher: 'C:\\first\\.dharma\\bin\\dharma.cmd',
+    policy: 'C:\\first\\.dharma\\approved-policy.json', version: '0.2.119', run,
+  };
+}
+
+const headlessActionVariables = (script: string) => "$system = Join-Path $env:SystemRoot 'System32'; "
+  + "$headlessExecute = Join-Path $system 'conhost.exe'; "
+  + `$headlessArguments = '--headless "' + (Join-Path $system 'WindowsPowerShell\\v1.0\\powershell.exe') + '" ' `
+  + `+ '-NoProfile -NonInteractive -WindowStyle Hidden -File "${script}"'; `;
+
+test('Windows task action starts PowerShell by absolute path without a visible console and replaces the earlier visible action', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-headless-'));
+  const calls: string[] = [];
+  let legacyAction = false;
+  const options = windowsTaskOptions(root, windowsTaskRunner(calls, () => legacyAction));
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+  const script = join(options.home, 'relay', 'autostart.ps1');
+  // A headless console host: no window opens at logon, and none can be closed to stop the supervisor.
+  // Both programs are absolute paths under the Windows directory. conhost would otherwise look for
+  // powershell.exe in the task's working directory, the enrolled repository, before PATH.
+  assert.ok(registration.includes(headlessActionVariables(script)));
+  assert.ok(registration.includes("$action = New-ScheduledTaskAction -Execute $headlessExecute -Argument $headlessArguments -WorkingDirectory 'C:\\first'; "));
+  assert.doesNotMatch(registration, /-Execute '|--headless powershell\.exe/);
+  // The ownership guard accepts the headless action and the earlier visible one, so enrolled devices keep working.
+  const guard = calls.find(call => call.includes('$headlessAction')) || '';
+  assert.ok(guard.includes(headlessActionVariables(script)));
+  assert.ok(guard.includes('$headlessAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq $headlessExecute -and $actions[0].Arguments -ceq $headlessArguments; '));
+  assert.ok(guard.includes(`$legacyAction = $actions.Count -eq 1 -and $actions[0].Execute -ceq 'powershell.exe' -and $actions[0].Arguments -ceq '-NoProfile -NonInteractive -File "${script}"'; `));
+
+  // A preserved anchor whose task already has the headless action is left as it is.
+  calls.length = 0;
+  const second = { ...options, workspace: 'C:\\second', launcher: 'C:\\second\\.dharma\\bin\\dharma.cmd',
+    policy: 'C:\\second\\.dharma\\approved-policy.json', preserveStandardAnchor: true };
+  assert.equal((await enableRelayAutostart(second)).state, 'enabled');
+  assert.ok(!calls.some(call => call.includes('Register-ScheduledTask')));
+
+  // A preserved anchor whose task still has the earlier visible action is registered again with the headless one.
+  calls.length = 0;
+  legacyAction = true;
+  assert.equal((await enableRelayAutostart(second)).state, 'enabled');
+  const replaced = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+  assert.ok(replaced.includes("$action = New-ScheduledTaskAction -Execute $headlessExecute -Argument $headlessArguments -WorkingDirectory 'C:\\first'; "));
+});
+
+test('a Windows rollback registers the task action that the restored release owns', async () => {
+  for (const [version, legacy] of [['0.2.225', true], ['0.2.226', true], ['0.2.227', false], ['0.3.0', false]] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'dharma-windows-rollback-'));
+    const calls: string[] = [];
+    const options = { ...windowsTaskOptions(root, windowsTaskRunner(calls)), version: '0.2.230' };
+    assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+    calls.length = 0;
+    assert.equal((await enableRelayAutostart({ ...options, version, restoreCodexHome: null })).state, 'enabled');
+    const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+    const script = join(options.home, 'relay', 'autostart.ps1');
+    if (legacy) {
+      // A release before the headless action owns only the earlier action and reports any other as a conflict.
+      assert.ok(registration.includes(`$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        + `-Argument '-NoProfile -NonInteractive -File "${script}"' -WorkingDirectory 'C:\\first'; `), version);
+    } else {
+      assert.ok(registration.includes('$action = New-ScheduledTaskAction -Execute $headlessExecute -Argument $headlessArguments '), version);
+    }
+  }
+  // Setup and upgrade pass no restored provider context, so they always register the headless action.
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-upgrade-'));
+  const calls: string[] = [];
+  assert.equal((await enableRelayAutostart(windowsTaskOptions(root, windowsTaskRunner(calls)))).state, 'enabled');
+  assert.ok((calls.find(call => call.includes('Register-ScheduledTask')) || '')
+    .includes('$action = New-ScheduledTaskAction -Execute $headlessExecute -Argument $headlessArguments '));
+});
+
+// Runs a generated script in real Windows PowerShell against a synthetic task. Every ScheduledTasks
+// command the script can call is replaced by a function first, so the machine's Task Scheduler is
+// never read or changed.
+function syntheticTaskRunner(task: object) {
+  return async (_file: string, args: string[]) => {
+    const script = Buffer.from(args.at(-1) || '', 'base64').toString('utf16le');
+    const stubs = `$fixtureTask = ConvertFrom-Json '${JSON.stringify(task).replace(/'/g, "''")}'; `
+      + 'function Get-ScheduledTask { $fixtureTask }; '
+      + "function Export-ScheduledTask { '<Task><Principals><Principal><UserId>' "
+      + "+ [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value + '</UserId></Principal></Principals></Task>' }; "
+      + ['Register', 'Unregister', 'Start', 'Stop', 'Enable', 'Disable', 'Set']
+        .map(verb => `function ${verb}-ScheduledTask { '${verb}-ScheduledTask' }; `).join('')
+      + ['Action', 'Trigger', 'Principal', 'SettingsSet'].map(kind => `function New-ScheduledTask${kind} { $null }; `).join('');
+    const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(stubs + script, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+    if (result.error || result.status !== 0) throw new Error(`${result.stderr || result.error}`);
+    return { stdout: result.stdout };
+  };
+}
+
+test('the generated Windows task action and ownership guard run in real PowerShell', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-guard-'));
+  const calls: string[] = [];
+  const options = windowsTaskOptions(root, windowsTaskRunner(calls));
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  const script = join(options.home, 'relay', 'autostart.ps1');
+  const system = join(process.env.SystemRoot || '', 'System32');
+  const headless = { Execute: join(system, 'conhost.exe'), WorkingDirectory: 'C:\\first',
+    Arguments: `--headless "${join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe')}" -NoProfile -NonInteractive -WindowStyle Hidden -File "${script}"` };
+  const legacy = { Execute: 'powershell.exe', Arguments: `-NoProfile -NonInteractive -File "${script}"`, WorkingDirectory: 'C:\\first' };
+
+  // The registered action names both programs by absolute path.
+  const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+  const variables = registration.slice(registration.indexOf('$system = '), registration.indexOf('$action = '));
+  const printed = await syntheticTaskRunner({})('powershell.exe', ['-EncodedCommand',
+    Buffer.from(`${variables}[Console]::Out.Write($headlessExecute + '|' + $headlessArguments)`, 'utf16le').toString('base64')]);
+  assert.equal(printed.stdout, `${headless.Execute}|${headless.Arguments}`);
+  assert.match(headless.Execute, /^[A-Za-z]:\\[^"]+\\System32\\conhost\.exe$/i);
+  assert.match(headless.Arguments, /^--headless "[A-Za-z]:\\[^"]+\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe" /i);
+
+  const task = (actions: object[]) => ({ TaskPath: '\\', State: 'Ready', Actions: actions });
+  for (const action of [headless, legacy]) {
+    const status = await relayAutostartStatus({ ...options, run: syntheticTaskRunner(task([action])) });
+    assert.equal(status.state, 'enabled', action.Execute);
+  }
+  const foreign = [
+    [{ ...headless, Arguments: `--headless powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File "${script}"` }],
+    [{ ...headless, Execute: 'conhost.exe' }],
+    [{ ...headless, Arguments: `${headless.Arguments} -Command calc` }],
+    [{ ...legacy, Arguments: headless.Arguments }],
+    [{ ...legacy, Execute: join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe') }],
+    [{ ...legacy, WorkingDirectory: 'C:\\other' }],
+    [{ ...headless, WorkingDirectory: 'C:\\other' }],
+    [headless, headless],
+  ];
+  const receipt = await readFile(join(options.home, 'relay', 'autostart.json'), 'utf8');
+  for (const actions of foreign) {
+    const run = syntheticTaskRunner(task(actions));
+    const status = await relayAutostartStatus({ ...options, run });
+    assert.deepEqual([status.state, status.reason], ['unavailable', 'autostart_conflict'], JSON.stringify(actions));
+    await assert.rejects(enableRelayAutostart({ ...options, run }), /autostart_conflict/);
+    await assert.rejects(disableRelayAutostart({ ...options, run }), /autostart_conflict/);
+    assert.equal(await readFile(join(options.home, 'relay', 'autostart.json'), 'utf8'), receipt);
+  }
+});
+
+// Starts a task action from Node with its argument text passed as it is and with piped standard
+// handles, and waits for the marker file its client writes. Piped handles put the headless console
+// host in pseudoconsole mode: it reads terminal input from its standard input and closes the
+// console when that input ends, so the input pipe stays open until the client is done. Task
+// Scheduler gives the action no standard handles; runTaskActionWithoutHandles covers that mode.
+async function runTaskAction(execute: string, argumentsLine: string, cwd: string, marker: string) {
+  const child = spawn(execute, [argumentsLine], { cwd, windowsHide: true, windowsVerbatimArguments: true });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  let exited = false;
+  const exit = new Promise<number | null>((accept, reject) => {
+    child.on('error', reject);
+    child.on('close', code => { exited = true; accept(code); });
+  });
+  let content: string | null = null;
+  for (let attempt = 0; attempt < 300 && content === null; attempt++) {
+    content = await readFile(marker, 'utf8').catch(() => null);
+    if (content === null) await new Promise(accept => setTimeout(accept, 100));
+  }
+  child.stdin.end();
+  const timer = setTimeout(() => child.kill(), 30_000);
+  const code = await exit.finally(() => clearTimeout(timer));
+  return { content, code, exitedBeforeMarker: content === null && exited, output };
+}
+
+// Starts a task action through Win32_Process.Create, which gives the new process no standard
+// handles and no console of a parent, as Task Scheduler does at logon. The client writes a
+// heartbeat about once a second and then a done marker. The heartbeats are sampled while the
+// console host is checked to be still running, and the host must exit once the client is done.
+async function runTaskActionWithoutHandles(execute: string, argumentsLine: string, cwd: string, heartbeat: string, done: string) {
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  const create = `$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ `
+    + `CommandLine = ${literal(`"${execute}" ${argumentsLine}`)}; CurrentDirectory = ${literal(cwd)} }; `
+    + 'if ($created.ReturnValue -ne 0) { throw "Win32_Process.Create returned $($created.ReturnValue)" }; '
+    + '[Console]::Out.Write($created.ProcessId)';
+  const started = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+    Buffer.from(create, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+  if (started.error || started.status !== 0) throw new Error(`${started.stderr || started.error}`);
+  const pid = Number(started.stdout.trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, started.stdout);
+  const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const isDone = () => readFile(done, 'utf8').then(() => true, () => false);
+  const beats: string[] = [];
+  let finished = false;
+  let hostStoppedEarly = false;
+  try {
+    for (const deadline = Date.now() + 60_000; !finished && !hostStoppedEarly && Date.now() < deadline;) {
+      finished = await isDone();
+      const beat = (await readFile(heartbeat, 'utf8').catch(() => '')).trim();
+      if (beat && beat !== beats.at(-1)) beats.push(beat);
+      if (!finished && !alive()) {
+        finished = await isDone();
+        hostStoppedEarly = !finished;
+      }
+      if (!finished) await new Promise(accept => setTimeout(accept, 200));
+    }
+    let hostExited = !alive();
+    for (const deadline = Date.now() + 15_000; finished && !hostExited && Date.now() < deadline;) {
+      await new Promise(accept => setTimeout(accept, 200));
+      hostExited = !alive();
+    }
+    return { beats, finished, hostStoppedEarly, hostExited };
+  } finally {
+    if (alive()) process.kill(pid);
+  }
+}
+
+// A client that stays alive for about ten seconds and writes a heartbeat about once a second.
+function heartbeatScript(heartbeat: string, done: string, separator: string) {
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  return [`for ($beat = 1; $beat -le 10; $beat++) { [System.IO.File]::WriteAllText(${literal(heartbeat)}, [string]$beat); Start-Sleep -Seconds 1 }`,
+    `[System.IO.File]::WriteAllText(${literal(done)}, 'done')`, 'exit 0'].join(separator);
+}
+
+function assertHeartbeatSurvived(result: { beats: string[]; finished: boolean; hostStoppedEarly: boolean; hostExited: boolean }) {
+  const detail = JSON.stringify(result);
+  assert.equal(result.hostStoppedEarly, false, detail);
+  assert.equal(result.finished, true, detail);
+  assert.equal(result.beats.at(-1), '10', detail);
+  assert.ok(result.beats.length >= 6, detail);
+  const numbers = result.beats.map(Number);
+  assert.ok(numbers.every((value, index) => index === 0 || value > numbers[index - 1]!), detail);
+  assert.equal(result.hostExited, true, detail);
+}
+
+test('the registered Windows task action starts the startup script under the real headless console host', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-headless-run-'));
+  const calls: string[] = [];
+  const options = windowsTaskOptions(root, windowsTaskRunner(calls));
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+  const variables = registration.slice(registration.indexOf('$system = '), registration.indexOf('$action = '));
+  const printed = await syntheticTaskRunner({})('powershell.exe', ['-EncodedCommand',
+    Buffer.from(`${variables}[Console]::Out.Write($headlessExecute + '|' + $headlessArguments)`, 'utf16le').toString('base64')]);
+  const [execute, argumentsLine] = printed.stdout.split('|') as [string, string];
+  // The real script starts the relay supervisor; a script that writes a marker takes its place at the same path.
+  const marker = join(root, 'started.txt');
+  await writeFile(join(options.home, 'relay', 'autostart.ps1'),
+    `[System.IO.File]::WriteAllText('${marker.replace(/'/g, "''")}', 'started')\r\nexit 0\r\n`);
+  const result = await runTaskAction(execute, argumentsLine, root, marker);
+  assert.equal(result.content, 'started', JSON.stringify(result));
+  assert.equal(result.code, 0, JSON.stringify(result));
+});
+
+test('the registered Windows task action keeps a long-running startup script alive with no standard handles', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-windows-headless-handles-'));
+  const calls: string[] = [];
+  const options = windowsTaskOptions(root, windowsTaskRunner(calls));
+  assert.equal((await enableRelayAutostart(options)).state, 'enabled');
+  const registration = calls.find(call => call.includes('Register-ScheduledTask')) || '';
+  const variables = registration.slice(registration.indexOf('$system = '), registration.indexOf('$action = '));
+  const printed = await syntheticTaskRunner({})('powershell.exe', ['-EncodedCommand',
+    Buffer.from(`${variables}[Console]::Out.Write($headlessExecute + '|' + $headlessArguments)`, 'utf16le').toString('base64')]);
+  const [execute, argumentsLine] = printed.stdout.split('|') as [string, string];
+  // The real script runs the relay supervisor for the whole session; a script that keeps running and writes a heartbeat takes its place.
+  const heartbeat = join(root, 'heartbeat.txt');
+  const done = join(root, 'done.txt');
+  await writeFile(join(options.home, 'relay', 'autostart.ps1'), `${heartbeatScript(heartbeat, done, '\r\n')}\r\n`);
+  assertHeartbeatSurvived(await runTaskActionWithoutHandles(execute, argumentsLine, root, heartbeat, done));
 });
 
 test('failed OS registration remains unavailable instead of reporting completion', async () => {

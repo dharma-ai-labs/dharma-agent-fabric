@@ -87,13 +87,13 @@ test('async and thenable observer rejections cannot prevent cleanup under strict
     await new Promise(resolve => setImmediate(resolve));
     console.log('cleanup-reached');`;
   assert.equal(execFileSync(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '-e', source],
-    {encoding: 'utf8', timeout: 10000}).trim(), 'cleanup-reached');
+    {encoding: 'utf8', timeout: 10000, windowsHide: true}).trim(), 'cleanup-reached');
 });
 
 test('actual bootstrap continuation reports fixed owner diagnostics while preserving its redacted error', async () => {
   const baseline = process.env.DHARMA_SETUP_DIAGNOSTIC_BASELINE;
   if (baseline && baseline !== '1b16513ed36984831f6467355c329618c5dc70ff') throw new Error('fixture_source_unqualified');
-  const source = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding: 'utf8'})
+  const source = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding: 'utf8', windowsHide: true})
     : await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const node = ast.statements.find(value => ts.isFunctionDeclaration(value) && value.name?.text === 'bootstrapFromCodexSetupScope');

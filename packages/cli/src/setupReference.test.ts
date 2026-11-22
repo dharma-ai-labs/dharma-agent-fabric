@@ -15,7 +15,7 @@ test('reference dry-run is noninteractive, performs no repository/session/store/
   assert.equal(result.ok, true); assert.equal(result.stage, 'plan'); assert.equal(result.effects, false);
   assert.equal(result.setupTransport, 'public_claim_v1'); assert.equal(result.grantRedeemed, false);
   const { stdout, stderr } = await promisify(execFile)(process.execPath,
-    [fileURLToPath(new URL('./index.js',import.meta.url)),...flags,'--dry-run'],{timeout:10_000});
+    [fileURLToPath(new URL('./index.js',import.meta.url)),...flags,'--dry-run'],{timeout:10_000, windowsHide: true});
   assert.equal(JSON.parse(stdout).effects,false); assert.equal(stderr,'');
   assert.equal(commandExitCode(flags,{ok:true,stage:'plan',effects:false}),1);
   assert.equal(commandExitCode([...flags,'--dry-run'],{ok:true,stage:'plan',effects:false}),0);
