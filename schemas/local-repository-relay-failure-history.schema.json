@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/local-repository-relay-failure-history/v1",
+  "title": "Device-local count and short history of failed repository relay loops; not an authority envelope",
+  "description": "Stored at relay/repositories/<workspaceId>/failure-history.json beside last-failure.json. The running relay adds each failed loop of that workspace. count is the number of failures since since, the first failure of the current relay process; entries are the last 20 failures, oldest first. A relay process that finds a history from another process, or in another form, starts a new one. It holds stable values only, never error or stderr text.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "organizationId", "deviceId", "workspaceId", "pid", "relayPidMtimeMs", "relayPidCtimeMs", "count", "since", "entries"],
+  "$defs": {
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$(?![\\s\\S])"},
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "stage"],
+      "properties": {
+        "at": {"$ref": "#/$defs/timestamp"},
+        "stage": {"enum": [
+          "policy_verification",
+          "session_open",
+          "vault_open",
+          "trajectory_recovery",
+          "evidence_sync",
+          "pending_capsule_sync",
+          "evidence_request",
+          "task_poll",
+          "worker_run"
+        ]},
+        "failureCode": {"enum": [
+          "connection_anchor_lock_invalid",
+          "connection_anchor_busy",
+          "connection_anchor_recovery_required",
+          "connection_anchor_lock_unavailable",
+          "connection_anchor_lock_cleanup_unconfirmed",
+          "device_signing_control_unavailable",
+          "connection_anchor_lock_flush_failed",
+          "connection_identity_requires_recovery",
+          "connection_trust_requires_recovery",
+          "connection_identity_store_unavailable",
+          "connection_identity_store_busy"
+        ]},
+        "httpStatus": {"type": "integer", "minimum": 100, "maximum": 599},
+        "errorCode": {"type": "string", "pattern": "^(?:[A-Z][A-Z0-9_]{1,79}|[a-z0-9_]{1,80})$(?![\\s\\S])"}
+      }
+    }
+  },
+  "properties": {
+    "schema": {"const": "dharma.local-repository-relay-failure-history/v1"},
+    "organizationId": {"type": "string", "minLength": 1, "maxLength": 256},
+    "deviceId": {"type": "string", "minLength": 1, "maxLength": 256},
+    "workspaceId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "pid": {"type": "integer", "minimum": 1},
+    "relayPidMtimeMs": {"type": "number"},
+    "relayPidCtimeMs": {"type": "number"},
+    "count": {"type": "integer", "minimum": 1},
+    "since": {"$ref": "#/$defs/timestamp"},
+    "entries": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"$ref": "#/$defs/entry"}}
+  }
+}

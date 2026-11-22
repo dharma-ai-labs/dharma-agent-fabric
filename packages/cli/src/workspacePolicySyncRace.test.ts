@@ -13,6 +13,7 @@ import {AgentFabricClient, isDefinitiveAgentFabricRejection, loadOrCreateDeviceI
 import {currentBootstrapHostScope} from './bootstrapHostScope.js';
 import {writeBootstrapHostJson} from './bootstrapHostFiles.js';
 import {applyServerEvidencePolicy, pathExistsOrThrow} from './index.js';
+import * as supervisor from './repositoryRelaySupervisor.js';
 import {withRepositoryRelayStage} from './repositoryRelaySupervisor.js';
 import {admitSignedRequests, withClientSigningControl} from './signedRequestAdmission.js';
 
@@ -31,7 +32,8 @@ const COMPILED = ['materializeWorkspacePolicy', 'workspaceAuthorizationStatePath
 
 type Turn = {issuedAt: string; revision?: string; unreachable?: boolean; signed?: () => void; respond?: Promise<void>};
 type Hooks = {rename?: (from: string, to: string) => void | Promise<void>; contended?: (lockPath: string) => void;
-  probe?: () => Promise<void>; signing?: () => Promise<void>; request?: () => Promise<void>; lock?: (lockPath: string) => Promise<void>};
+  probe?: () => Promise<void>; signing?: () => Promise<void>; request?: () => Promise<void>; lock?: (lockPath: string) => Promise<void>;
+  autostart?: () => Promise<void>; open?: () => Promise<void>};
 type Compiled = Record<string, (...args: any[]) => Promise<any>>;
 
 function deferred() {
@@ -117,7 +119,9 @@ async function fixture(t: {after(fn: () => Promise<void>): void}, turns: Turn[],
       return signingWithContention(input, work);
     },
     required: (flags: Map<string, string>, name: string) => flags.get(name),
-    client: async () => {sessions += 1; return server;}, relayAutostartReport: async () => ({}), acquireRelayProcessLease: async () => async () => undefined,
+    client: async () => {await hooks.open?.(); sessions += 1; return server;},
+    relayAutostartReport: async () => {await hooks.autostart?.(); return {};}, acquireRelayProcessLease: async () => async () => undefined,
+    retrySigningControlBusy: (supervisor as unknown as Record<string, unknown>).retrySigningControlBusy,
     selectRepositoryRelayRegistrations: async () => [{workspaceId: WORKSPACE, policyPath}],
     serializeRelayWork: () => (operation: () => Promise<unknown>) => operation(),
     RepositorySourceWatcher: class {}, BlockedRepositorySourceRetry: class {},
@@ -311,7 +315,7 @@ test('control: the transmission refresh keeps syncing under its own refresh lock
 for (const side of ['sync', 'refresh'] as const) {
   for (const gap of ['probe', 'signing', 'request'] as const) {
     test(`a named turn and a relay ${side} stopped at its ${gap} step both finish`, async t => {
-      // The named turn holds signing control for the whole turn and then refreshes.
+      // A caller that holds signing control across its work and then refreshes.
       const relayStopped = deferred(), proceed = deferred();
       let stopped = false;
       const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}, {issuedAt: NEWEST}]);
@@ -342,6 +346,42 @@ for (const side of ['sync', 'refresh'] as const) {
     assert.deepEqual(held, {refresh: 'free', signing: 'free'});
   });
 }
+
+for (const side of ['sync', 'refresh'] as const) {
+  test(`the relay autostart report of a relay ${side} is read before either lock (#512)`, async t => {
+    // Reading it can start PowerShell, systemctl or launchctl, which must not stall every signed request on the device.
+    const reading = deferred(), checked = deferred();
+    const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}]);
+    await f.sync();
+    f.hooks.autostart = async () => {f.hooks.autostart = undefined; reading.resolve(); await checked.promise;};
+    const relay = f[side]();
+    await reading.promise;
+    const held = {refresh: await fs.lstat(`${f.statePath}.refresh.lock`).then(() => 'held', () => 'free'),
+      signing: await f.signing(async () => 'free', 50).catch((error: Error) => error.message)};
+    checked.resolve();
+    await relay;
+    assert.deepEqual(held, {refresh: 'free', signing: 'free'});
+    assert.equal((await f.observed()).policy, NEWER);
+  });
+}
+
+test('a session open that finds signing control busy is retried in its stage and the relay starts (#511)', async t => {
+  const f = await fixture(t, [{issuedAt: OLDER}]);
+  await f.sync();
+  let opens = 0;
+  f.hooks.open = async () => {if (++opens === 1) throw new Error('connection_anchor_busy');};
+  assert.equal(await f.start(), `running on ${OLDER}`);
+  assert.deepEqual({opens, sessions: f.sessions()}, {opens: 2, sessions: 1});
+});
+
+test('control: a session open refused for any other reason is not retried', async t => {
+  const f = await fixture(t, [{issuedAt: OLDER}]);
+  await f.sync();
+  let opens = 0;
+  f.hooks.open = async () => {opens++; throw new Error('connection_anchor_recovery_required');};
+  assert.equal(await f.start(), 'connection_anchor_recovery_required');
+  assert.equal(opens, 1);
+});
 
 test('a denied restore keeps the write failure and reports that the replay state stayed ahead', async t => {
   const f = await fixture(t, [{issuedAt: OLDER}, {issuedAt: NEWER}]);

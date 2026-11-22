@@ -143,3 +143,23 @@ test('CLI pins a relay client published with setupClaimFailureMessage', async ()
   assert.ok(relay.version.localeCompare('0.2.37', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} is published without the export`);
   assert.equal(cli.dependencies[relay.name], relay.version);
 });
+
+test('CLI pins a relay client published with serverCode and relay_response_timeout', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const relay = await manifest('relay-client'), cli = await manifest('cli');
+  // 0.2.37 and 0.2.38 are on npm without AgentFabricRequestError.serverCode and the
+  // relay_response_timeout code. The CLI loads relay-client from npm, so an installed CLI
+  // reports these #513 diagnostics only when it pins a later relay-client.
+  assert.ok(relay.version.localeCompare('0.2.39', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} is published without serverCode`);
+  assert.equal(cli.dependencies[relay.name], relay.version);
+});
+
+test('CLI pins a relay client published with the relay_connect_timeout limit', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const relay = await manifest('relay-client'), cli = await manifest('cli');
+  // 0.2.39 and earlier hold device signing control for up to 90 s while a relay connection never
+  // opens. #512 bounds that connect phase at 30 s with the relay_connect_timeout code; an installed
+  // CLI gets the shorter hold only when it pins a later relay-client.
+  assert.ok(relay.version.localeCompare('0.2.40', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} has no connect limit`);
+  assert.equal(cli.dependencies[relay.name], relay.version);
+});
