@@ -672,7 +672,7 @@ test('Windows task action starts PowerShell by absolute path without a visible c
 });
 
 test('a Windows rollback registers the task action that the restored release owns', async () => {
-  for (const [version, legacy] of [['0.2.225', true], ['0.2.226', false], ['0.3.0', false]] as const) {
+  for (const [version, legacy] of [['0.2.225', true], ['0.2.226', true], ['0.2.227', false], ['0.3.0', false]] as const) {
     const root = await mkdtemp(join(tmpdir(), 'dharma-windows-rollback-'));
     const calls: string[] = [];
     const options = { ...windowsTaskOptions(root, windowsTaskRunner(calls)), version: '0.2.230' };

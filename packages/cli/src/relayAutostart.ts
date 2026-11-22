@@ -225,7 +225,7 @@ function legacyWindowsTaskArguments(home: string) { return `-NoProfile -NonInter
 // rollback to one registers those actions again. scripts/verify-headless-task-gate.mjs
 // fails when this differs from the first release that carries the guard: set it to the
 // version of the release that first includes this code.
-const WINDOWS_HEADLESS_TASK_SINCE = [0, 2, 226];
+const WINDOWS_HEADLESS_TASK_SINCE = [0, 2, 227];
 function windowsHeadlessTaskOwned(version: string) {
   const numbers = version.split('-')[0]!.split('.').map(Number);
   for (let index = 0; index < WINDOWS_HEADLESS_TASK_SINCE.length; index++) {

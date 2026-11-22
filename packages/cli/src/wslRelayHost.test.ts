@@ -214,9 +214,9 @@ test('a WSL rollback restores the earlier PowerShell action that the restored re
   const f = await fixture(t);
   await enableRelayAutostart(f.options);
   assert.equal(registeredTaskAction(f.scripts).execute, 'C:\\Windows\\System32\\conhost.exe');
-  // Releases before 0.2.226 own only the earlier action and refuse the headless one as a conflict.
+  // Releases before 0.2.227 own only the earlier action and refuse the headless one as a conflict.
   const before = f.scripts.length;
-  assert.equal((await enableRelayAutostart({...f.options, version: '0.2.225', restoreCodexHome: null})).state, 'enabled');
+  assert.equal((await enableRelayAutostart({...f.options, version: '0.2.226', restoreCodexHome: null})).state, 'enabled');
   const restored = f.scripts.slice(before).find(script => script.includes('dharma-wsl-host:register'));
   assert.ok(restored, 'the rollback registers the earlier action again');
   const action = registeredTaskAction([restored]);
@@ -227,7 +227,7 @@ test('a WSL rollback restores the earlier PowerShell action that the restored re
   assert.doesNotMatch(restored, /Unregister-ScheduledTask|-Force/);
   // A rollback to a release that owns the headless action registers that action.
   const after = f.scripts.length;
-  await enableRelayAutostart({...f.options, version: '0.2.226', restoreCodexHome: null});
+  await enableRelayAutostart({...f.options, version: '0.2.227', restoreCodexHome: null});
   const forward = f.scripts.slice(after).find(script => script.includes('dharma-wsl-host:register'));
   assert.ok(forward);
   assert.equal(registeredTaskAction([forward]).execute, 'C:\\Windows\\System32\\conhost.exe');
