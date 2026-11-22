@@ -121,7 +121,7 @@ const relay = spawn(process.execPath, ['apps/relay-gateway/dist/server.js'], {
     DHARMA_HQ_INTERNAL_URL: `http://127.0.0.1:${upstreamPort}`,
     AGENT_FABRIC_PRESENCE_REQUIRED: 'false',
   },
-  stdio: ['ignore', 'pipe', 'pipe'],
+  stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
 });
 let relayStderr = '';
 relay.stderr.on('data', (chunk) => { relayStderr += chunk.toString('utf8'); });

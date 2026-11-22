@@ -128,7 +128,7 @@ function childHolder(scope:Input){
   const child=spawn(process.execPath,['--input-type=module','-e',`import {withDeviceSigningControl} from ${JSON.stringify(module)};
 await withDeviceSigningControl({config:JSON.parse(process.argv[1])},async()=>{process.stdout.write('held;');
 await new Promise(accept=>process.stdin.once('data',accept));});process.stdout.write('released;');`,JSON.stringify(scope.config)],
-  {stdio:['pipe','pipe','inherit']});
+  {stdio:['pipe','pipe','inherit'],windowsHide:true});
   let output='';const waiters:Array<()=>void>=[];
   child.stdout.on('data',chunk=>{output+=chunk;for(const wake of waiters.splice(0))wake();});
   const saw=async(text:string)=>{while(!output.includes(text))await new Promise<void>(wake=>waiters.push(wake));};

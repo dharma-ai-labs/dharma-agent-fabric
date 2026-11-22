@@ -13,7 +13,7 @@ function fixture() {
 
 test('real owned subprocess classifies an exact fixed startup error without exposing raw stderr', async () => {
   const child = spawn(process.execPath, ['-e', 'process.stderr.write("setup_child_unavailable\\n");process.exitCode=2'],
-    {stdio: ['ignore', 'ignore', 'pipe']});
+    {stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true});
   const observed = observeNamedSessionStartupChild(child);
   try {
     await once(child, 'close');
@@ -42,7 +42,7 @@ test('a real child reports its fixed startup phase without private exception tex
   const child = spawn(process.execPath, ['--input-type=module', '-e',
     `import {namedSessionStartupPhaseError} from ${JSON.stringify(moduleUrl)};
      process.stderr.write(namedSessionStartupPhaseError('thread', new Error('secret-placeholder')).message+'\\n');
-     process.exitCode=2;`], {stdio: ['ignore', 'ignore', 'pipe']});
+     process.exitCode=2;`], {stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true});
   const observed = observeNamedSessionStartupChild(child);
   try {await once(child, 'close'); assert.equal(observed.readFailure(), 'named_session_startup_phase_thread_unclassified');}
   finally {observed.dispose();}
@@ -74,6 +74,6 @@ test('disposing a live detached worker pipe lets the original launcher exit norm
     process.once('SIGTERM',()=>{child.kill('SIGTERM');process.exitCode=1;});
     const observed=observeNamedSessionStartupChild(child);observed.dispose();child.unref();
     console.log('startup_observation_disposed');`;
-  const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source], {timeout: 2000});
+  const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source], {timeout: 2000, windowsHide: true});
   assert.equal(result.stdout.trim(), 'startup_observation_disposed');
 });

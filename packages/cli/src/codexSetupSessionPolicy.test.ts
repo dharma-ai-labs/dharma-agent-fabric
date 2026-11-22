@@ -65,7 +65,7 @@ test('encrypted handoff accepts renewal during an owned synthetic child startup'
           start: async scope => {
             await scope.step(async () => {current = f.renewed;});
             const child = await scope.step(() => owner.spawn(scope.request.name,
-              () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore'})));
+              () => spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio: 'ignore', windowsHide: true})));
             effects++;
             return {state: 'started', bindingId: id(8), sessionId: 'synthetic', sessionPid: child.pid!,
               supervisorPid: process.pid, sessionStartTicks: '1', supervisorStartTicks: '1'};

@@ -2253,7 +2253,7 @@ const keptMessageIds = (state: SharedProtocolState) => Object.values(state.outbo
   .flatMap(entry => entry.pending ? [entry.pending.headers['x-dharma-message-id']!] : []);
 /** The pid of a process that has exited, standing in for an ad hoc command that left a kept request behind. */
 async function exitedPid(): Promise<number> {
-  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', windowsHide: true });
   await new Promise(accept => child.once('exit', accept));
   return child.pid!;
 }
@@ -2307,7 +2307,7 @@ function sharedChildHolder(config: { hqUrl: string; organizationId: string; devi
 await withDeviceSigningControl({config:JSON.parse(process.argv[1])},async()=>{process.stdout.write('held;');
 await new Promise(accept=>process.stdin.once('data',accept));});process.stdout.write('released;');`,
   JSON.stringify({ hqUrl: config.hqUrl, organizationId: config.organizationId, deviceId: config.deviceId })],
-  { stdio: ['pipe', 'pipe', 'inherit'] });
+  { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
   let output = ''; const waiters: Array<() => void> = [];
   child.stdout.on('data', chunk => { output += chunk; for (const wake of waiters.splice(0)) wake(); });
   const saw = async (text: string) => { while (!output.includes(text)) await new Promise<void>(wake => waiters.push(wake)); };
@@ -2875,7 +2875,7 @@ test('a long-lived client does not send an orphan again within 10 minutes, and a
 
 test('a kept request whose entry stood unchanged for 10 minutes is left for its owner, since its signature is then too old to send as signed (shared protocol state)', async () => {
   const f = await sharedStateFixture('fabric-shared-orphan-stale-', () => sharedOk());
-  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
   try {
     const reused = sharedOrphan(f.config.deviceId, unrelated.pid!);
     const removed = sharedOrphan(f.config.deviceId, await exitedPid());
@@ -3145,7 +3145,7 @@ process.stdout.write('sending;');setInterval(()=>{},1000);await new Promise(()=>
 return new Response(JSON.stringify({ok:true}),{status:201});};
 const client=await AgentFabricClient.open({configPath,statePath,store,fetcher});
 await client.openSession();process.stdout.write('done;');`,
-  f.configPath, f.statePath, storePath, orphanMessageId(orphan)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  f.configPath, f.statePath, storePath, orphanMessageId(orphan)], { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
   const exited = new Promise(accept => child.once('exit', accept));
   let output = '';
   const sending = new Promise<void>(accept => child.stdout!.on('data', data => {
@@ -3396,7 +3396,7 @@ const fetcher=async()=>{process.stdout.write('send;');await new Promise(a=>setTi
 return new Response(JSON.stringify({ok:true}),{status:201});};
 const client=await AgentFabricClient.open({configPath,statePath,store,fetcher});
 await client.openSession();process.stdout.write('done;');`,
-  f.configPath, f.statePath, storePath], { stdio: ['ignore', 'pipe', 'inherit'] });
+  f.configPath, f.statePath, storePath], { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
   const exited = new Promise(accept => child.once('exit', accept));
   let output = '';
   const sending = new Promise<void>(accept => child.stdout!.on('data', data => {

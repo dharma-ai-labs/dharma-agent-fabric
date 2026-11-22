@@ -478,8 +478,8 @@ test('Demo enrollment rejects an off-origin approval link before opening a brows
 test('Demo command dry-run verifies the local repository without a grant or device write', async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-demo-repo-'));
   const home = await mkdtemp(resolve(tmpdir(), 'dharma-demo-home-'));
-  execFileSync('git', ['init', root]);
-  execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'git@github.com:Example/Private.git']);
+  execFileSync('git', ['init', root], { windowsHide: true });
+  execFileSync('git', ['-C', root, 'remote', 'add', 'origin', 'git@github.com:Example/Private.git'], { windowsHide: true });
   const previous = process.env.DHARMA_HOME;
   process.env.DHARMA_HOME = home;
   try {
@@ -510,7 +510,7 @@ test('knowledge-only Demo command requires an explicit non-Git workspace', async
   const checkout = resolve(root, 'checkout');
   await mkdir(workspace);
   await mkdir(checkout);
-  execFileSync('git', ['init', checkout]);
+  execFileSync('git', ['init', checkout], { windowsHide: true });
   const scope = ['--portal-url', hqUrl, '--organization-id', orgId,
     '--repository-id', repositoryId, '--normalized-repository', normalizedRepository];
   for (const command of ['connect', 'package', 'watch-enable', 'peers']) {

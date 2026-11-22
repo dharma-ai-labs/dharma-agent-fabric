@@ -131,7 +131,7 @@ test('the supervisor reports each unexpected child exit and keeps restarting', a
     onExit: async (exit: unknown) => {exits.push(exit); throw new Error('receipt storage unavailable');},
     start: () => {
       starts += 1;
-      const child = spawn(process.execPath, ['-e', 'process.exit(2)'], {stdio: 'ignore'});
+      const child = spawn(process.execPath, ['-e', 'process.exit(2)'], {stdio: 'ignore', windowsHide: true});
       started.push(child); return child;
     }};
   const result = await superviseRelay(options);
@@ -146,7 +146,7 @@ test('a requested stop is not reported as a child failure', async () => {
   const options = {signal: controller.signal, onExit: (exit: unknown) => {exits.push(exit);},
     start: () => {
       const child = spawn(process.execPath, ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'],
-        {stdio: ['ignore', 'pipe', 'ignore']});
+        {stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true});
       child.stdout!.once('data', () => controller.abort());
       return child;
     }};
@@ -364,7 +364,7 @@ async function signedWorkspace(t: {after(fn: () => Promise<void>): void}) {
 test('relay start on a NUL-filled replay state leaves a stable receipt before the lease', async t => {
   const f = await signedWorkspace(t);
   const failed = await execFileAsync(process.execPath, [bin, 'relay', 'start', '--policy', f.policyPath],
-    {env: f.env, timeout: 30_000}).then(() => null, (error: {code: number; stderr: string}) => error);
+    {env: f.env, timeout: 30_000, windowsHide: true}).then(() => null, (error: {code: number; stderr: string}) => error);
   assert.equal(failed?.code, 2);
   assert.match(failed?.stderr ?? '', new RegExp(REPLAY_TEXT));
   const text = await fs.readFile(f.receiptPath, 'utf8');
@@ -402,7 +402,7 @@ test('verbose status drops a repository failure only once a valid session open f
 test('a supervised relay on a NUL-filled replay state shows the failure in status', async t => {
   const f = await signedWorkspace(t);
   const supervisor = spawn(process.execPath, [bin, 'relay', 'supervise', '--policy', f.policyPath],
-    {env: f.env, stdio: 'ignore', detached: true});
+    {env: f.env, stdio: 'ignore', detached: true, windowsHide: true});
   try {
     let receipt: {supervisorPid?: number; exitCode?: number; code?: string} | null = null;
     for (let attempt = 0; attempt < 300 && !receipt?.supervisorPid; attempt += 1) {
@@ -414,11 +414,11 @@ test('a supervised relay on a NUL-filled replay state shows the failure in statu
     assert.equal(receipt?.exitCode, 2);
     const validate = await failureReceiptValidator();
     assert.equal(validate(receipt), true, JSON.stringify(validate.errors));
-    const {stdout} = await execFileAsync(process.execPath, [bin, 'status'], {env: f.env, timeout: 30_000});
+    const {stdout} = await execFileAsync(process.execPath, [bin, 'status'], {env: f.env, timeout: 30_000, windowsHide: true});
     const status = JSON.parse(stdout);
     assert.equal(status.reconnect.state, 'failing');
     assert.equal(status.reconnect.lastFailure.code, 'workspace_authorization_replay_state_invalid');
-    await execFileAsync(process.execPath, [bin, 'relay', 'stop'], {env: f.env, timeout: 30_000});
+    await execFileAsync(process.execPath, [bin, 'relay', 'stop'], {env: f.env, timeout: 30_000, windowsHide: true});
     assert.deepEqual(await fs.readFile(f.statePath), NUL_STATE);
   } finally {
     if (supervisor.exitCode === null) supervisor.kill('SIGTERM');

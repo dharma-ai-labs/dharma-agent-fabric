@@ -237,7 +237,7 @@ test('post-host reconciliation restores normal SIGINT and SIGTERM handling befor
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   test(`actual ${signal} terminates pending reconciliation before a later effect`, {skip: process.platform !== 'linux', timeout: 15000}, async () => {
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--ingress-signal-fixture'],
-      {stdio: ['ignore', 'pipe', 'pipe']});
+      {stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true});
     let output = '', errors = '', signalled = false, forced = false;
     const timeout = setTimeout(() => {forced = true; child.kill('SIGKILL');}, 10000);
     try {
@@ -324,7 +324,7 @@ for (const reason of ['preparation', 'homes', 'budget', 'foreign-config', 'close
 for (const extra of [['--grant', 'PUBLIC_TEST_NOT_A_GRANT'], ['--maximum-provider-cost-cents']]) {
   test(`actual CLI bin refuses ${extra[0]} before stdin/network/provider`, () => {
     const result = spawnSync(process.execPath, [new URL('./bin.js', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
-      'setup', 'codex', '--stdin', ...extra], {input: '', encoding: 'utf8', timeout: 15000});
+      'setup', 'codex', '--stdin', ...extra], {input: '', encoding: 'utf8', timeout: 15000, windowsHide: true});
     assert.equal(result.status, 2); assert.match(result.stderr, /codex_setup_ingress_options_invalid/);
     assert.equal(result.stdout, '');
   });

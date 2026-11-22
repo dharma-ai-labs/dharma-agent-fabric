@@ -10,7 +10,7 @@ const execute = promisify(execFile), sourceRoot = resolve(import.meta.dirname, '
 const baseline = process.env.DHARMA_PACK_VERIFIER_BASELINE_SHA;
 if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('verifier_baseline_invalid');
 const verifier = baseline
-  ? (await execute('git', ['show', `${baseline}:scripts/verify-package.mjs`], {cwd: sourceRoot})).stdout
+  ? (await execute('git', ['show', `${baseline}:scripts/verify-package.mjs`], {cwd: sourceRoot, windowsHide: true})).stdout
   : await readFile(new URL('./verify-package.mjs', import.meta.url));
 const workspaces = ['contracts', 'secure-store', 'policy', 'provider-adapters', 'better-harness-bridge',
   'evidence-reduction', 'relay-client', 'local-vault', 'task-runner', 'skill-manager', 'sdk', 'cli'];
@@ -43,7 +43,7 @@ for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy'
         await mkdir(resolve(root, 'scripts'), {recursive: true});
         await writeFile(resolve(root, 'scripts/verify.mjs'), verifier);
         await assert.rejects(execute(process.execPath, [resolve(root, 'scripts/verify.mjs')], {
-          cwd: root, timeout: 10_000, env: {...process.env, npm_execpath: resolve(root, 'must-not-execute.mjs')},
+          cwd: root, timeout: 10_000, env: {...process.env, npm_execpath: resolve(root, 'must-not-execute.mjs')}, windowsHide: true,
         }), error => error.code === 1 && error.stdout === ''
           && error.stderr.includes(suffix === 'unknown' ? 'cli_runtime_package_unknown' : `cli_runtime_package_pin_invalid:${suffix}`)
           && !error.stderr.includes('MODULE_NOT_FOUND'));

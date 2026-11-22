@@ -50,10 +50,10 @@ async function fixture() {
       organizationId: 'org_old', agentKey: key }),
   };
   for (const [path, content] of Object.entries(files)) await writeFile(join(workspace, path), content);
-  await git('git', ['init', workspace]);
-  await git('git', ['-C', workspace, 'add', '.']);
+  await git('git', ['init', workspace], { windowsHide: true });
+  await git('git', ['-C', workspace, 'add', '.'], { windowsHide: true });
   await git('git', ['-C', workspace, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
-    'commit', '-m', 'legacy bootstrap']);
+    'commit', '-m', 'legacy bootstrap'], { windowsHide: true });
   return { workspace, files, input: { workspace, fromWorkspaceId: oldId, workspaceId: newId,
     repositoryAgentKey: key, apply: true } };
 }
@@ -105,7 +105,7 @@ for (const kind of ['signed', 'malformed', 'modified', 'extra', 'wrong_repositor
     if (kind === 'modified') await writeFile(join(workspace, root, 'SKILL.md'), '# User modification\n');
     if (kind === 'extra') await writeFile(join(workspace, root, 'custom.md'), '# Custom skill\n');
     if (kind === 'wrong_repository') input.repositoryAgentKey = 'repo:aaaaaaaaaaaaaaaaaaaaaaaa';
-    if (kind === 'untracked') await git('git', ['-C', workspace, 'rm', '--cached', `${root}/SKILL.md`]);
+    if (kind === 'untracked') await git('git', ['-C', workspace, 'rm', '--cached', `${root}/SKILL.md`], { windowsHide: true });
     if (kind === 'hardlink' || kind === 'symlink') {
       const path = join(workspace, root, 'SKILL.md');
       const target = join(workspace, 'outside.md');

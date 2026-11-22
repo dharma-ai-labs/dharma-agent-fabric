@@ -199,7 +199,7 @@ test(`actual supervisor consumes an encrypted request, drains its fresh child an
       const scope = currentAcceptedSetupSessionScope(); assert.ok(scope);
       const owner = currentNamedSessionChildOwner(); assert.ok(owner); starts++;
       child = await owner.spawn(scope.request.name, () => spawn(process.execPath,
-        ['-e', 'setInterval(()=>{},1000)'], {cwd: f.root, stdio: 'ignore'}));
+        ['-e', 'setInterval(()=>{},1000)'], {cwd: f.root, stdio: 'ignore', windowsHide: true}));
       if (failure) throw new Error(failure);
       return {ok: true, ...scope.request, bindingId: uuid(40), sessionId: 'synthetic-session'};
     }, readContainerProcessIdentity: async (pid: number) => ({uid: 1000, parentPid: process.pid,
@@ -248,7 +248,7 @@ test(`actual accepted session caller sends public handoff IDs only to its fresh 
       const script = mode === 'ready' ? 'process.on("message", value => process.send(value));'
         : 'process.once("message", value => process.send(value, () => {process.stderr.write("private-secret-placeholder\\nsetup_child_unavailable\\n");process.exitCode=2;process.disconnect();}));';
       child = spawn(process.execPath, ['-e', script],
-        {cwd: f.root, stdio: ['ignore', 'ignore', 'pipe', 'ipc']});
+        {cwd: f.root, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true});
       child.once('message', value => {observed = value; received();});
       return child;
     }, namedSessionRequest: async () => {
@@ -307,7 +307,7 @@ test('actual original sender stages and verifies the standing result without ree
       start: async scope => {
         starts++;
         const child = await childOwner.spawn(scope.request.name, () => spawn(process.execPath,
-          ['-e', 'setInterval(()=>{},1000)'], {cwd: f.root, stdio: 'ignore'}));
+          ['-e', 'setInterval(()=>{},1000)'], {cwd: f.root, stdio: 'ignore', windowsHide: true}));
         return {state: 'started', bindingId: uuid(40), sessionId: 'synthetic-session', sessionPid: child.pid!,
           supervisorPid: process.pid, sessionStartTicks: '30', supervisorStartTicks: '20'};
       }});

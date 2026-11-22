@@ -40,7 +40,7 @@ const hash = `sha256:${'a'.repeat(64)}`;
 async function declaration(name: string, dependencies: Record<string, unknown>) {
   const baseline = process.env.DHARMA_COMPLETION_PARENT_TEST_BASELINE;
   if (baseline && baseline !== 'e48fcd0798c26f9b8078f3ec2b4ea5bc782ad383') throw new Error('fixture_source_unqualified');
-  const source = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding: 'utf8'})
+  const source = baseline ? execFileSync('git', ['show', `${baseline}:packages/cli/src/index.ts`], {encoding: 'utf8', windowsHide: true})
     : await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   const matches = ast.statements.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
