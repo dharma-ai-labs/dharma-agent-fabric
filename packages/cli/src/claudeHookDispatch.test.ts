@@ -35,7 +35,7 @@ test('dharma hook claude session-start through the official bin records the sess
     await mkdir(dirname(note), { recursive: true });
     await writeFile(note, JSON.stringify({ schema: 'dharma.claude-session-start-failure/v1', sessionId, cwd: home,
       at: '2026-11-10T09:00:00.000Z', state: 'pending', reason: 'did_not_finish', recovery: '' }));
-    const env = { ...process.env, DHARMA_HOME: home };
+    const env: NodeJS.ProcessEnv = { ...process.env, DHARMA_HOME: home };
     delete env.CLAUDE_ENV_FILE;
     delete env.DHARMA_CLAUDE_SESSION_ID;
     const result = spawnSync(process.execPath, [fileURLToPath(new URL('./bin.js', import.meta.url)), 'hook', 'claude', 'session-start'],
