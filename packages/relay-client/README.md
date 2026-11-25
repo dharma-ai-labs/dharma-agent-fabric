@@ -70,7 +70,9 @@ The optional local `onFailureDiagnostic` observer receives only a frozen
 `dharma.setup-claim-failure/v1` record with the fixed `setup_claim_failed` code
 and an allowlisted phase. It may add a typed `reason`, the server's error code
 as `serverCode` when it is a known code, and a server `correlationId`; `approval_expired` means browser
-approval was not given before the wait ended. The CLI emits this record to
+approval was not given before the wait ended. The client corrects its clock against the server by
+up to 15 minutes, measured from the challenge round trip, and checks every server timestamp on the
+corrected clock; beyond that it reports `clock_skew` with `clockOffsetSeconds` (server minus local). The CLI emits this record to
 stderr, followed by the fixed `setupClaimFailureMessage` line when a reason is
 known; stdout and the existing sanitized exception remain unchanged. Observer
 failures are ignored. No caught exception, server message, credential, approval

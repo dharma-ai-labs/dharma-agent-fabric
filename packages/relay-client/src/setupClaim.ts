@@ -31,7 +31,7 @@ const SERVER_CODES = new Set([
 export type SetupClaimFailurePhase = 'input_validation' | 'store_preflight' | 'identity' | 'challenge'
   | 'signing' | 'finalize' | 'recipient_approval' | 'credential_validation' | 'credential_commit';
 export type SetupClaimFailureReason = 'approval_expired' | 'server_rejected' | 'network_unavailable'
-  | 'response_invalid' | 'canceled';
+  | 'response_invalid' | 'canceled' | 'clock_skew';
 export interface SetupClaimFailureDiagnostic {
   schema: 'dharma.setup-claim-failure/v1';
   code: 'setup_claim_failed';
@@ -39,18 +39,37 @@ export interface SetupClaimFailureDiagnostic {
   reason?: SetupClaimFailureReason;
   serverCode?: string;
   correlationId?: string;
+  /** With `clock_skew` only: measured server time minus this machine's time; positive means this clock is behind. */
+  clockOffsetSeconds?: number;
+}
+
+/** Setup corrects up to this much client clock error, measured from the challenge round trip. */
+export const SETUP_CLAIM_MAX_CLOCK_SKEW_MS = 15 * 60_000;
+const MAX_REPORTED_OFFSET_SECONDS = 3_155_760_000; // 100 years; keeps the diagnostic schema-bounded.
+
+function approximateDuration(seconds: number): string {
+  const unit = (value: number, name: string) => `${value} ${name}${value === 1 ? '' : 's'}`;
+  if (seconds < 120) return unit(seconds, 'second');
+  if (seconds < 7_200) return unit(Math.round(seconds / 60), 'minute');
+  if (seconds < 172_800) return unit(Math.round(seconds / 3_600), 'hour');
+  return unit(Math.round(seconds / 86_400), 'day');
 }
 
 /** Fixed wording plus allowlisted fields only: never server text, approval URLs or caught errors. */
 export function setupClaimFailureMessage(diagnostic: Readonly<SetupClaimFailureDiagnostic>): string | undefined {
   if (!diagnostic.reason) return undefined;
   const retry = 'Get a fresh setup prompt from Dharma and run it.';
+  const offset = diagnostic.clockOffsetSeconds;
+  const clock = Number.isSafeInteger(offset)
+    ? `This computer's clock is about ${approximateDuration(Math.abs(offset!))} ${offset! > 0 ? 'behind' : 'ahead of'} Dharma's time`
+    : `This computer's clock is too far from Dharma's time`;
   const text = {
     approval_expired: `Browser approval expired: setup did not receive an approval in time. ${retry}`,
     server_rejected: `Dharma rejected this setup${diagnostic.serverCode ? ` (${diagnostic.serverCode})` : ''}. ${retry} If it fails again, send Dharma this line.`,
     network_unavailable: `Could not reach Dharma. Check this machine's network connection. ${retry}`,
     response_invalid: `Dharma's setup response could not be verified. ${retry} If it fails again, send Dharma this line.`,
     canceled: `Setup was canceled before it finished. ${retry}`,
+    clock_skew: `${clock}, more than setup corrects automatically (${SETUP_CLAIM_MAX_CLOCK_SKEW_MS / 60_000} minutes). Turn on automatic date and time on this computer, then get a fresh setup prompt from Dharma and run it.`,
   }[diagnostic.reason];
   return `${diagnostic.code} (${diagnostic.reason}): ${text}${diagnostic.correlationId ? ` Correlation ID: ${diagnostic.correlationId}.` : ''}`;
 }
@@ -143,8 +162,12 @@ export function parseSetupClaimRecipientApproval(value: unknown, challenge: Setu
 export async function claimSetupReference(input: ClaimSetupReferenceInput): Promise<{config: DeviceConfig; scopes: string[]}> {
   let phase: SetupClaimFailurePhase = 'input_validation';
   let failureReason: SetupClaimFailureReason | undefined, serverCode: string | undefined, correlationId: string | undefined;
-  let approvalDeadline: number | undefined, scopeSignal: AbortSignal | undefined;
+  let approvalDeadline: number | undefined, scopeSignal: AbortSignal | undefined, clockOffsetSeconds: number | undefined;
   const now = input.now ?? Date.now;
+  // Server time minus local time, measured once from the challenge round trip. Every comparison with a
+  // server-issued timestamp uses serverNow(); the local maximum wait (deadline) stays on the local clock.
+  let clockOffsetMs = 0;
+  const serverNow = () => now() + clockOffsetMs;
   try {
     const hqUrl = normalizeHqUrl(input.hqUrl);
     if (!hqUrl.startsWith('https:') || input.name.trim().length < 2 || input.name.length > 120
@@ -203,6 +226,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       serverCode = undefined; failureReason = 'network_unavailable';
       const timeout = AbortSignal.timeout(Math.max(1, Math.min(30_000, remaining)));
       const requestSignal = scopeSignal ? AbortSignal.any([scopeSignal, timeout]) : timeout;
+      const sentAt = now();
       const response = await fetcher(`${hqUrl}${PATH}`, { method: 'POST', redirect: 'error',
         headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
         signal: requestSignal });
@@ -212,6 +236,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       await assertScope();
       if (response.redirected || (response.url && response.url !== `${hqUrl}${PATH}`)) return fail();
       const parsed = await boundedJson(response, requestSignal);
+      const receivedAt = now();
       if (response.status >= 300) {
         const error = parsed.error as {code?: unknown; correlationId?: unknown} | null | undefined;
         if (typeof error?.code === 'string' && SERVER_CODES.has(error.code)) serverCode = error.code;
@@ -219,7 +244,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
         if (![409,429].includes(response.status)) return fail();
       }
       await assertScope();
-      return { response, body: parsed };
+      return { response, body: parsed, sentAt, receivedAt };
     };
     phase = 'challenge';
     const initial = await send({ action: 'challenge', organizationId: input.organizationId,
@@ -228,17 +253,22 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     if (!initial.response.ok || initial.body.ok !== true
       || Object.keys(initial.body).sort().join(',') !== 'challenge,device,ok'
       || !sameDevice(initial.body.device, device)) return fail();
-    const localNow = now();
+    // Validate the complete bound response at its own issue time first, so a mis-bound
+    // challenge stays response_invalid whatever its timestamps say.
     const issuedAt = Date.parse(String(record(initial.body.challenge).issuedAt));
-    if (issuedAt > localNow) {
-      if (issuedAt - localNow > 5_000 || issuedAt >= deadline) return fail();
-      // Validate the complete bound response before waiting. Do not adjust the
-      // clock or relax the strict issued-at/expiry checks used by every effect.
-      parseSetupClaimChallenge(initial.body.challenge, expected, issuedAt);
-      await sleep(issuedAt - localNow);
-      if (now() >= deadline) return fail();
+    parseSetupClaimChallenge(initial.body.challenge, expected, issuedAt);
+    // The server stamped issuedAt between our send and receive, so the offset lies in
+    // [issuedAt - receivedAt, issuedAt - sentAt]. Take the smallest correction in that range:
+    // zero when the clocks already agree, never more than the round trip proves.
+    clockOffsetMs = Math.max(issuedAt - initial.receivedAt, Math.min(0, issuedAt - initial.sentAt));
+    if (!Number.isFinite(clockOffsetMs)) return fail();
+    if (Math.abs(clockOffsetMs) > SETUP_CLAIM_MAX_CLOCK_SKEW_MS) {
+      failureReason = 'clock_skew';
+      clockOffsetSeconds = Math.max(-MAX_REPORTED_OFFSET_SECONDS, Math.min(MAX_REPORTED_OFFSET_SECONDS, Math.round(clockOffsetMs / 1_000)));
+      return fail();
     }
-    const challenge = parseSetupClaimChallenge(initial.body.challenge, expected, now());
+    // The challenge window (at most 900 s) and expiry are still enforced, in server time.
+    const challenge = parseSetupClaimChallenge(initial.body.challenge, expected, serverNow());
     phase = 'signing';
     await assertScope();
     const signature = sign(null, setupClaimSigningPayload(challenge), createPrivateKey({key: identity.privateJwk, format: 'jwk'})).toString('base64url');
@@ -247,11 +277,13 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     let pending: BootstrapRecipientApproval | null = null;
     while (true) {
       phase = 'finalize';
-      parseSetupClaimChallenge(challenge, expected, now());
+      parseSetupClaimChallenge(challenge, expected, serverNow());
       const result = await send(request);
-      parseSetupClaimChallenge(challenge, expected, now());
+      parseSetupClaimChallenge(challenge, expected, serverNow());
       if (result.response.status === 429) {
-        const wait = quotaRetryDelay(result.response, result.body, now(), Math.min(deadline, Date.parse(challenge.expiresAt)));
+        // Retry-After dates and the challenge expiry are server time; the local deadline is shifted into it.
+        const wait = quotaRetryDelay(result.response, result.body, serverNow(),
+          Math.min(deadline + clockOffsetMs, Date.parse(challenge.expiresAt)));
         await sleep(wait);
         continue;
       }
@@ -259,8 +291,9 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
         && result.body.status === 'recipient_approval_required') {
         phase = 'recipient_approval'; failureReason = undefined;
         if (Object.keys(result.body).sort().join(',') !== 'approval,ok,status') return fail();
-        const current = parseSetupClaimRecipientApproval(result.body.approval, challenge, signature, device, now());
-        approvalDeadline = Math.min(deadline, Date.parse(challenge.expiresAt));
+        const current = parseSetupClaimRecipientApproval(result.body.approval, challenge, signature, device, serverNow());
+        // Local clock: the expiry is shifted out of server time.
+        approvalDeadline = Math.min(deadline, Date.parse(challenge.expiresAt) - clockOffsetMs);
         if (!pending) { pending = current; await guarded(async () => {await input.onRecipientApprovalRequired?.(current);}); }
         else if (JSON.stringify(pending) !== JSON.stringify(current)) return fail();
         const remaining = approvalDeadline - now();
@@ -288,9 +321,9 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       const unchangedKeyset = existing?.serverSigningKeyset
         && canonicalize(existing.serverSigningKeyset) === canonicalize(approved.serverSigningKeyset);
       const verified = existing?.serverSigningKeyset && !unchangedKeyset
-        ? verifyServerSigningKeysetUpdate(existing.serverSigningKeyset, approved.serverSigningKeyset!, new Date(now()))
+        ? verifyServerSigningKeysetUpdate(existing.serverSigningKeyset, approved.serverSigningKeyset!, new Date(serverNow()))
         : verifyInitialServerSigningKeyset(approved.serverSigningKeyset!, createPublicKey({format: 'jwk',
-          key: { kty: 'OKP', crv: 'Ed25519', x: approved.serverPublicKeyEd25519 }}), input.organizationId, new Date(now()));
+          key: { kty: 'OKP', crv: 'Ed25519', x: approved.serverPublicKeyEd25519 }}), input.organizationId, new Date(serverNow()));
       if (!verified.ok) return fail();
       const relayUrl = normalizeRelayUrl(approved.relayUrl);
       const config: DeviceConfig = { schema: 'dharma.device-config/v1', hqUrl, organizationId: input.organizationId,
@@ -306,12 +339,12 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       const assertCommit = async () => {
         await assertScope();
         if (now() >= deadline) return fail();
-        parseSetupClaimChallenge(challenge, expected, now());
+        parseSetupClaimChallenge(challenge, expected, serverNow());
         await assertScope();
         const current = await (store.getFresh ?? store.get).call(store, identity.account);
         if (!current || canonicalize(JSON.parse(current)) !== canonicalize(identity.privateJwk)) return fail();
         if (now() >= deadline) return fail();
-        parseSetupClaimChallenge(challenge, expected, now());
+        parseSetupClaimChallenge(challenge, expected, serverNow());
       };
       phase = 'credential_commit';
       await assertCommit();
@@ -336,6 +369,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       void Promise.resolve(input.onFailureDiagnostic?.(Object.freeze({
         schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase,
         ...(reason ? {reason} : {}), ...(serverCode ? {serverCode} : {}), ...(correlationId ? {correlationId} : {}),
+        ...(reason === 'clock_skew' && clockOffsetSeconds !== undefined ? {clockOffsetSeconds} : {}),
       }))).catch(() => undefined);
     } catch { /* Ignore local diagnostic observer failures. */ }
     return fail();
