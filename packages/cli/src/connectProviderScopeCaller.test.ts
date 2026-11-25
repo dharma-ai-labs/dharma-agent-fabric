@@ -93,7 +93,7 @@ async function fixture(t: test.TestContext) {
     syncWorkspacePolicyHoldingRefreshLock: async () => ({ ok: true, organizationId,
       workspace: { id: workspaceId, status: 'active' }, localPolicy: { revision: policyRevision } }),
     reconcileWorkspaceRegistration: (_records: unknown, item: Row) => item,
-    bindRepositoryAgent: async (item: Row) => ({ ...item,
+    bindRepositoryAgent: async (_fabric: unknown, item: Row) => ({ ...item,
       repositoryBindingId: '22222222-2222-4222-8222-222222222222',
       repositoryAgentId: '33333333-3333-4333-8333-333333333333' }),
     loadVerifiedWorkspacePolicy: async () => ({ organizationId, revision: policyRevision }),
