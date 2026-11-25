@@ -28,7 +28,7 @@ const ORGANIZATION = 'org_demo', WORKSPACE = '00000005-1111-4111-8111-1111111111
 const COMPILED = ['materializeWorkspacePolicy', 'workspaceAuthorizationStatePath', 'assertWorkspaceAuthorizationCurrent',
   'applyWorkspaceAuthorizationAtomically', 'newEvidenceUploadLedger', 'assertEvidenceLedger',
   'evidenceLedgerForPolicyActivation', 'pathExists', 'acquirePidLock', 'withFileLock', 'writeJsonAtomic',
-  'reconcileWorkspaceRegistration', 'relayStart', 'relayWorkspaceLoop'];
+  'reconcileWorkspaceRegistration', 'relayStart', 'relayWorkspaceLoop', 'connectedProviderScope'];
 
 type Turn = {issuedAt: string; revision?: string; unreachable?: boolean; signed?: () => void; respond?: Promise<void>};
 type Hooks = {rename?: (from: string, to: string) => void | Promise<void>; contended?: (lockPath: string) => void;

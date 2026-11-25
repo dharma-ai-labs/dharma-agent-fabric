@@ -643,7 +643,7 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
   workspaceId: string,
   fabric: AgentFabricClient,
 ) {
-  const providers = await providerCapabilitiesForWorkspacePolicy(null);
+  const providers = await providerCapabilitiesForWorkspacePolicy(await connectedProviderScope(workspaceId));
   const telemetry = await relayAutostartReport();
   return withWorkspacePolicySyncOrder(fabric, workspaceId, async () => {
     const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
@@ -6092,10 +6092,35 @@ async function syncWorkspacePolicy(
   apply = true,
   providerIds: ProviderId[] | null = null,
 ) {
-  const providers = await providerCapabilitiesForWorkspacePolicy(providerIds);
+  const providers = await providerCapabilitiesForWorkspacePolicy(providerIds ?? await connectedProviderScope(item.workspaceId));
   const telemetry = await relayAutostartReport();
   return withWorkspacePolicySyncOrder(fabric, item.workspaceId,
     () => syncWorkspacePolicyHoldingRefreshLock(fabric, item, policyRevision, apply, providers, telemetry));
+}
+
+/**
+ * The providers `repositories connect --provider` selected for a workspace, or null when no connect selected any.
+ * A policy sync that names no providers, such as the relay's refresh, registers these instead of every adapter, so
+ * the server keeps no endpoint for a provider the user did not connect. It is kept apart from the workspace record,
+ * which a running relay rewrites from its own copy. Unknown entries are ignored, and an unreadable record counts as
+ * no selection, so it never stops a policy refresh.
+ */
+async function connectedProviderScope(workspaceId: string): Promise<ProviderId[] | null> {
+  if (!UUID_PATTERN.test(workspaceId)) return null;
+  const recorded: unknown = await readFile(
+    resolve(dharmaHome(), 'registry', 'connected-providers', `${workspaceId}.json`), 'utf8',
+  ).then(text => JSON.parse(text) as unknown).catch(() => null);
+  const selected = Array.isArray(recorded)
+    ? [...new Set(recorded.filter((value): value is ProviderId => typeof value === 'string' && isLocalProviderId(value)))]
+    : [];
+  return selected.length ? selected : null;
+}
+
+/** Adds a connect's provider selection to the one recorded for the workspace. A later connect removes none. */
+async function recordConnectedProviderScope(workspaceId: string, providerIds: ProviderId[]) {
+  if (!UUID_PATTERN.test(workspaceId)) throw new Error('Workspace identifier is invalid.');
+  const selected = [...new Set([...((await connectedProviderScope(workspaceId)) ?? []), ...providerIds])];
+  await writeJsonAtomic(resolve(dharmaHome(), 'registry', 'connected-providers', `${workspaceId}.json`), selected);
 }
 
 // Provider probes spawn up to six blocking commands, and the relay autostart report can
@@ -6979,6 +7004,12 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const fabric = await client();
   const prepared = await registerWorkspaceBeforeRepositoryBind(fabric, registered, policyRevision, providerIds);
   registered = prepared.registered;
+  // Only `repositories connect` passes `providers`. Record its selection before any step that can stop this
+  // connect, such as a source policy the owner has not allowed yet, so the relay registers no other provider.
+  // Setup passes `provider`; its relay still registers every adapter.
+  if (providerIds && typeof flags.get('providers') === 'string') {
+    await recordConnectedProviderScope(registered.workspaceId, providerIds);
+  }
   const synced = prepared.synchronized as Record<string, unknown>;
   const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
   const authoritativeRevision = String(localPolicy?.revision || policyRevision);
