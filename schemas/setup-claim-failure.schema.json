@@ -5,6 +5,8 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "code", "phase"],
+  "if": { "type": "object", "required": ["clockOffsetSeconds"] },
+  "then": { "type": "object", "required": ["reason"], "properties": { "reason": { "const": "clock_skew" } } },
   "properties": {
     "schema": { "const": "dharma.setup-claim-failure/v1" },
     "code": { "const": "setup_claim_failed" },

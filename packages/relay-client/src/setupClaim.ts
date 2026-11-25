@@ -43,13 +43,16 @@ export interface SetupClaimFailureDiagnostic {
   clockOffsetSeconds?: number;
 }
 
-/** Setup corrects up to this much client clock error, measured from the challenge round trip. */
-export const SETUP_CLAIM_MAX_CLOCK_SKEW_MS = 15 * 60_000;
+/** Setup corrects up to this much client clock error, measured from the challenge round trip. It stays
+ * below the relay's 5-minute signed-request window: later device requests are signed on this machine's
+ * own clock, so an offset setup accepted must not make every relay call fail afterwards. */
+export const SETUP_CLAIM_MAX_CLOCK_SKEW_MS = 4 * 60_000;
 const MAX_REPORTED_OFFSET_SECONDS = 3_155_760_000; // 100 years; keeps the diagnostic schema-bounded.
 
 function approximateDuration(seconds: number): string {
   const unit = (value: number, name: string) => `${value} ${name}${value === 1 ? '' : 's'}`;
-  if (seconds < 120) return unit(seconds, 'second');
+  // Seconds near the limit, so an offset just over it never reads as the limit itself.
+  if (seconds < 600) return unit(seconds, 'second');
   if (seconds < 7_200) return unit(Math.round(seconds / 60), 'minute');
   if (seconds < 172_800) return unit(Math.round(seconds / 3_600), 'hour');
   return unit(Math.round(seconds / 86_400), 'day');
@@ -264,11 +267,16 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     if (!Number.isFinite(clockOffsetMs)) return fail();
     if (Math.abs(clockOffsetMs) > SETUP_CLAIM_MAX_CLOCK_SKEW_MS) {
       failureReason = 'clock_skew';
-      clockOffsetSeconds = Math.max(-MAX_REPORTED_OFFSET_SECONDS, Math.min(MAX_REPORTED_OFFSET_SECONDS, Math.round(clockOffsetMs / 1_000)));
+      // Rounded away from zero: a reported offset is never at or under the limit.
+      clockOffsetSeconds = Math.sign(clockOffsetMs) * Math.min(MAX_REPORTED_OFFSET_SECONDS, Math.ceil(Math.abs(clockOffsetMs) / 1_000));
       return fail();
     }
     // The challenge window (at most 900 s) and expiry are still enforced, in server time.
     const challenge = parseSetupClaimChallenge(initial.body.challenge, expected, serverNow());
+    // Keyset and key validity: the later of this clock and the corrected clock. The server's time can then
+    // never make an expired key or keyset current again, and a key the server just made valid is accepted.
+    // The approval check and the anchor write use the same rule.
+    const keysetNow = () => new Date(Math.max(now(), serverNow()));
     phase = 'signing';
     await assertScope();
     const signature = sign(null, setupClaimSigningPayload(challenge), createPrivateKey({key: identity.privateJwk, format: 'jwk'})).toString('base64url');
@@ -321,9 +329,9 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       const unchangedKeyset = existing?.serverSigningKeyset
         && canonicalize(existing.serverSigningKeyset) === canonicalize(approved.serverSigningKeyset);
       const verified = existing?.serverSigningKeyset && !unchangedKeyset
-        ? verifyServerSigningKeysetUpdate(existing.serverSigningKeyset, approved.serverSigningKeyset!, new Date(serverNow()))
+        ? verifyServerSigningKeysetUpdate(existing.serverSigningKeyset, approved.serverSigningKeyset!, keysetNow())
         : verifyInitialServerSigningKeyset(approved.serverSigningKeyset!, createPublicKey({format: 'jwk',
-          key: { kty: 'OKP', crv: 'Ed25519', x: approved.serverPublicKeyEd25519 }}), input.organizationId, new Date(serverNow()));
+          key: { kty: 'OKP', crv: 'Ed25519', x: approved.serverPublicKeyEd25519 }}), input.organizationId, keysetNow());
       if (!verified.ok) return fail();
       const relayUrl = normalizeRelayUrl(approved.relayUrl);
       const config: DeviceConfig = { schema: 'dharma.device-config/v1', hqUrl, organizationId: input.organizationId,
@@ -351,7 +359,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       await saveOrganizationApiToken({ hqUrl, organizationId: input.organizationId,
         installationId: input.installationId, token: approved.organizationApiToken, store });
       await assertCommit();
-      await saveDeviceEnrollmentAnchor({config, store, hostScope, now: new Date(now())});
+      await saveDeviceEnrollmentAnchor({config, store, hostScope, now: keysetNow()});
       await assertCommit();
       await saveDeviceConfig(input.configPath, config, {signal: scopeSignal ?? new AbortController().signal,
         current: async () => {await assertCommit(); return true;}});
