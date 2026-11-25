@@ -117,6 +117,75 @@ export async function recordClaudeSessionStart(home: string, record: { sessionId
   return value;
 }
 
+/** Removes a recorded session's failure note. Best effort: on Windows a scanner or the indexer can hold the file
+ * (EPERM, EBUSY), and a note left behind only adds a hint to a later attach error. */
+export async function clearClaudeSessionStartFailure(home: string, sessionId: string): Promise<void> {
+  try { await rm(claudeSessionStartFailurePath(home, sessionId), { force: true }); } catch { /* best effort */ }
+}
+
+/** schemas/claude-session-start-failure.v1.schema.json. Left by the plugin's hook launcher: `pending` before the CLI
+ * runs (so a hook killed at its timeout still leaves it), `failed` with a reason when no record followed. Removed once
+ * the session is recorded. Local only. The plugin and the CLI ship separately, so the schema is the contract. */
+interface ClaudeSessionStartFailure {
+  schema: 'dharma.claude-session-start-failure/v1'; sessionId: string; cwd: string; at: string;
+  state: 'pending' | 'failed'; reason: string;
+}
+
+const CLAUDE_SESSION_START_FAILURE_KEYS = new Set(['schema', 'sessionId', 'cwd', 'at', 'state', 'reason']);
+const NOTE_TIME = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
+const NOTE_REASON = /^(?:did_not_finish|timed_out|cli_missing|cli_outdated|cli_killed|record_missing|cli_exit_-?[0-9]{1,10})$/;
+
+/** The schema's checks. A note that fails them is ignored, never printed. */
+function isClaudeSessionStartFailure(value: unknown): value is ClaudeSessionStartFailure {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const note = value as Record<string, unknown>;
+  return Object.keys(note).every(key => CLAUDE_SESSION_START_FAILURE_KEYS.has(key))
+    && note.schema === 'dharma.claude-session-start-failure/v1'
+    && typeof note.sessionId === 'string' && CLAUDE_SESSION_ID.test(note.sessionId)
+    && typeof note.cwd === 'string' && note.cwd.length >= 1 && note.cwd.length <= 4096
+    && typeof note.at === 'string' && NOTE_TIME.test(note.at)
+    && typeof note.reason === 'string' && NOTE_REASON.test(note.reason)
+    && (note.state === 'pending' ? note.reason === 'did_not_finish' : note.state === 'failed' && note.reason !== 'did_not_finish');
+}
+
+function claudeSessionStartFailurePath(home: string, sessionId: string) {
+  return sessionStatePath(home, 'claude-session-start-failures', `${sessionId}.json`);
+}
+
+/** The line that records a session by hand, run from that session's folder (the CLI takes the folder from where it
+ * runs). It holds a fixed command and a UUID only: no folder name or stored text goes inside shell quoting, so it
+ * runs the same in sh, bash, cmd and PowerShell. Any other id gets no line. */
+function claudeSessionStartRecovery(sessionId: string | undefined) {
+  return sessionId && UUID.test(sessionId) ? `dharma hook claude session-start --session-id ${sessionId}` : null;
+}
+
+async function readClaudeSessionStartFailures(home: string): Promise<ClaudeSessionStartFailure[]> {
+  let entries: string[] = [];
+  try { entries = await readdir(sessionStatePath(home, 'claude-session-start-failures')); } catch { return []; }
+  const notes = await Promise.all(entries.filter(entry => entry.endsWith('.json')).map(async entry => {
+    try { return await readSessionStateFile<unknown>(sessionStatePath(home, 'claude-session-start-failures', entry)); }
+    catch { return null; }
+  }));
+  return notes.filter(isClaudeSessionStartFailure);
+}
+
+/** `claude_current_session_unavailable` stays the first word; the rest says why and how to recover. The note is found
+ * by the session id the hook exported, or else only when it is the one note for this folder: two windows started
+ * together in one folder can both fail, and naming either one could record the other. */
+async function claudeSessionUnavailable(host: SessionMessagingHost, sessionId: string | undefined): Promise<Error> {
+  const notes = (await readClaudeSessionStartFailures(host.home))
+    .filter(note => sessionId ? note.sessionId === sessionId : resolve(note.cwd) === resolve(host.cwd));
+  const note = notes.length === 1 ? notes[0] : undefined;
+  const why = !note ? ''
+    : note.state === 'pending' ? ` It started at ${note.at} and did not finish, most likely stopped by the hook timeout.`
+    : ` It failed at ${note.at} (${note.reason}).`;
+  const several = notes.length > 1 ? ' More than one Claude Code session in this folder was not recorded, so none is named here.' : '';
+  const recovery = claudeSessionStartRecovery(sessionId ?? note?.sessionId);
+  return new Error(`claude_current_session_unavailable: the Claude Code SessionStart hook did not record this session.${why}${several} `
+    + 'Restart this Claude Code session with the dharma-agent-fabric-preview plugin enabled'
+    + (recovery ? `, or run this from this session's folder: ${recovery}` : '.'));
+}
+
 export async function readClaudeSessionStart(home: string, sessionId: string): Promise<ClaudeSessionStartRecord | null> {
   if (!CLAUDE_SESSION_ID.test(sessionId)) return null;
   const value = await readSessionStateFile<ClaudeSessionStartRecord>(sessionStatePath(home, 'claude-sessions', `${sessionId}.json`));
@@ -127,7 +196,7 @@ async function currentClaudeSession(host: SessionMessagingHost): Promise<ClaudeS
   const named = host.env[CLAUDE_SESSION_ENV];
   if (named) {
     const record = await readClaudeSessionStart(host.home, named);
-    if (!record) throw new Error('claude_current_session_unavailable');
+    if (!record) throw await claudeSessionUnavailable(host, named);
     return record;
   }
   let entries: string[] = [];
@@ -137,7 +206,7 @@ async function currentClaudeSession(host: SessionMessagingHost): Promise<ClaudeS
   const records = (await Promise.all(entries.filter(entry => entry.endsWith('.json'))
     .map(entry => readClaudeSessionStart(host.home, entry.slice(0, -'.json'.length)))))
     .filter((record): record is ClaudeSessionStartRecord => record !== null && resolve(record.cwd) === resolve(host.cwd));
-  if (records.length === 0) throw new Error('claude_current_session_unavailable');
+  if (records.length === 0) throw await claudeSessionUnavailable(host, undefined);
   if (records.length > 1) throw new Error('claude_current_session_ambiguous');
   return records[0]!;
 }

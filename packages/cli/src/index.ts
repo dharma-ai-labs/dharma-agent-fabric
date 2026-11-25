@@ -173,7 +173,7 @@ import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTo
 import {captureCredentialEnvironment, credentialVariable, relayChildEnvironment} from './credentialEnvironment.js';
 import {smokeCommandPolicy} from './smokeCommandEnvironment.js';
 
-const VERSION = '0.2.227';
+const VERSION = '0.2.228';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
@@ -9946,10 +9946,15 @@ export async function run(argv: string[]): Promise<Output> {
   if (command === 'msg') return sessionMessageCommand(String(subcommand), flags, sessionMessagingHost());
   if (command === 'hook') {
     // Run by the Claude plugin 1.0.7-preview hooks; an empty result prints nothing.
+    // `session-start --session-id <uuid>` is the hand-run recovery that the hook and `sessions attach` print.
     if (subcommand !== 'claude' || !['session-start', 'inbox'].includes(String(positional[2])) || positional.length !== 3
-      || [...flags].some(([key, value]) => key !== 'dry-run' || value !== true)) throw new Error('claude_hook_command_invalid');
+      || [...flags].some(([key, value]) => !(key === 'dry-run' && value === true)
+        && !(key === 'session-id' && typeof value === 'string' && positional[2] === 'session-start'))) {
+      throw new Error('claude_hook_command_invalid');
+    }
+    const sessionId = flags.get('session-id');
     return claudeHookCommand(String(positional[2]), { host: sessionMessagingHost(), stdin: () => readHookStdin(process.stdin),
-      dryRun: flags.get('dry-run') === true });
+      dryRun: flags.get('dry-run') === true, ...(typeof sessionId === 'string' ? { sessionId } : {}) });
   }
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
