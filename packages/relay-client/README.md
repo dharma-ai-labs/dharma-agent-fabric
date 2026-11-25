@@ -71,10 +71,11 @@ The optional local `onFailureDiagnostic` observer receives only a frozen
 and an allowlisted phase. It may add a typed `reason`, the server's error code
 as `serverCode` when it is a known code, and a server `correlationId`; `approval_expired` means browser
 approval was not given before the wait ended. The client corrects its clock against the server by
-up to 4 minutes, measured from the challenge round trip, and checks the challenge, approval and retry
-times on the corrected clock. That limit stays inside the relay's 5-minute window for signed device
-requests, which later use this machine's own clock. Keyset and key validity use the later of the two
-clocks, so the server's time never makes an expired key current again. Beyond 4 minutes setup reports
+up to 45 seconds, measured from the challenge round trip, and checks the challenge, approval and retry
+times on the corrected clock. Later signed device requests use this machine's own clock, and a kept
+request is resent as signed for up to 4 minutes; 45 seconds plus that age plus a 15-second latency margin
+stays inside the relay's 5-minute window for signed requests. Keyset and key validity use the later of
+the two clocks, so the server's time never makes an expired key current again. Beyond 45 seconds setup reports
 `clock_skew` with `clockOffsetSeconds` (server minus local). The CLI emits this record to
 stderr, followed by the fixed `setupClaimFailureMessage` line when a reason is
 known; stdout and the existing sanitized exception remain unchanged. Observer

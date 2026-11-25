@@ -39,6 +39,7 @@ export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export { claimSetupReference, setupClaimSourceRegistration, setupClaimFailureMessage, type ClaimSetupReferenceInput,
   type SetupClaimFailurePhase, type SetupClaimFailureReason, type SetupClaimFailureDiagnostic } from './setupClaim.js';
+import { SIGNATURE_SENDABLE_MS } from './setupClaim.js';
 export {planDeviceSigningRecovery, type DeviceSigningRecoveryPlanInput, type DeviceSigningRecoverySourceSelection,
   type DeviceSigningRecoverySessionSelection, type DeviceSigningRecoveryHostBinding,
   planDeviceSigningMaintenance, type DeviceSigningMaintenancePlanInput, type DeviceTrustMaintenanceController} from './signingRecoveryPlan.js';
@@ -253,9 +254,9 @@ function acknowledgementTimeStale(acknowledgedAt: string, now: number): boolean 
   return !Number.isFinite(at) || now - at > 8 * 60_000 || at > now + 5 * 60_000;
 }
 
-/** A kept request signed longer ago than this is sent again only with a new time and signature: the server refuses a
- * signature more than 5 minutes old. Only its owner signs it again (see #sendPendingWithSigningControl). */
-const SIGNATURE_SENDABLE_MS = 4 * 60_000;
+// SIGNATURE_SENDABLE_MS (setupClaim.ts): a kept request signed longer ago is sent again only with a new time and
+// signature, because the server refuses a signature more than 5 minutes old. Setup's clock-skew limit is derived
+// from it. Only its owner signs it again (see #sendPendingWithSigningControl).
 
 /** Whether a kept request's signature is too old to send it again exactly as signed. */
 function signatureTooOld(pending: PendingRequest, now: number): boolean {

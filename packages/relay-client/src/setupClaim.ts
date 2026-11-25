@@ -43,10 +43,17 @@ export interface SetupClaimFailureDiagnostic {
   clockOffsetSeconds?: number;
 }
 
-/** Setup corrects up to this much client clock error, measured from the challenge round trip. It stays
- * below the relay's 5-minute signed-request window: later device requests are signed on this machine's
- * own clock, so an offset setup accepted must not make every relay call fail afterwards. */
-export const SETUP_CLAIM_MAX_CLOCK_SKEW_MS = 4 * 60_000;
+/** The relay refuses a signed device request whose time is more than this far from its own clock. */
+const RELAY_SIGNED_REQUEST_WINDOW_MS = 5 * 60_000;
+/** A kept request signed longer ago than this is sent again only with a new time and signature (see index.ts). */
+export const SIGNATURE_SENDABLE_MS = 4 * 60_000;
+/** Network and handling time between a resend leaving this machine and the relay checking it. */
+const SIGNED_REQUEST_LATENCY_MARGIN_MS = 15_000;
+/** Setup corrects up to this much client clock error, measured from the challenge round trip. Later device
+ * requests are signed on this machine's own clock and may be resent as signed for up to SIGNATURE_SENDABLE_MS,
+ * so the offset setup accepts plus that age plus a latency margin stays inside the relay's window (45 s). */
+export const SETUP_CLAIM_MAX_CLOCK_SKEW_MS = RELAY_SIGNED_REQUEST_WINDOW_MS - SIGNATURE_SENDABLE_MS
+  - SIGNED_REQUEST_LATENCY_MARGIN_MS;
 const MAX_REPORTED_OFFSET_SECONDS = 3_155_760_000; // 100 years; keeps the diagnostic schema-bounded.
 
 function approximateDuration(seconds: number): string {
@@ -72,7 +79,7 @@ export function setupClaimFailureMessage(diagnostic: Readonly<SetupClaimFailureD
     network_unavailable: `Could not reach Dharma. Check this machine's network connection. ${retry}`,
     response_invalid: `Dharma's setup response could not be verified. ${retry} If it fails again, send Dharma this line.`,
     canceled: `Setup was canceled before it finished. ${retry}`,
-    clock_skew: `${clock}, more than setup corrects automatically (${SETUP_CLAIM_MAX_CLOCK_SKEW_MS / 60_000} minutes). Turn on automatic date and time on this computer, then get a fresh setup prompt from Dharma and run it.`,
+    clock_skew: `${clock}, more than setup corrects automatically (${approximateDuration(SETUP_CLAIM_MAX_CLOCK_SKEW_MS / 1_000)}). Turn on automatic date and time on this computer, then get a fresh setup prompt from Dharma and run it.`,
   }[diagnostic.reason];
   return `${diagnostic.code} (${diagnostic.reason}): ${text}${diagnostic.correlationId ? ` Correlation ID: ${diagnostic.correlationId}.` : ''}`;
 }
