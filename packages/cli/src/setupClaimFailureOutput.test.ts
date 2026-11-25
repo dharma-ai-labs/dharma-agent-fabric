@@ -57,7 +57,7 @@ test('a clock too far off to correct names the measured offset and the next step
   const diagnostic = {...report, phase: 'challenge', reason: 'clock_skew', clockOffsetSeconds: -172_800};
   const lines = await stderrFor(diagnostic);
   assert.deepEqual(JSON.parse(lines[0]!), diagnostic);
-  assert.equal(lines[1], "setup_claim_failed (clock_skew): This computer's clock is about 2 days ahead of Dharma's time, more than setup corrects automatically (4 minutes). Turn on automatic date and time on this computer, then get a fresh setup prompt from Dharma and run it.\n");
+  assert.equal(lines[1], "setup_claim_failed (clock_skew): This computer's clock is about 2 days ahead of Dharma's time, more than setup corrects automatically (45 seconds). Turn on automatic date and time on this computer, then get a fresh setup prompt from Dharma and run it.\n");
   assert.match((await stderrFor({...diagnostic, clockOffsetSeconds: 5_400}))[1]!, /clock is about 90 minutes behind Dharma's time/);
   assert.match((await stderrFor({...diagnostic, clockOffsetSeconds: 241}))[1]!, /clock is about 241 seconds behind Dharma's time/);
 });

@@ -236,7 +236,7 @@ test('successful setup emits no failure diagnostic', async () => {
 });
 test('client clock skew is corrected from the challenge round trip without waiting', async t => {
   // Positive: this machine's clock is slow (the reported case was about 9.5 s slow); negative: it is fast.
-  for (const skew of [2208, 5000, 9_500, -9_500, 200_000, -200_000, 240_000, -240_000]) await t.test(`server_ahead_${skew}ms`, async () => {
+  for (const skew of [2208, 5000, 9_500, -9_500, 30_000, -30_000, 45_000, -45_000]) await t.test(`server_ahead_${skew}ms`, async () => {
     const f = await fixture(undefined, true, skew); const waits: number[] = []; const reports: unknown[] = [];
     try {
       const result = await claimSetupReference({...f.input, onFailureDiagnostic: report => { reports.push(report); },
@@ -253,7 +253,8 @@ test('client clock skew too large to correct fails as clock_skew naming the meas
   const cases: Array<[number, RegExp]> = [[2 * 86_400_000, /clock is about 2 days behind Dharma's time/],
     [-2 * 86_400_000, /clock is about 2 days ahead of Dharma's time/],
     [600_000, /clock is about 10 minutes behind Dharma's time/], [-600_000, /clock is about 10 minutes ahead of Dharma's time/],
-    [240_001, /clock is about 241 seconds behind Dharma's time/]];
+    [200_000, /clock is about 200 seconds behind Dharma's time/], [-240_000, /clock is about 240 seconds ahead of Dharma's time/],
+    [45_001, /clock is about 46 seconds behind Dharma's time/]];
   for (const [skew, words] of cases) await t.test(`server_ahead_${skew}ms`, async () => {
     const f = await fixture(undefined, true, skew); const reports: unknown[] = []; let waits = 0;
     try {
@@ -264,7 +265,7 @@ test('client clock skew too large to correct fails as clock_skew naming the meas
       const message = setupClaimFailureMessage(reports[0] as never) ?? '';
       assert.match(message, /^setup_claim_failed \(clock_skew\): /);
       assert.match(message, words);
-      assert.match(message, /more than setup corrects automatically \(4 minutes\)/);
+      assert.match(message, /more than setup corrects automatically \(45 seconds\)/);
       assert.doesNotMatch(message, /could not be verified/);
       assert.equal(f.calls, 1); assert.equal(waits, 0);
       await assert.rejects(readFile(f.input.configPath), {code:'ENOENT'});
@@ -278,7 +279,7 @@ test('skew correction still enforces challenge expiry and scope in server time',
     body.challenge.scopeDigest = `sha256:${'d'.repeat(64)}`;
     return Response.json(body);
   };
-  for (const skew of [200_000, -200_000]) {
+  for (const skew of [30_000, -30_000]) {
     await t.test(`expiry_${skew}ms`, async () => {
       const f = await fixture(undefined, true, skew); const reports: unknown[] = [];
       try {
@@ -307,8 +308,8 @@ test('skew correction still enforces challenge expiry and scope in server time',
 });
 test('round-trip time never widens the correction beyond what the round trip proves', async t => {
   // 150 ms each way: the server stamps issuedAt mid-flight, so the true offset is skew +/- 150 ms. The smallest
-  // correction (skew -/+ 150 ms) stays inside 4 minutes; one end of the interval alone would not.
-  for (const skew of [0, 240_100, -240_100]) await t.test(`rtt_server_ahead_${skew}ms`, async () => {
+  // correction (skew -/+ 150 ms) stays inside 45 seconds; one end of the interval alone would not.
+  for (const skew of [0, 45_100, -45_100]) await t.test(`rtt_server_ahead_${skew}ms`, async () => {
     const f = await fixture(undefined, false, skew); const reports: unknown[] = [];
     try {
       const result = await claimSetupReference({...f.input, onFailureDiagnostic: report => { reports.push(report); },
@@ -324,7 +325,7 @@ test('round-trip time never widens the correction beyond what the round trip pro
 test('clock_skew without a measured offset still names the limit and the next step', () => {
   assert.match(setupClaimFailureMessage({schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed',
     phase: 'challenge', reason: 'clock_skew'}) ?? '',
-  /clock is too far from Dharma's time, more than setup corrects automatically \(4 minutes\)\. Turn on automatic date and time/);
+  /clock is too far from Dharma's time, more than setup corrects automatically \(45 seconds\)\. Turn on automatic date and time/);
 });
 function rotatedKeyset(f: Awaited<ReturnType<typeof fixture>>, generation: number, issuedAt: number, expiresAt: number,
   keys: TrustedServerSigningKeyset['keys']): TrustedServerSigningKeyset {
@@ -333,12 +334,12 @@ function rotatedKeyset(f: Awaited<ReturnType<typeof fixture>>, generation: numbe
   return {...unsigned, signature: signCanonicalObject(unsigned, f.server.privateKey)};
 }
 test('re-setup with an older anchor accepts a key that became valid moments ago in server time', async () => {
-  // This machine is 3.5 minutes slow. The update check at approval and the anchor write use the same time.
+  // This machine is 40 seconds slow. The update check at approval and the anchor write use the same time.
   let next: TrustedServerSigningKeyset | undefined;
   const f = await fixture(payload => { if (next) payload.serverSigningKeyset = next; });
   try {
     const first = await claimSetupReference(f.input);
-    f.setServerAhead(210_000);
+    f.setServerAhead(40_000);
     const now = f.serverTime(), signer = f.keyset.keys[0]!;
     next = rotatedKeyset(f, 2, now - 1_000, now + 7_200_000, [{...signer, status: 'overlap'},
       {keyVersion: 'kms/2', publicKeyEd25519: generateKeyPairSync('ed25519').publicKey.export({format: 'jwk'}).x!,
@@ -354,7 +355,7 @@ test('re-setup with an older anchor accepts a key that became valid moments ago 
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 test('a server-reported earlier time never revives an expired keyset for a keyset update', async () => {
-  // The stored keyset expired 2 minutes ago on this clock. A challenge stamped 3.5 minutes earlier must not
+  // The stored keyset expired 20 seconds ago on this clock. A challenge stamped 40 seconds earlier must not
   // make it current again, so a keyset it signed is rejected before anything is stored.
   let next: TrustedServerSigningKeyset | undefined;
   const f = await fixture(payload => { if (next) payload.serverSigningKeyset = next; });
@@ -362,7 +363,7 @@ test('a server-reported earlier time never revives an expired keyset for a keyse
     const t0 = f.serverTime(), signer = {...f.keyset.keys[0]!, notAfter: new Date(t0 + 7_200_000).toISOString()};
     next = rotatedKeyset(f, 1, t0 - 1_000, t0 + 1_800_000, [signer]);
     const first = await claimSetupReference(f.input);
-    f.advance(1_920_000); f.setServerAhead(-210_000);
+    f.advance(1_820_000); f.setServerAhead(-40_000);
     const now = f.serverTime();
     next = rotatedKeyset(f, 2, now - 1_000, now + 3_600_000, [signer]);
     const config = await readFile(f.input.configPath, 'utf8');
