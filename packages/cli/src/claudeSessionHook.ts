@@ -142,7 +142,7 @@ async function inbox(host: SessionMessagingHost, stdin: () => Promise<string>, c
 /** What `--dry-run` reports instead of running: no stdin, device, transport or file is touched (AGENTS.md rule 8). */
 function hookPlan(action: 'session-start' | 'inbox', host: SessionMessagingHost) {
   const writes = action === 'session-start'
-    ? ['local Claude session record', 'remove this session's SessionStart failure note',
+    ? ['local Claude session record', 'SessionStart failure note removal',
       ...(host.env.CLAUDE_ENV_FILE ? ['CLAUDE_ENV_FILE export'] : [])]
     : ['hook spool', 'claude_hook delivered report', 'parked reply/ack flush'];
   return { ok: true, stage: 'plan', effects: false, action, writes } as const;
