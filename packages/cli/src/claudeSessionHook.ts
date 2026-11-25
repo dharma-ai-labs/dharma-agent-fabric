@@ -3,6 +3,7 @@ import { isUncertainSessionTransportFailure, readSessionMessageDelivery } from '
 import { receiveSessionMessages, reportReceivedDelivery } from './sessionMessageCommands.js';
 import {
   CLAUDE_SESSION_ENV,
+  clearClaudeSessionStartFailure,
   listSessionAttachments,
   readSessionStateFile,
   recordClaudeSessionStart,
@@ -21,6 +22,8 @@ export const CLAUDE_HOOK_MAX_MESSAGES = 5;
 export const CLAUDE_HOOK_MAX_CONTEXT_CHARS = 40_000;
 
 const CLAUDE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+/** `--session-id` takes a Claude Code session id, which is a UUID; nothing else is accepted on a command line. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_STDIN = 1_048_576;
 
 function hookInput(raw: string): { sessionId: string; cwd: string } | null {
@@ -34,14 +37,18 @@ function hookInput(raw: string): { sessionId: string; cwd: string } | null {
 }
 
 /** SessionStart: records the session id and cwd on this device and exports the id to later Bash calls
- * through CLAUDE_ENV_FILE, so `sessions attach --current` names exactly this session. No network. */
-async function sessionStart(host: SessionMessagingHost, stdin: () => Promise<string>) {
-  const input = hookInput(await stdin());
-  if (!input) return '';
+ * through CLAUDE_ENV_FILE, so `sessions attach --current` names exactly this session. No network.
+ * The export comes before the failure note is removed, and that removal is best effort, so it never costs the export. */
+async function sessionStart(host: SessionMessagingHost, input: { sessionId: string; cwd: string }) {
   await recordClaudeSessionStart(host.home, { sessionId: input.sessionId, cwd: input.cwd, at: host.now().toISOString() });
   const envFile = host.env.CLAUDE_ENV_FILE;
   if (envFile) await appendFile(envFile, `export ${CLAUDE_SESSION_ENV}=${input.sessionId}\n`);
-  return '';
+  await clearClaudeSessionStartFailure(host.home, input.sessionId);
+}
+
+/** What the hand-run recovery (`--session-id`) prints once the session is recorded. */
+function recoveryReceipt(sessionId: string) {
+  return { ok: true, stage: 'recorded', action: 'session-start', sessionId } as const;
 }
 
 /** Frames this session's hook has reported (or is reporting) but not yet printed. A hook killed between its
@@ -140,26 +147,41 @@ async function inbox(host: SessionMessagingHost, stdin: () => Promise<string>, c
 }
 
 /** What `--dry-run` reports instead of running: no stdin, device, transport or file is touched (AGENTS.md rule 8). */
-function hookPlan(action: 'session-start' | 'inbox', host: SessionMessagingHost) {
+function hookPlan(action: 'session-start' | 'inbox', host: SessionMessagingHost, sessionId?: string) {
   const writes = action === 'session-start'
-    ? ['local Claude session record', ...(host.env.CLAUDE_ENV_FILE ? ['CLAUDE_ENV_FILE export'] : [])]
+    ? ['local Claude session record', ...(host.env.CLAUDE_ENV_FILE ? ['CLAUDE_ENV_FILE export'] : []),
+      'SessionStart failure note removal']
     : ['hook spool', 'claude_hook delivered report', 'parked reply/ack flush'];
-  return { ok: true, stage: 'plan', effects: false, action, writes } as const;
+  return { ok: true, stage: 'plan', effects: false, action, ...(sessionId ? { sessionId } : {}), writes } as const;
 }
 
 /** `dharma hook claude session-start|inbox [--dry-run]`, run by the 1.0.7-preview plugin hooks. Any failure
- * (no device, flag off, network, parse) prints nothing: the prompt is never blocked or changed. */
-type ClaudeHookInput = { host: SessionMessagingHost; stdin: () => Promise<string>; clock?: () => number };
-export function claudeHookCommand(action: string, input: ClaudeHookInput & { dryRun?: false }): Promise<string>;
+ * (no device, flag off, network, parse) prints nothing: the prompt is never blocked or changed.
+ * `session-start --session-id <uuid>` is the hand-run recovery the hook and attach print: it records that session for
+ * the current folder without reading stdin and, unlike the hook, refuses a bad id and reports any failure. */
+type ClaudeHookInput = { host: SessionMessagingHost; stdin: () => Promise<string>; clock?: () => number; sessionId?: string };
+export function claudeHookCommand(action: string, input: ClaudeHookInput & { dryRun?: false; sessionId?: undefined }): Promise<string>;
 export function claudeHookCommand(action: string, input: ClaudeHookInput & { dryRun?: boolean }):
-  Promise<string | ReturnType<typeof hookPlan>>;
+  Promise<string | ReturnType<typeof hookPlan> | ReturnType<typeof recoveryReceipt>>;
 export async function claudeHookCommand(action: string, input: ClaudeHookInput & { dryRun?: boolean }):
-  Promise<string | ReturnType<typeof hookPlan>> {
+  Promise<string | ReturnType<typeof hookPlan> | ReturnType<typeof recoveryReceipt>> {
   if (action !== 'session-start' && action !== 'inbox') throw new Error('claude_hook_command_invalid');
-  if (input.dryRun) return hookPlan(action, input.host);
+  if (input.sessionId !== undefined) {
+    if (action !== 'session-start') throw new Error('claude_hook_command_invalid');
+    if (!UUID.test(input.sessionId)) throw new Error('claude_hook_session_id_invalid');
+  }
+  if (input.dryRun) return hookPlan(action, input.host, input.sessionId);
+  if (input.sessionId !== undefined) {
+    await sessionStart(input.host, { sessionId: input.sessionId, cwd: input.host.cwd });
+    return recoveryReceipt(input.sessionId);
+  }
   let timer: NodeJS.Timeout | undefined;
   try {
-    if (action === 'session-start') return await sessionStart(input.host, input.stdin);
+    if (action === 'session-start') {
+      const hook = hookInput(await input.stdin());
+      if (hook) await sessionStart(input.host, hook);
+      return '';
+    }
     const cutOff = new Promise<string>(done => { timer = setTimeout(() => done(''), CLAUDE_HOOK_HARD_DEADLINE_MS); });
     return await Promise.race([inbox(input.host, input.stdin, input.clock ?? Date.now), cutOff]);
   } catch { return ''; } finally { clearTimeout(timer); }
