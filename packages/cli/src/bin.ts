@@ -13,6 +13,20 @@ import { PINNED_NODE_VERSION, defaultDharmaHome, ensurePinnedNodeRuntime } from 
 import { captureCredentialEnvironment } from './credentialEnvironment.js';
 
 const args = process.argv.slice(2);
+
+/** `hook claude session-start [--dry-run] [--session-id <id>]`, or null for anything else (the full CLI refuses it). */
+function sessionStartOptions(argv: string[]): { dryRun: boolean; sessionId?: string } | null {
+  if (argv[0] !== 'hook' || argv[1] !== 'claude' || argv[2] !== 'session-start') return null;
+  let dryRun = false;
+  let sessionId: string | undefined;
+  for (let index = 3; index < argv.length; index += 1) {
+    if (argv[index] === '--dry-run' && !dryRun) dryRun = true;
+    else if (argv[index] === '--session-id' && sessionId === undefined && index + 1 < argv.length
+      && !argv[index + 1]!.startsWith('--')) sessionId = argv[++index];
+    else return null;
+  }
+  return { dryRun, ...(sessionId === undefined ? {} : { sessionId }) };
+}
 if (args.includes('--help') || args.includes('-h')) {
   process.stdout.write(`${CLI_USAGE}\n`);
 } else if (!isSupportedNodeVersion(process.versions.node)) {
@@ -46,16 +60,22 @@ if (args.includes('--help') || args.includes('-h')) {
       process.exitCode = child.status ?? 1;
     }
   }
-} else if (args.length === 3 && args[0] === 'hook' && args[1] === 'claude' && args[2] === 'session-start') {
+} else if (sessionStartOptions(args)) {
   // The Claude SessionStart hook runs at every session start, often beside other plugins' hooks, under a timeout.
-  // It only writes the local session record (no device, no network), so it skips loading the whole CLI.
+  // It only writes the local session record (no device, no network), so it skips loading the whole CLI. The same
+  // path serves its `--dry-run` plan and the hand-run `--session-id <uuid>` recovery.
+  const options = sessionStartOptions(args)!;
   captureCredentialEnvironment();
   const { claudeHookCommand, readHookStdin } = await import('./claudeSessionHook.js');
   const unavailable = () => Promise.reject(new Error('claude_session_start_is_local_only'));
-  const output = await claudeHookCommand('session-start', { stdin: () => readHookStdin(process.stdin),
-    host: { home: defaultDharmaHome(), cwd: process.cwd(), env: process.env, now: () => new Date(),
-      device: unavailable, transport: unavailable } });
-  process.stdout.write(output, () => process.exit(0));
+  try {
+    const output = await claudeHookCommand('session-start', { stdin: () => readHookStdin(process.stdin), ...options,
+      host: { home: defaultDharmaHome(), cwd: process.cwd(), env: process.env, now: () => new Date(),
+        device: unavailable, transport: unavailable } });
+    process.stdout.write(typeof output === 'string' ? output : `${JSON.stringify(output, null, 2)}\n`, () => process.exit(0));
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`, () => process.exit(2));
+  }
 } else {
   // Read credential variables once and keep them out of the environment that children inherit.
   captureCredentialEnvironment();
