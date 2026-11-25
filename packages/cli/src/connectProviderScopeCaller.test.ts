@@ -7,6 +7,7 @@ import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 import { parseCliOptions, parseSelectedProviderIds } from './index.js';
+import { onboardingResumeCommand } from './onboardingWorkspace.js';
 
 // `dharma repositories connect --provider codex` was refused with
 // repository_source_policy_authorization_required, rerun after the owner allowed it, and
@@ -57,7 +58,7 @@ async function fixture(t: test.TestContext) {
   const registrations: Array<string[] | null> = [];
   const fabric = { config: {} };
   const dependencies: Row = {
-    resolve, dirname, basename, readFile, parseSelectedProviderIds,
+    resolve, dirname, basename, readFile, parseSelectedProviderIds, onboardingResumeCommand,
     UUID_PATTERN: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     isLocalProviderId: (value: string) => LOCAL_PROVIDER_IDS.includes(value),
     dharmaHome: () => home,
@@ -69,6 +70,7 @@ async function fixture(t: test.TestContext) {
     normalizeHqUrl: (value: string) => value,
     portalUrl: () => 'https://fixture.invalid',
     readDeviceConfig: async () => ({ organizationId, deviceId: 'device_fixture', hqUrl: 'https://fixture.invalid' }),
+    login: async () => ({ status: 'pending' }),
     currentBootstrapHostScope: () => null,
     inspectRegistryRecoveryFile: async () => ({ kind: 'valid' }),
     workspaceRegistryPath: () => resolve(home, 'registry', 'workspaces.json'),
@@ -116,7 +118,7 @@ async function fixture(t: test.TestContext) {
   const relayPolicyRefresh = () => source.syncWorkspacePolicy!(fabric, rows[0], policyRevision, true);
   const transmissionRefresh = () => source.refreshVerifiedWorkspacePolicyForTransmission!(
     resolve(repo, '.dharma', 'approved-policy.json'), workspaceId, fabric);
-  return { home, registrations, connect, relayPolicyRefresh, transmissionRefresh };
+  return { home, dependencies, registrations, connect, relayPolicyRefresh, transmissionRefresh };
 }
 
 test('after a refused connect that selected codex, the relay and transmission refreshes register codex only', async t => {
@@ -146,6 +148,16 @@ test('a connect without --provider leaves the relay registering every adapter, a
   await f.relayPolicyRefresh();
   await f.transmissionRefresh();
   assert.deepEqual(f.registrations, [null, null, null]);
+});
+
+test('a connect waiting for device approval resumes with the same providers and repository key', async t => {
+  const f = await fixture(t);
+  f.dependencies.readDeviceConfig = async () => null;
+  const pending = await f.connect('codex');
+  assert.equal(pending.repositories[0].stage, 'approve_device');
+  assert.equal(pending.repositories[0].nextCommand, `dharma onboard --resume --organization-id ${organizationId}`
+    + ` --workspace . --policy-revision ${policyRevision} --repository-key fixture-repository --providers codex`);
+  assert.deepEqual(f.registrations, []);
 });
 
 // A broken record must not stop the relay's policy refresh, so it falls back to the behaviour before this fix.
