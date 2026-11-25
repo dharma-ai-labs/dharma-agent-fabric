@@ -17,6 +17,7 @@ import {
   parseHermesSessionExport,
   providerFailureCategory,
   providerTaskReadiness,
+  providerCapabilityWithoutExecutable,
   providerExecutionRecords,
   providerProcessEnvironment,
 } from './index.js';
@@ -119,6 +120,27 @@ test('Agy 1.1.13 capabilities fail closed for signed effects and host lifecycle 
     skillRollback: 'unavailable',
     usageEvidence: 'unavailable',
   });
+});
+
+// The platform marks an endpoint offline only when evidence and task execution are both unavailable. A Linux host with no
+// claude executable reported evidence 'available', so its claude endpoint was registered active.
+test('Codex and Claude with no executable report nothing available, like Agy and Hermes', () => {
+  for (const provider of ['codex', 'claude'] as const) {
+    assert.deepEqual(providerCapabilityWithoutExecutable(provider), {
+      provider,
+      version: null,
+      evidence: 'unavailable',
+      configuredAssets: 'unavailable',
+      taskExecution: 'unavailable',
+      sessionContinuation: 'unavailable',
+      skillInstall: 'unavailable',
+      activation: 'unavailable',
+      skillRollback: 'unavailable',
+      usageEvidence: 'unavailable',
+    });
+  }
+  assert.deepEqual(providerCapabilityWithoutExecutable('agy'), agyCapability(null));
+  assert.deepEqual(providerCapabilityWithoutExecutable('hermes'), hermesCapability(null));
 });
 
 test('Agy 1.1.15 advertises content-attested activation and transactional rollback support', () => {
