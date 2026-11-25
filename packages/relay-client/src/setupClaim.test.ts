@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { claimSetupReference, parseSetupClaimRecipientApproval, setupClaimSourceRegistration } from './setupClaim.js';
+import { claimSetupReference, parseSetupClaimRecipientApproval, setupClaimFailureMessage, setupClaimSourceRegistration } from './setupClaim.js';
 import {loadOrganizationApiToken, saveDeviceEnrollmentAnchor, type DeviceConfig} from './index.js';
 import { sealSetupClaimCredential, signCanonicalObject, setupClaimSigningPayload, validateContract,
   type SetupClaimChallenge, type SealedSetupClaimCredential, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -81,11 +81,16 @@ test('additive failure fields stay bounded by the schema', async () => {
   const schemaDir = resolve(import.meta.dirname, '../../../schemas');
   const schemaId = 'https://schemas.dharma-ai.io/setup-claim-failure/v1';
   const report = {schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'finalize'};
-  for (const reason of ['approval_expired', 'server_rejected', 'network_unavailable', 'response_invalid', 'canceled']) {
+  for (const reason of ['approval_expired', 'server_rejected', 'network_unavailable', 'response_invalid', 'canceled', 'clock_skew']) {
     assert.equal((await validateContract(schemaDir, schemaId, {...report, reason, serverCode: 'setup_claim_expired',
       correlationId: correlation})).ok, true);
   }
-  for (const extra of [{reason: 'secret-canary'}, {serverCode: tokenShapedCode}, {correlationId: 'secret-canary'}]) {
+  for (const clockOffsetSeconds of [-172_800, 0, 901, 3_155_760_000]) {
+    assert.equal((await validateContract(schemaDir, schemaId, {...report, phase: 'challenge', reason: 'clock_skew',
+      clockOffsetSeconds})).ok, true);
+  }
+  for (const extra of [{reason: 'secret-canary'}, {serverCode: tokenShapedCode}, {correlationId: 'secret-canary'},
+    {clockOffsetSeconds: 1.5}, {clockOffsetSeconds: '901'}, {clockOffsetSeconds: 3_155_760_001}]) {
     assert.equal((await validateContract(schemaDir, schemaId, {...report, ...extra})).ok, false);
   }
 });
@@ -131,13 +136,15 @@ test('wrong scope and expired challenges never finalize', async () => {
   }
 });
 
-async function fixture(change?: (payload: Record<string, unknown>) => void, pending = false, issuedAheadMs = 0) {
+/** serverAheadMs models a server clock that differs from this machine's clock: positive means this machine is slow. */
+async function fixture(change?: (payload: Record<string, unknown>) => void, pending = false, serverAheadMs = 0) {
   const root = await mkdtemp(resolve(tmpdir(), 'fabric-claim-synthetic-'));
   let time = Date.now(); let challenge: SetupClaimChallenge; let calls = 0; let stage = 'start';
+  const serverTime = () => time + serverAheadMs;
   const secret = `dharma_org_${'s'.repeat(48)}`;
   const memory = store(); const server = generateKeyPairSync('ed25519');
   const publicKey = server.publicKey.export({format:'jwk'}).x!;
-  const start = new Date(time-1_000).toISOString(), end = new Date(time+3_600_000).toISOString();
+  const start = new Date(serverTime()-1_000).toISOString(), end = new Date(serverTime()+3_600_000).toISOString();
   const unsigned = { schema: 'dharma.server-signing-keyset/v1' as const, organizationId: scope.organizationId,
     generation: 1, keys: [{keyVersion: 'kms/1', publicKeyEd25519: publicKey, status: 'active' as const,
       notBefore: start, notAfter: end}], signedByKeyVersion: 'kms/1', issuedAt: start, expiresAt: end };
@@ -153,8 +160,8 @@ async function fixture(change?: (payload: Record<string, unknown>) => void, pend
         credentialEncryptionPublicKey: sent.credentialEncryptionPublicKey, repositoryFingerprint: scope.repositoryFingerprint,
         mode:'source', policyRevision:scope.policyRevision, scopeDigest:scope.scopeDigest, contractDigest:scope.contractDigest,
         method:'POST', path:'/api/v1/agent-fabric/bootstrap/setup-claim', nonce:Buffer.alloc(32,1).toString('base64url'),
-        authenticator:Buffer.alloc(32,2).toString('base64url'), issuedAt:new Date(time+issuedAheadMs).toISOString(),
-        expiresAt:new Date(time+60_000).toISOString()};
+        authenticator:Buffer.alloc(32,2).toString('base64url'), issuedAt:new Date(serverTime()).toISOString(),
+        expiresAt:new Date(serverTime()+60_000).toISOString()};
       return Response.json({ok:true,challenge,device:sent.device});
     }
     stage = 'challenge-check'; assert.deepEqual(sent.challenge, challenge);
@@ -167,7 +174,7 @@ async function fixture(change?: (payload: Record<string, unknown>) => void, pend
       expiresAt:challenge.expiresAt, repositoryFingerprint:challenge.repositoryFingerprint,
       fingerprint:`sha256:${createHash('sha256').update(Buffer.from(challenge.publicKeyEd25519,'base64url')).digest('hex')}`,
       };
-      stage = 'approval-check'; parseSetupClaimRecipientApproval(expectedApproval,challenge,sent.signature,sent.device,time);
+      stage = 'approval-check'; parseSetupClaimRecipientApproval(expectedApproval,challenge,sent.signature,sent.device,serverTime());
       stage = 'approval-verified';
       return Response.json({ok:false,status:'recipient_approval_required',approval:expectedApproval},{status:409});
     }
@@ -225,41 +232,71 @@ test('successful setup emits no failure diagnostic', async () => {
     assert.equal(observations, 0);
   } finally { await rm(f.root, {recursive: true, force: true}); }
 });
-test('small server clock lead waits for strict time validity before approval or finalize', async t => {
-  for (const lead of [2208, 5000]) await t.test(`lead_${lead}ms`, async () => {
-    const f = await fixture(undefined, true, lead); const waits: number[] = [];
+test('client clock skew is corrected from the challenge round trip without waiting', async t => {
+  // Positive: this machine's clock is slow (the reported case was about 9.5 s slow); negative: it is fast.
+  for (const skew of [2208, 5000, 9_500, -9_500, 600_000, -600_000]) await t.test(`server_ahead_${skew}ms`, async () => {
+    const f = await fixture(undefined, true, skew); const waits: number[] = []; const reports: unknown[] = [];
     try {
-      const result = await claimSetupReference({...f.input, sleep: async ms => { waits.push(ms); f.advance(ms); }});
-      assert.equal(waits[0], lead);
+      const result = await claimSetupReference({...f.input, onFailureDiagnostic: report => { reports.push(report); },
+        sleep: async ms => { waits.push(ms); f.advance(ms); }});
+      assert.deepEqual(reports, []);
+      assert.deepEqual(waits, [3_000]);
       assert.equal(result.config.setupClaimReference, scope.setupReference);
       assert.equal(f.calls, 3);
+      assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}), f.secret);
     } finally { await rm(f.root,{recursive:true,force:true}); }
   });
 });
-test('future challenge never weakens scope, expiry, maximum wait or a stalled local clock', async t => {
-  for (const kind of ['excessive_lead', 'deadline', 'stalled_clock', 'expiry', 'wrong_scope'] as const) {
-    await t.test(kind, async () => {
-      const f = await fixture(undefined, false, kind === 'excessive_lead' ? 5001 : 2208);
-      let waits = 0;
-      const fetcher: typeof fetch = async (url, init) => {
-        const response = await f.input.fetcher(url, init);
-        if (kind !== 'wrong_scope') return response;
-        const body = await response.json() as {challenge: Record<string, unknown>};
-        body.challenge.scopeDigest = `sha256:${'d'.repeat(64)}`;
-        return Response.json(body);
-      };
+test('client clock skew too large to correct fails as clock_skew naming the measured offset', async t => {
+  const cases: Array<[number, RegExp]> = [[2 * 86_400_000, /clock is about 2 days behind Dharma's time/],
+    [-2 * 86_400_000, /clock is about 2 days ahead of Dharma's time/], [901_000, /clock is about 15 minutes behind Dharma's time/]];
+  for (const [skew, words] of cases) await t.test(`server_ahead_${skew}ms`, async () => {
+    const f = await fixture(undefined, true, skew); const reports: unknown[] = []; let waits = 0;
+    try {
+      await assert.rejects(claimSetupReference({...f.input, onFailureDiagnostic: report => { reports.push(report); },
+        sleep: async ms => { waits++; f.advance(ms); }}), /^Error: setup_claim_failed$/);
+      assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'challenge',
+        reason: 'clock_skew', clockOffsetSeconds: Math.round(skew / 1_000)}]);
+      const message = setupClaimFailureMessage(reports[0] as never) ?? '';
+      assert.match(message, /^setup_claim_failed \(clock_skew\): /);
+      assert.match(message, words);
+      assert.doesNotMatch(message, /could not be verified/);
+      assert.equal(f.calls, 1); assert.equal(waits, 0);
+      await assert.rejects(readFile(f.input.configPath), {code:'ENOENT'});
+      assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}), null);
+    } finally { await rm(f.root,{recursive:true,force:true}); }
+  });
+});
+test('skew correction still enforces challenge expiry and scope in server time', async t => {
+  const wrongScope = (f: Awaited<ReturnType<typeof fixture>>): typeof fetch => async (url, init) => {
+    const body = await (await f.input.fetcher(url, init)).json() as {challenge: Record<string, unknown>};
+    body.challenge.scopeDigest = `sha256:${'d'.repeat(64)}`;
+    return Response.json(body);
+  };
+  for (const skew of [600_000, -600_000]) {
+    await t.test(`expiry_${skew}ms`, async () => {
+      const f = await fixture(undefined, true, skew);
       try {
-        await assert.rejects(claimSetupReference({...f.input, fetcher,
-          maximumWaitMs: kind === 'deadline' ? 2000 : 900_000,
-          sleep: async ms => { waits++; if (kind !== 'stalled_clock') f.advance(kind === 'expiry' ? 60_001 : ms); },
-        }), /^Error: setup_claim_failed$/);
-        assert.equal(f.calls, 1);
-        assert.equal(waits, ['stalled_clock','expiry'].includes(kind) ? 1 : 0);
-        await assert.rejects(readFile(f.input.configPath), {code:'ENOENT'});
+        await assert.rejects(claimSetupReference({...f.input, onRecipientApprovalRequired: () => f.advance(60_001)}),
+          /^Error: setup_claim_failed$/);
+        assert.equal(f.calls, 2);
         assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}), null);
+        await assert.rejects(readFile(f.input.configPath), {code:'ENOENT'});
       } finally { await rm(f.root,{recursive:true,force:true}); }
     });
   }
+  // A mis-bound challenge is reported as an invalid response even when its timestamps are far off.
+  for (const skew of [600_000, 2 * 86_400_000]) await t.test(`wrong_scope_${skew}ms`, async () => {
+    const f = await fixture(undefined, false, skew); const reports: unknown[] = [];
+    try {
+      await assert.rejects(claimSetupReference({...f.input, fetcher: wrongScope(f),
+        onFailureDiagnostic: report => { reports.push(report); }}), /^Error: setup_claim_failed$/);
+      assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'challenge',
+        reason: 'response_invalid'}]);
+      assert.equal(f.calls, 1);
+      assert.equal(await loadOrganizationApiToken({...scope,store:f.memory}), null);
+    } finally { await rm(f.root,{recursive:true,force:true}); }
+  });
 });
 test('nonTTY claim signs exact approval request and stores credential without returning it', async () => {
   const f = await fixture(undefined,true); let approvals=0;
