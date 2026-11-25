@@ -140,6 +140,22 @@ if (validateAgentEvent({ ...hermesAgentEvent, provider: 'unregistered-provider' 
   throw new Error('Agent event schema accepted an unregistered provider.');
 }
 
+const validateClaudeStartFailure = ajv.getSchema('https://schemas.dharma-ai.io/claude-session-start-failure/v1');
+const claudeStartFailure = { schema: 'dharma.claude-session-start-failure/v1', sessionId: '11111111-1111-4111-8111-111111111111',
+  cwd: '/example/project \'"$(x);& é', at: '2026-11-25T09:00:00.000Z', state: 'failed', reason: 'cli_exit_2' };
+if (!validateClaudeStartFailure?.(claudeStartFailure)
+  || !validateClaudeStartFailure({ ...claudeStartFailure, state: 'pending', reason: 'did_not_finish' })
+  || !validateClaudeStartFailure({ ...claudeStartFailure, reason: 'cli_outdated' })) {
+  throw new Error(`Claude SessionStart failure note is invalid: ${ajv.errorsText(validateClaudeStartFailure?.errors)}`);
+}
+for (const override of [{ recovery: "echo '{}' | dharma hook claude session-start" }, { state: 'pending' },
+  { state: 'failed', reason: 'did_not_finish' }, { reason: 'see https://example.test' }, { sessionId: 'x;rm' },
+  { at: 'yesterday' }, { cwd: '' }]) {
+  if (validateClaudeStartFailure({ ...claudeStartFailure, ...override })) {
+    throw new Error('Claude SessionStart failure note schema accepted shell text, an extra field, or a mismatched state and reason.');
+  }
+}
+
 const runtimeTaskSchema = JSON.parse(await readFile(resolve(root, 'packages/contracts/src/task-envelope.schema.json'), 'utf8'));
 const canonicalTaskSchema = JSON.parse(await readFile(resolve(schemaDir, 'task-envelope.schema.json'), 'utf8'));
 if (JSON.stringify(runtimeTaskSchema) !== JSON.stringify(canonicalTaskSchema)) {
