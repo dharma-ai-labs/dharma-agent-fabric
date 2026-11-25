@@ -28,7 +28,7 @@ Naming is the user's consent, not yours. Never pass `--yes` until the user has g
    dharma sessions attach --provider claude --current --name <name> --yes
    ```
 
-5. Report the returned `name`, `state`, `delivery` (`claude_hook`) and `revision`. If it fails with `claude_current_session_unavailable` or `claude_current_session_ambiguous`, tell the user to restart this Claude Code session with the preview plugin enabled, so its SessionStart hook can record the session, and try again.
+5. Report the returned `name`, `state`, `delivery` (`claude_hook`) and `revision`. If it fails with `claude_current_session_unavailable`, the SessionStart hook did not record this session: show the user the rest of the error, which says why when it knows (for example the hook timed out) and gives the one-line recovery. Offer to restart this Claude Code session, or, with the user's yes, run that exact `... | dharma hook claude session-start` line, then try the attach again. If it fails with `claude_current_session_ambiguous`, tell the user to restart this Claude Code session with the preview plugin enabled and try again.
 
 ## Messages after naming
 

@@ -46,6 +46,16 @@ if (args.includes('--help') || args.includes('-h')) {
       process.exitCode = child.status ?? 1;
     }
   }
+} else if (args.length === 3 && args[0] === 'hook' && args[1] === 'claude' && args[2] === 'session-start') {
+  // The Claude SessionStart hook runs at every session start, often beside other plugins' hooks, under a timeout.
+  // It only writes the local session record (no device, no network), so it skips loading the whole CLI.
+  captureCredentialEnvironment();
+  const { claudeHookCommand, readHookStdin } = await import('./claudeSessionHook.js');
+  const unavailable = () => Promise.reject(new Error('claude_session_start_is_local_only'));
+  const output = await claudeHookCommand('session-start', { stdin: () => readHookStdin(process.stdin),
+    host: { home: defaultDharmaHome(), cwd: process.cwd(), env: process.env, now: () => new Date(),
+      device: unavailable, transport: unavailable } });
+  process.stdout.write(output, () => process.exit(0));
 } else {
   // Read credential variables once and keep them out of the environment that children inherit.
   captureCredentialEnvironment();

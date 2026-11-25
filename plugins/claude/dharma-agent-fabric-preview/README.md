@@ -6,7 +6,7 @@
 
 | Component | Purpose |
 | --- | --- |
-| `SessionStart` hook | Runs `dharma hook claude session-start`: records this session's id and working directory on this device only, and exports the id to later Bash calls, so `dharma sessions attach --current` names exactly this session. No network call. Prints nothing. |
+| `SessionStart` hook | Runs `dharma hook claude session-start`: records this session's id and working directory on this device only, and exports the id to later Bash calls, so `dharma sessions attach --current` names exactly this session. No network call. Prints nothing when the session is recorded. If it is not (a missing or failing CLI, or a stall past 25 s of its 30 s timeout), it still exits 0, shows one message with the one-line recovery, and leaves a local note under `session-messages/claude-session-start-failures/` that `dharma sessions attach` explains. |
 | `UserPromptSubmit` hook | Runs `dharma hook claude inbox`: only when this prompt's session id is the attached session, pulls new messages, verifies each signed envelope, reports it delivered (`claude_hook`) and adds it as context, framed as untrusted text. In every other case (no CLI, not attached, a different session, messaging off, any error) it exits 0, prints nothing and pulls nothing. It never acknowledges a message. |
 | Skill `name-session` | Wraps `dharma sessions attach --provider claude --current --name <name>`: a `--dry-run` plan first, then `--yes` only after the user's explicit approval. |
 
