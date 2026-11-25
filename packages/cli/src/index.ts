@@ -6934,6 +6934,10 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   const organizationId = required(flags, 'organization-id');
   const policyRevision = required(flags, 'policy-revision');
   const requestedHqUrl = normalizeHqUrl(portalUrl(flags));
+  const providerIds = parseSelectedProviderIds(typeof flags.get('providers') === 'string'
+    ? [String(flags.get('providers'))]
+    : typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []);
+  const repositoryKey = typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null;
   let config = await readDeviceConfig();
   if (!config) {
     if (currentBootstrapHostScope()) throw new Error('codex_setup_host_enrollment_missing');
@@ -6950,7 +6954,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
         ok: true,
         stage: 'approve_device',
         enrollment,
-        nextCommand: `dharma onboard --resume --organization-id ${organizationId} --workspace . --policy-revision ${policyRevision}`,
+        nextCommand: onboardingResumeCommand({ organizationId, policyRevision, repositoryKey, providerIds }),
       };
     }
     config = await readDeviceConfig();
@@ -6963,10 +6967,6 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     throw new Error('This device is enrolled to a different Dharma portal origin. Use a separate DHARMA_HOME for each portal origin.');
   }
   const hqUrl = config.hqUrl;
-  const providerIds = parseSelectedProviderIds(typeof flags.get('providers') === 'string'
-    ? [String(flags.get('providers'))]
-    : typeof flags.get('provider') === 'string' ? [String(flags.get('provider'))] : []);
-  const repositoryKey = typeof flags.get('repository-key') === 'string' ? String(flags.get('repository-key')) : null;
   const registryState = await inspectRegistryRecoveryFile<WorkspaceRecord>(workspaceRegistryPath());
   if (registryState.kind === 'corrupt_zero') {
     const anchor = await inspectOwnedRelayAutostart({ home: dharmaHome() });
