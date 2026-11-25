@@ -13,6 +13,8 @@ import {
   readSessionAttachment,
   recordClaudeSessionStart,
   sessionNamesCommand,
+  sessionStatePath,
+  writeSessionStateFile,
   type SessionMessageTransport,
   type SessionMessagingHost,
 } from './sessionNames.js';
@@ -136,6 +138,58 @@ test('claude --current without the hook environment needs exactly one SessionSta
   try {
     await assert.rejects(sessionNamesCommand('attach', flags([['provider', 'claude'], ['current', true],
       ['name', 'ops-claude'], ['yes', true]]), g.host), /claude_current_session_unavailable/);
+  } finally { await g.cleanup(); }
+});
+
+// Live: the SessionStart hook was cancelled at its timeout and attach said only claude_current_session_unavailable.
+// The code stays first and unchanged; the message then says the hook did not record the session, why when the
+// launcher left a note, and the one-line recovery.
+test('claude attach without a SessionStart record explains why and gives the one-line recovery, keeping the error code', async () => {
+  const recovery = (id: string, cwd: string) => `echo '${JSON.stringify({ session_id: id, cwd })}' | dharma hook claude session-start`;
+  const attachCurrent = (host: SessionMessagingHost) => sessionNamesCommand('attach', flags([['provider', 'claude'],
+    ['current', true], ['name', 'ops-claude'], ['yes', true]]), host);
+  const note = (home: string, sessionId: string, cwd: string, state: 'pending' | 'failed', reason: string) =>
+    writeSessionStateFile(sessionStatePath(home, 'claude-session-start-failures', `${sessionId}.json`), {
+      schema: 'dharma.claude-session-start-failure/v1', sessionId, cwd, at: '2026-11-10T09:00:00.000Z', state, reason,
+      recovery: recovery(sessionId, cwd) });
+  const f = await fixture();
+  try {
+    // No note at all (an older plugin, or the hook never ran): restart, or run the hook command by hand.
+    await assert.rejects(attachCurrent(f.host), (error: unknown) => {
+      const { message } = error as Error;
+      assert.match(message, /^claude_current_session_unavailable: /);
+      assert.match(message, /SessionStart hook did not record this session/);
+      assert.match(message, /[Rr]estart this Claude Code session/);
+      assert.match(message, /dharma hook claude session-start/);
+      return true;
+    });
+    // A note for another directory is not this session's.
+    const elsewhere = randomUUID();
+    await note(f.home, elsewhere, join(f.home, 'elsewhere'), 'failed', 'cli_exit_2');
+    await assert.rejects(attachCurrent(f.host), (error: unknown) => !(error as Error).message.includes(elsewhere));
+    // A hook killed at its timeout leaves its pending note.
+    const killed = randomUUID();
+    await note(f.home, killed, f.host.cwd, 'pending', 'did_not_finish');
+    await assert.rejects(attachCurrent(f.host), (error: unknown) => {
+      const { message } = error as Error;
+      assert.match(message, /^claude_current_session_unavailable: /);
+      assert.match(message, /did not finish/);
+      assert.ok(message.includes(recovery(killed, f.host.cwd)), message);
+      return true;
+    });
+    assert.equal(f.deviceReads(), 0);
+  } finally { await f.cleanup(); }
+  const sessionId = randomUUID();
+  const g = await fixture({ env: { DHARMA_CLAUDE_SESSION_ID: sessionId } });
+  try {
+    await note(g.home, sessionId, g.host.cwd, 'failed', 'cli_exit_2');
+    await assert.rejects(attachCurrent(g.host), (error: unknown) => {
+      const { message } = error as Error;
+      assert.match(message, /^claude_current_session_unavailable: /);
+      assert.match(message, /cli_exit_2/);
+      assert.ok(message.includes(recovery(sessionId, g.host.cwd)), message);
+      return true;
+    });
   } finally { await g.cleanup(); }
 });
 

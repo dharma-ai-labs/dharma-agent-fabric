@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { sessionNamesCommand, type SessionMessagingHost } from './sessionNames.js';
 
 function repositoryRoot() {
   let directory = dirname(fileURLToPath(import.meta.url));
@@ -49,11 +51,15 @@ test('the preview has exactly SessionStart and UserPromptSubmit hooks, guarded t
     assert.equal(hooks[event]![0]!.hooks.length, 1);
     const hook = hooks[event]![0]!.hooks[0]!;
     assert.equal(hook.type, 'command');
-    assert.ok(Number(hook.timeout) > 0 && Number(hook.timeout) <= 15);
     return String(hook.command);
   };
   const start = command('SessionStart');
   const inbox = command('UserPromptSubmit');
+  // Live: two Claude Code windows started together, beside other plugins' SessionStart hooks, ran this hook for 10.7 s.
+  // At 10 s Claude Code cancelled it and the session was never recorded. 30 s leaves room for a cold, busy machine.
+  assert.equal(hooks.SessionStart![0]!.hooks[0]!.timeout, 30);
+  const inboxTimeout = Number(hooks.UserPromptSubmit![0]!.hooks[0]!.timeout);
+  assert.ok(inboxTimeout > 0 && inboxTimeout <= 15);
   assert.equal(start, 'node "${CLAUDE_PLUGIN_ROOT}/hooks/dharma-hook.mjs" session-start');
   assert.equal(inbox, 'node "${CLAUDE_PLUGIN_ROOT}/hooks/dharma-hook.mjs" inbox');
 });
@@ -118,6 +124,92 @@ test('hook commands need no POSIX shell: no &&, command -v or /dev/null, and the
   } finally {
     for (const directory of [missing, older, notAttached]) rmSync(directory, { recursive: true, force: true });
   }
+});
+
+// A fake `dharma` that records which SessionStart notes existed while it ran, then acts as FAKE_MODE says:
+// `fail` exits 2, `silent` exits 0 without a record (a CLI that swallowed its own error), `record` writes the record.
+const FAKE_CLI = `import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const sessions = join(process.env.DHARMA_HOME, 'session-messages');
+const input = JSON.parse(readFileSync(0, 'utf8'));
+const notes = join(sessions, 'claude-session-start-failures');
+let seen = [];
+try { seen = readdirSync(notes).map(name => JSON.parse(readFileSync(join(notes, name), 'utf8'))); } catch {}
+if (process.env.FAKE_SEEN) writeFileSync(process.env.FAKE_SEEN, JSON.stringify(seen));
+if (process.env.FAKE_MODE === 'record') {
+  mkdirSync(join(sessions, 'claude-sessions'), { recursive: true });
+  writeFileSync(join(sessions, 'claude-sessions', input.session_id + '.json'), JSON.stringify({
+    schema: 'dharma.claude-session-start/v1', sessionId: input.session_id, cwd: input.cwd, at: new Date().toISOString() }));
+}
+process.exit(process.env.FAKE_MODE === 'fail' ? 2 : 0);
+`;
+
+// Live: Claude Code cancelled this hook at its timeout, the launcher stayed silent, no record was written and
+// `dharma sessions attach --current` later failed with a bare claude_current_session_unavailable. A SessionStart that
+// leaves no record must say so (a systemMessage; still exit 0, so the session is never blocked) and leave a note,
+// written before the CLI runs, that attach turns into the reason and a one-line recovery.
+test('a SessionStart the CLI does not record is reported, leaves a note for attach, and still exits 0', async () => {
+  const pluginRoot = join(root, PREVIEW);
+  const launcher = join(pluginRoot, 'hooks', 'dharma-hook.mjs');
+  const windows = process.platform === 'win32';
+  const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+  const work = mkdtempSync(join(tmpdir(), 'dharma-hook-start-'));
+  try {
+    const cwd = join(work, 'project');
+    const cli = join(work, 'cli');
+    const missing = join(work, 'no-cli');
+    for (const directory of [cwd, cli, missing]) mkdirSync(directory);
+    writeFileSync(join(cli, 'fake.mjs'), FAKE_CLI);
+    if (windows) writeFileSync(join(cli, 'dharma.cmd'), '@echo off\r\nnode "%~dp0fake.mjs" %*\r\nexit /b %ERRORLEVEL%\r\n');
+    else writeFileSync(join(cli, 'dharma'), '#!/bin/sh\nexec node "$(dirname "$0")/fake.mjs" "$@"\n', { mode: 0o755 });
+    const recovery = (id: string) => `echo '${JSON.stringify({ session_id: id, cwd })}' | dharma hook claude session-start`;
+    const start = (mode: string, cliDirectory = cli) => {
+      const home = join(work, `home-${mode}`);
+      const sessionId = randomUUID();
+      const seen = join(work, `seen-${mode}.json`);
+      const result = spawnSync(process.execPath, [launcher, 'session-start'], { encoding: 'utf8', windowsHide: true, timeout: 60_000,
+        input: JSON.stringify({ session_id: sessionId, cwd, hook_event_name: 'SessionStart', source: 'startup' }),
+        env: { PATH: [cliDirectory, dirname(process.execPath), ...(windows ? [join(systemRoot, 'System32')] : ['/usr/bin', '/bin'])]
+          .join(delimiter), DHARMA_HOME: home, FAKE_MODE: mode, FAKE_SEEN: seen, CLAUDE_PLUGIN_ROOT: pluginRoot,
+        ...(windows ? { SystemRoot: systemRoot, ComSpec: join(systemRoot, 'System32', 'cmd.exe'), PATHEXT: '.COM;.EXE;.BAT;.CMD' } : {}) } });
+      const notePath = join(home, 'session-messages', 'claude-session-start-failures', `${sessionId}.json`);
+      const note = existsSync(notePath) ? JSON.parse(readFileSync(notePath, 'utf8')) as Record<string, unknown> : null;
+      return { home, sessionId, result, note,
+        seen: existsSync(seen) ? JSON.parse(readFileSync(seen, 'utf8')) as Array<Record<string, unknown>> : null };
+    };
+    const reported = (run: ReturnType<typeof start>, reason: RegExp) => {
+      assert.equal(run.result.status, 0, 'never blocks the session');
+      assert.equal(run.result.stderr, '');
+      const message = String((JSON.parse(run.result.stdout) as Record<string, unknown>).systemMessage);
+      assert.match(message, /SessionStart hook did not record this session/);
+      assert.ok(message.includes(recovery(run.sessionId)), message);
+      assert.deepEqual({ ...(run.note ?? {}), at: undefined, reason: undefined }, { schema: 'dharma.claude-session-start-failure/v1',
+        sessionId: run.sessionId, cwd, at: undefined, state: 'failed', reason: undefined, recovery: recovery(run.sessionId) });
+      assert.match(String(run.note!.reason), reason);
+    };
+    const failed = start('fail');
+    reported(failed, /^cli_exit_2$/);
+    assert.deepEqual(failed.seen!.map(note => [note.sessionId, note.state]), [[failed.sessionId, 'pending']],
+      'the note exists before the CLI runs, so a hook killed at its timeout still leaves it');
+    reported(start('silent'), /^record_missing$/);
+    reported(start('missing', missing), /^(cli_unavailable|cli_exit_\d+)$/);
+    const recorded = start('record');
+    assert.deepEqual([recorded.result.status, recorded.result.stdout, recorded.result.stderr], [0, '', '']);
+    assert.equal(recorded.note, null, 'a recorded session leaves no note');
+    // attach reads the note: the stable code first, then why and the exact one-line recovery.
+    const host: SessionMessagingHost = { home: failed.home, cwd, env: {}, now: () => new Date(),
+      device: async () => { throw new Error('device_must_not_be_read'); },
+      transport: async () => { throw new Error('transport_must_not_open'); } };
+    await assert.rejects(sessionNamesCommand('attach', new Map<string, string | boolean>([['provider', 'claude'], ['current', true],
+      ['name', 'ops-claude'], ['yes', true]]), host), (error: unknown) => {
+      const { message } = error as Error;
+      assert.match(message, /^claude_current_session_unavailable: /);
+      assert.match(message, /SessionStart hook/);
+      assert.match(message, /cli_exit_2/);
+      assert.ok(message.includes(recovery(failed.sessionId)), message);
+      return true;
+    });
+  } finally { rmSync(work, { recursive: true, force: true }); }
 });
 
 test('the name-session skill wraps the CLI and leaves the consent to the user', () => {
