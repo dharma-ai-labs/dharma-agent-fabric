@@ -145,3 +145,13 @@ test('CLI pins provider-adapters, evidence-reduction, task-runner and local-vaul
   assert.equal(vault.dependencies[evidence.name], evidence.version);
   for (const runtime of [provider, evidence, runner, vault]) assert.equal(cli.dependencies[runtime.name], runtime.version);
 });
+
+test('CLI pins a relay client published with setup claim clock-skew correction', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const relay = await manifest('relay-client'), cli = await manifest('cli');
+  // 0.2.40 is on npm with a setup claim that fails as response_invalid when this machine's clock is more
+  // than 5 s behind the server, and without the clock_skew reason. #542 corrects up to 45 s and reports
+  // clock_skew with clockOffsetSeconds beyond that; an installed CLI gets it only when it pins a later relay-client.
+  assert.ok(relay.version.localeCompare('0.2.41', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} has no clock-skew correction`);
+  assert.equal(cli.dependencies[relay.name], relay.version);
+});
