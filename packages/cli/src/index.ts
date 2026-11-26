@@ -7033,6 +7033,16 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   if (connectSelection && !keepsEveryAdapter) {
     await recordConnectedProviderScope(registered.workspaceId, connectSelection);
   }
+  // This connect's `providers` output lists only the providers it named, so it says when the relay registers more.
+  const scopeRecordPath = resolve(dharmaHome(), 'registry', 'connected-providers', `${registered.workspaceId}.json`);
+  const providerScope = keepsEveryAdapter && connectSelection ? {
+    recorded: false,
+    relayRegisters: 'every_installed',
+    reason: 'workspace_has_no_recorded_selection',
+    recordPath: scopeRecordPath,
+    message: 'This repository already serves every installed provider, so its relay keeps registering all of them. '
+      + `To keep it to ${connectSelection.join(', ')}, write ${JSON.stringify(connectSelection)} to ${scopeRecordPath}.`,
+  } : undefined;
   const synced = prepared.synchronized as Record<string, unknown>;
   const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
   const authoritativeRevision = String(localPolicy?.revision || policyRevision);
@@ -7049,7 +7059,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   } catch {
     return { ok: false, stage: 'repository_source_authorization_required', organizationId,
       workspaceId: registered.workspaceId, code: 'repository_source_policy_unavailable',
-      sharedRepositoryReady: false, localInventoryFallback: false };
+      sharedRepositoryReady: false, localInventoryFallback: false, ...(providerScope ? { providerScope } : {}) };
   }
   const boundRepository = registered;
   const onboardWorkspaceId = registered.workspaceId;
@@ -7211,6 +7221,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     },
     deviceId: config.deviceId,
     providers,
+    ...(providerScope ? { providerScope } : {}),
     organizationPolicy: {
       path: '.dharma/approved-policy.json',
       revision: generatedPolicy.revision,

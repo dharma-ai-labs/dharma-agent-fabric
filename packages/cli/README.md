@@ -447,7 +447,9 @@ up, and a connect without `--provider` returns it to every provider. A
 repository that already serves every provider, because `dharma setup` or a
 connect without `--provider` registered it, keeps every provider when a later
 connect names some of them. So does a repository connected with `--provider` by
-CLI 0.2.228 or earlier, because those releases recorded no selection. To keep
+CLI 0.2.228 or earlier, because those releases recorded no selection. Such a
+connect says so in its output: `providerScope.relayRegisters` is
+`every_installed`, and `providerScope.recordPath` is the record file. To keep
 such a repository to some providers, write their names as a JSON array, for
 example `["codex"]`, to
 `$DHARMA_HOME/registry/connected-providers/<workspaceId>.json` (`DHARMA_HOME`
