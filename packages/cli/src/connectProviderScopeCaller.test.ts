@@ -58,7 +58,7 @@ async function fixture(t: test.TestContext) {
   const registrations: Array<string[] | null> = [];
   const fabric = { config: {} };
   const dependencies: Row = {
-    resolve, dirname, basename, readFile, parseSelectedProviderIds, onboardingResumeCommand,
+    resolve, dirname, basename, readFile, rm, parseSelectedProviderIds, onboardingResumeCommand,
     UUID_PATTERN: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     isLocalProviderId: (value: string) => LOCAL_PROVIDER_IDS.includes(value),
     dharmaHome: () => home,
@@ -118,7 +118,15 @@ async function fixture(t: test.TestContext) {
   const relayPolicyRefresh = () => source.syncWorkspacePolicy!(fabric, rows[0], policyRevision, true);
   const transmissionRefresh = () => source.refreshVerifiedWorkspacePolicyForTransmission!(
     resolve(repo, '.dharma', 'approved-policy.json'), workspaceId, fabric);
-  return { home, dependencies, registrations, connect, relayPolicyRefresh, transmissionRefresh };
+  // `dharma setup` onboards with the singular `provider`, which names no connect selection.
+  const setup = async (provider: string) => {
+    const flags = new Map<string, string | boolean>([
+      ['workspace', repo], ['organization-id', organizationId], ['policy-revision', policyRevision],
+      ['repository-key', 'fixture-repository'], ['provider', provider],
+    ]);
+    return JSON.parse(JSON.stringify(await source.onboard!(flags))) as Row;
+  };
+  return { home, dependencies, registrations, connect, setup, relayPolicyRefresh, transmissionRefresh };
 }
 
 test('after a refused connect that selected codex, the relay and transmission refreshes register codex only', async t => {
@@ -148,6 +156,29 @@ test('a connect without --provider leaves the relay registering every adapter, a
   await f.relayPolicyRefresh();
   await f.transmissionRefresh();
   assert.deepEqual(f.registrations, [null, null, null]);
+});
+
+// Setup and a connect without --provider name no connect selection. On a workspace whose connect recorded one,
+// setup adds its provider to it and a plain connect returns the relay to every adapter, so neither has the relay's
+// next refresh drop the provider that run just registered.
+test('setup after a connect with --provider adds its provider to what the relay registers', async t => {
+  const f = await fixture(t);
+  await f.connect('codex');
+  const setup = await f.setup('claude');
+  assert.equal(setup.stage, 'repository_source_authorization_required');
+  await f.relayPolicyRefresh();
+  await f.transmissionRefresh();
+  assert.deepEqual(f.registrations, [['codex'], ['claude'], ['codex', 'claude'], ['codex', 'claude']]);
+});
+
+test('a plain connect after a connect with --provider returns the relay to every adapter', async t => {
+  const f = await fixture(t);
+  await f.connect('codex');
+  await f.connect();
+  await f.relayPolicyRefresh();
+  await f.transmissionRefresh();
+  assert.deepEqual(f.registrations, [['codex'], null, null, null]);
+  assert.deepEqual(await findScopeFiles(f.home), []);
 });
 
 test('a connect waiting for device approval resumes with the same providers and repository key', async t => {
