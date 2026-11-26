@@ -6116,11 +6116,20 @@ async function connectedProviderScope(workspaceId: string): Promise<ProviderId[]
   return selected.length ? selected : null;
 }
 
-/** Adds a connect's provider selection to the one recorded for the workspace. A later connect removes none. */
+/**
+ * Adds a connect's provider selection, or setup's provider, to the one recorded for the workspace. A later connect
+ * with `--provider` removes none; a connect without it clears the record with clearConnectedProviderScope.
+ */
 async function recordConnectedProviderScope(workspaceId: string, providerIds: ProviderId[]) {
   if (!UUID_PATTERN.test(workspaceId)) throw new Error('Workspace identifier is invalid.');
   const selected = [...new Set([...((await connectedProviderScope(workspaceId)) ?? []), ...providerIds])];
   await writeJsonAtomic(resolve(dharmaHome(), 'registry', 'connected-providers', `${workspaceId}.json`), selected);
+}
+
+/** Removes a workspace's recorded selection, so its relay registers every adapter again. */
+async function clearConnectedProviderScope(workspaceId: string) {
+  if (!UUID_PATTERN.test(workspaceId)) throw new Error('Workspace identifier is invalid.');
+  await rm(resolve(dharmaHome(), 'registry', 'connected-providers', `${workspaceId}.json`), { force: true });
 }
 
 // Provider probes spawn up to six blocking commands, and the relay autostart report can
@@ -6985,6 +6994,19 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     path: workspace,
     repositoryRemoteHash: repositoryIdentity.fingerprint,
   });
+  // Only `repositories connect --provider` passes `providers`. Setup passes `provider`, and a plain connect neither.
+  const connectSelection = providerIds && typeof flags.get('providers') === 'string' ? providerIds : null;
+  const recordedSelection = registered ? await connectedProviderScope(registered.workspaceId) : null;
+  // A workspace registered without a recorded selection (by setup, a plain connect or an earlier release) has its
+  // relay register every adapter. A later connect that names fewer providers leaves it that way and removes none.
+  const keepsEveryAdapter = connectSelection !== null && registered !== null && recordedSelection === null;
+  // On a workspace whose connect recorded a selection, setup adds its provider to the record and a plain connect
+  // removes the record, so the relay registers every adapter again. Both happen before this run registers the
+  // workspace, so the relay's next refresh never drops the provider this run registers.
+  if (registered && connectSelection === null && recordedSelection !== null) {
+    if (providerIds) await recordConnectedProviderScope(registered.workspaceId, providerIds);
+    else await clearConnectedProviderScope(registered.workspaceId);
+  }
   if (!registered) {
     const addFlags = new Map<string, string | boolean>([
       ['organization-id', organizationId],
@@ -6999,17 +7021,28 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       path: workspace,
       repositoryRemoteHash: repositoryIdentity.fingerprint,
     });
+    // Record a new workspace's selection at once, so a connect that stops before the record below still leaves it.
+    if (registered && connectSelection) await recordConnectedProviderScope(registered.workspaceId, connectSelection);
   }
   if (!registered) throw new Error('Workspace registration failed.');
   const fabric = await client();
   const prepared = await registerWorkspaceBeforeRepositoryBind(fabric, registered, policyRevision, providerIds);
   registered = prepared.registered;
-  // Only `repositories connect` passes `providers`. Record its selection before any step that can stop this
-  // connect, such as a source policy the owner has not allowed yet, so the relay registers no other provider.
-  // Setup passes `provider`; its relay still registers every adapter.
-  if (providerIds && typeof flags.get('providers') === 'string') {
-    await recordConnectedProviderScope(registered.workspaceId, providerIds);
+  // Record the connect's selection before any step that can stop this connect, such as a source policy the owner
+  // has not allowed yet, so the relay registers no other provider.
+  if (connectSelection && !keepsEveryAdapter) {
+    await recordConnectedProviderScope(registered.workspaceId, connectSelection);
   }
+  // This connect's `providers` output lists only the providers it named, so it says when the relay registers more.
+  const scopeRecordPath = resolve(dharmaHome(), 'registry', 'connected-providers', `${registered.workspaceId}.json`);
+  const providerScope = keepsEveryAdapter && connectSelection ? {
+    recorded: false,
+    relayRegisters: 'every_installed',
+    reason: 'workspace_has_no_recorded_selection',
+    recordPath: scopeRecordPath,
+    message: 'This repository already serves every installed provider, so its relay keeps registering all of them. '
+      + `To keep it to ${connectSelection.join(', ')}, write ${JSON.stringify(connectSelection)} to ${scopeRecordPath}.`,
+  } : undefined;
   const synced = prepared.synchronized as Record<string, unknown>;
   const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
   const authoritativeRevision = String(localPolicy?.revision || policyRevision);
@@ -7026,7 +7059,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
   } catch {
     return { ok: false, stage: 'repository_source_authorization_required', organizationId,
       workspaceId: registered.workspaceId, code: 'repository_source_policy_unavailable',
-      sharedRepositoryReady: false, localInventoryFallback: false };
+      sharedRepositoryReady: false, localInventoryFallback: false, ...(providerScope ? { providerScope } : {}) };
   }
   const boundRepository = registered;
   const onboardWorkspaceId = registered.workspaceId;
@@ -7188,6 +7221,7 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     },
     deviceId: config.deviceId,
     providers,
+    ...(providerScope ? { providerScope } : {}),
     organizationPolicy: {
       path: '.dharma/approved-policy.json',
       revision: generatedPolicy.revision,
