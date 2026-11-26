@@ -11,8 +11,8 @@ const exec = promisify(execFile);
 test('transport recovery dry-run verifies repository and target without issuing grants or keys', async t => {
   const workspace = await mkdtemp(resolve(tmpdir(), 'dharma-transport-command-'));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  await exec('git', ['init', '-q', workspace]);
-  await exec('git', ['-C', workspace, 'remote', 'add', 'origin', 'https://github.com/fixture/showcase.git']);
+  await exec('git', ['init', '-q', workspace], { windowsHide: true });
+  await exec('git', ['-C', workspace, 'remote', 'add', 'origin', 'https://github.com/fixture/showcase.git'], { windowsHide: true });
   const args = ['demo', 'transport-connect', '--hq-url', 'https://original.example', '--organization-id', 'org_fixture',
     '--repository-id', '10000000-0000-4000-8000-000000000001', '--normalized-repository', 'github.com/fixture/showcase',
     '--workspace', workspace, '--dry-run'];

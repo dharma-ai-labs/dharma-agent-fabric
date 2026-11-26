@@ -109,7 +109,7 @@ if (cli.version === preservedEvidenceProvider.newCohort.cli
     }
   }
   await walk('dist');
-  const git = async (...args) => (await execFileAsync('git', args, {cwd: root, maxBuffer: 1024 * 1024})).stdout.trim();
+  const git = async (...args) => (await execFileAsync('git', args, {cwd: root, maxBuffer: 1024 * 1024, windowsHide: true})).stdout.trim();
   const lock = JSON.parse(await readFile(resolve(root, 'package-lock.json'), 'utf8'));
   assertPreservedEvidenceProvider({cliVersion: cli.version, providerVersion: providerAdapter.version,
     taskRunnerVersion: workspaceManifests.get('@dharma-ai-labs/agent-fabric-task-runner').version,
@@ -147,7 +147,7 @@ for (const workspace of workspaceDirectories) {
   const { stdout } = await execFileAsync(
     process.execPath,
     [npmCli, 'pack', '--workspace', workspace, '--dry-run', '--json'],
-    { cwd: root, maxBuffer: 4 * 1024 * 1024 },
+    { cwd: root, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
   );
   const packed = JSON.parse(stdout)[0];
   const packedPaths = new Set(packed.files.map((file) => file.path));
@@ -171,7 +171,7 @@ if (reference.private !== true || reference.dependencies['@dharma-ai-labs/agent-
   throw new Error('Lifecycle reference must remain private and pin qualified workspace dependencies.');
 }
 const { stdout: referencePack } = await execFileAsync(process.execPath,
-  [process.env.npm_execpath, 'pack', '--workspace', 'packages/lifecycle-adapter', '--dry-run', '--json'], { cwd: root });
+  [process.env.npm_execpath, 'pack', '--workspace', 'packages/lifecycle-adapter', '--dry-run', '--json'], { cwd: root, windowsHide: true });
 const referenceFiles = new Set(JSON.parse(referencePack)[0].files.map(file => file.path));
 if ([...referenceFiles].some(file => file.includes('.test.') || /(?:\.env|config\.mjs|\.sqlite|credential|grant)/i.test(file))) {
   throw new Error('Lifecycle reference tarball contains tests or durable runtime data.');

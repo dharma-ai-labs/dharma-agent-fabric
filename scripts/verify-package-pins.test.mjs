@@ -11,7 +11,7 @@ const execute = promisify(execFile), sourceRoot = resolve(import.meta.dirname, '
 const baseline = process.env.DHARMA_PACK_VERIFIER_BASELINE_SHA;
 if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('verifier_baseline_invalid');
 const verifier = baseline
-  ? (await execute('git', ['show', `${baseline}:scripts/verify-package.mjs`], {cwd: sourceRoot})).stdout
+  ? (await execute('git', ['show', `${baseline}:scripts/verify-package.mjs`], {cwd: sourceRoot, windowsHide: true})).stdout
   : await readFile(new URL('./verify-package.mjs', import.meta.url));
 const workspaces = ['contracts', 'secure-store', 'policy', 'provider-adapters', 'better-harness-bridge',
   'evidence-reduction', 'relay-client', 'local-vault', 'task-runner', 'skill-manager', 'sdk', 'cli'];
@@ -21,7 +21,7 @@ const required = ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'LICENSES/Qoder-Better-Ha
   'packages/cli/dist/index.js', 'packages/provider-adapters/dist/knowledge-server.js',
   ...['trajectory-capsule', 'evidence-request', 'evidence-response'].map(name => `packages/cli/dist/schemas/${name}.schema.json`)];
 const preservedEvidenceManifest = JSON.parse((await execute('git',
-  ['show', `${preservedEvidenceProvider.evidence.sourceTree}:package.json`], {cwd: sourceRoot})).stdout);
+  ['show', `${preservedEvidenceProvider.evidence.sourceTree}:package.json`], {cwd: sourceRoot, windowsHide: true})).stdout);
 
 for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy', 'provider-adapters', 'relay-client', 'sdk', 'secure-store', 'skill-manager', 'task-runner', 'unknown', 'preserved-evidence', 'preserved-evidence-other-cohort']) {
   const preservedEdge = suffix.startsWith('preserved-evidence');
@@ -60,7 +60,7 @@ for (const suffix of ['contracts', 'evidence-reduction', 'local-vault', 'policy'
           await writeFile(resolve(root, 'scripts', name), await readFile(resolve(sourceRoot, 'scripts', name)));
         }
         await assert.rejects(execute(process.execPath, [resolve(root, 'scripts/verify.mjs')], {
-          cwd: root, timeout: 10_000, env: {...process.env, npm_execpath: resolve(root, 'must-not-execute.mjs')},
+          cwd: root, timeout: 10_000, env: {...process.env, npm_execpath: resolve(root, 'must-not-execute.mjs')}, windowsHide: true,
         }), error => error.code === 1 && error.stdout === ''
           && error.stderr.includes(preservedEdge ? 'preserved_evidence_manifest'
             : suffix === 'unknown' ? 'cli_runtime_package_unknown' : `cli_runtime_package_pin_invalid:${suffix}`)
@@ -111,7 +111,7 @@ test('new dependency cohort advances versions without rewriting the preserved ar
 test('one fixed preserved evidence/provider artifact edge is qualified without changing its manifest', async () => {
   const expected = preservedEvidenceProvider;
   const evidenceManifest = structuredClone(preservedEvidenceManifest);
-  const installedManifest = JSON.parse((await execute('git', ['show', 'e7f2f69a6ab2a7805b55de7cc439bb7837db14eb:packages/provider-adapters/package.json'], {cwd: sourceRoot})).stdout);
+  const installedManifest = JSON.parse((await execute('git', ['show', 'e7f2f69a6ab2a7805b55de7cc439bb7837db14eb:packages/provider-adapters/package.json'], {cwd: sourceRoot, windowsHide: true})).stdout);
   const value = {cliVersion: '0.2.213', providerVersion: '0.1.38', taskRunnerVersion: '0.1.40', relayClientVersion: '0.2.35',
     evidenceManifest, sourceTree: expected.evidence.sourceTree, worktreeChanges: '', untracked: '',
     lockEntry: {version: expected.provider.version, resolved: expected.provider.resolved, integrity: expected.provider.integrity},
@@ -141,5 +141,25 @@ test('CLI pins a relay client published with setupClaimFailureMessage', async ()
   // 0.2.36 is on npm without this export. CI links the workspace copy, but a published CLI
   // pinned to 0.2.36 would stop at module load on every command, not only setup.
   assert.ok(relay.version.localeCompare('0.2.37', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} is published without the export`);
+  assert.equal(cli.dependencies[relay.name], relay.version);
+});
+
+test('CLI pins a relay client published with serverCode and relay_response_timeout', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const relay = await manifest('relay-client'), cli = await manifest('cli');
+  // 0.2.37 and 0.2.38 are on npm without AgentFabricRequestError.serverCode and the
+  // relay_response_timeout code. The CLI loads relay-client from npm, so an installed CLI
+  // reports these #513 diagnostics only when it pins a later relay-client.
+  assert.ok(relay.version.localeCompare('0.2.39', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} is published without serverCode`);
+  assert.equal(cli.dependencies[relay.name], relay.version);
+});
+
+test('CLI pins a relay client published with the relay_connect_timeout limit', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const relay = await manifest('relay-client'), cli = await manifest('cli');
+  // 0.2.39 and earlier hold device signing control for up to 90 s while a relay connection never
+  // opens. #512 bounds that connect phase at 30 s with the relay_connect_timeout code; an installed
+  // CLI gets the shorter hold only when it pins a later relay-client.
+  assert.ok(relay.version.localeCompare('0.2.40', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} has no connect limit`);
   assert.equal(cli.dependencies[relay.name], relay.version);
 });

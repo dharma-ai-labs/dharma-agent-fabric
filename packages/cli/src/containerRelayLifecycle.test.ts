@@ -245,7 +245,7 @@ test('entrypoint starts only its owned supervisor, stops it, and reconnects afte
     containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => true, pollMs: 10, restartDelayMs: 10,
     spawnRelay: registration => {
       assert.equal(registration.policy, f.options.policy);
-      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
       children.push(child); return child;
     } });
   const watchdog = setTimeout(() => controller.abort(), 5000);
@@ -288,7 +288,7 @@ test('entrypoint relaunches a failed owned child and renews boot identity while 
     const result = run({ home: f.home, uid: f.options.uid, signal: controller.signal,
       containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => true, pollMs: 10, restartDelayMs: 10,
       spawnRelay: () => {
-        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
         children.push(child); return child;
       } });
     return { controller, result };
@@ -337,7 +337,7 @@ test('corrupt startup authority fails closed and reaps the owned child without l
   let child: ChildProcess | undefined;
   const result = run({ home: f.home, uid: f.options.uid, signal: controller.signal,
     containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => true, pollMs: 10, restartDelayMs: 10,
-    spawnRelay: () => child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }) });
+    spawnRelay: () => child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }) });
   const failure = assert.rejects(result, error => {
     assert.match(String(error), /container_startup_unavailable/);
     assert.doesNotMatch(String(error), /CANARY_PRIVATE_INPUT/);
@@ -360,7 +360,7 @@ test('locked protected consumer blocks startup without launching a relay until e
     containerRuntime: f.options.containerRuntime, pollMs: 10, restartDelayMs: 10,
     consumerStoreReady: async () => ready,
     spawnRelay: () => {
-      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
       children.push(child); return child;
     } });
   try {
@@ -445,7 +445,7 @@ test('entrypoint does not launch a registration from a different installed runti
   const controller = new AbortController(); let launches = 0,storeReads=0;
   const result = run({ home: f.home, uid: f.options.uid, signal: controller.signal,
     containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => {storeReads++;return true;}, pollMs: 10, restartDelayMs: 10,
-    spawnRelay: () => { launches++; return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); } });
+    spawnRelay: () => { launches++; return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); } });
   try{
     await until(async()=>{
       try{return JSON.parse(await readFile(join(f.home,'relay','container-heartbeat.json'),'utf8')).reason==='relay_runtime_upgrade_required';}
@@ -463,7 +463,7 @@ test('stale heartbeat and reused or foreign child identity cannot assert live st
   for (const kind of ['stale', 'reused', 'foreign-parent', 'foreign-owner']) {
     const f = await fixture(); await enableRelayAutostart(f.options);
     const control = JSON.parse(await readFile(join(f.home, 'relay', 'container-control.json'), 'utf8'));
-    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
     try {
       const identity = await lifecycle.readContainerChildIdentity(child.pid!);
       if (kind === 'foreign-parent' || kind === 'foreign-owner') {
@@ -489,7 +489,7 @@ test('concurrent owned controls are atomic and disabling reaps interrupted owned
   const controller = new AbortController(); const children: ChildProcess[] = [];
   const result = entrypoint()({ home: f.home, uid: f.options.uid, signal: controller.signal,
     containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => true, pollMs: 10, restartDelayMs: 10,
-    spawnRelay: () => { const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    spawnRelay: () => { const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
       children.push(child); return child; } });
   try {
     await until(() => children.length === 1);
@@ -520,7 +520,7 @@ test('SIGTERM to an owned process fixture shuts down and reaps its child normall
       spawnRelay: () => { const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
         process.stdout.write(JSON.stringify({ childPid: child.pid }) + '\\n'); return child; } });
   `;
-  const runner = spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const runner = spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let output = ''; let errorOutput = ''; let childPid = 0;
   runner.stdout!.on('data', data => { output += String(data); if (output.includes('\n')) childPid = JSON.parse(output.trim()).childPid; });
   runner.stderr!.on('data', data => { errorOutput += String(data); });
@@ -582,7 +582,7 @@ test('entrypoint never starts an owned child after shutdown arrives during consu
   const result = entrypoint()({ home: f.home, uid: f.options.uid, signal: controller.signal,
     containerRuntime: f.options.containerRuntime, consumerStoreReady: async () => { checking = true; return consumer; },
     pollMs: 10, restartDelayMs: 10, spawnRelay: () => { launches++;
-      return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); } });
+      return spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }); } });
   await until(() => checking); controller.abort(); release!(); await result;
   assert.equal(launches, 0);
 });
@@ -594,7 +594,7 @@ test('unverifiable freshly spawned child fails closed and is reaped through its 
   const result = entrypoint()({ home: f.home, uid: f.options.uid, signal: controller.signal,
     containerRuntime: { ...f.options.containerRuntime, childIdentity: async () => { throw new Error('CANARY_PROC_FAILURE'); } },
     consumerStoreReady: async () => true, pollMs: 10, restartDelayMs: 10,
-    spawnRelay: () => child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }) });
+    spawnRelay: () => child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }) });
   try {
     await assert.rejects(result, error => { assert.match(String(error), /container_startup_unavailable/);
       assert.doesNotMatch(String(error), /CANARY_PROC_FAILURE/); return true; });

@@ -90,7 +90,7 @@ export function nodeRuntimeCandidates(input: {
 export function launchWithRuntime(executable: string, script: string, args: string[], env: NodeJS.ProcessEnv) {
   return spawnSync(executable, [script, ...args], {
     stdio: 'inherit',
-    env: { ...env, DHARMA_NODE_BOOTSTRAPPED: '1' },
+    env: { ...env, DHARMA_NODE_BOOTSTRAPPED: '1' }, windowsHide: true,
   });
 }
 
@@ -99,7 +99,7 @@ export function nodeRuntimeVersion(executable: string) {
     return execFileSync(executable, ['--version'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5_000,
+      timeout: 5_000, windowsHide: true,
     }).trim();
   } catch {
     return '';

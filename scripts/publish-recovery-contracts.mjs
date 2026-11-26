@@ -104,12 +104,12 @@ async function publicJson(url,timeout=30000) {
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href===import.meta.url) {
   try {
     const root=resolve(import.meta.dirname,'..');
-    const git=(...values)=>execFileSync('git',values,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024}).trim();
-    const blob=path=>execFileSync('git',['show',`${baseline}:${path}`],{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024});
+    const git=(...values)=>execFileSync('git',values,{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024, windowsHide: true}).trim();
+    const blob=path=>execFileSync('git',['show',`${baseline}:${path}`],{cwd:root,encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024, windowsHide: true});
     const npm=(...values)=>{
       assert.ok(process.env.npm_execpath,'use npm run publish:recovery-contracts');
       return execFileSync(process.execPath,[process.env.npm_execpath,...values],{
-        cwd:root,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe'],maxBuffer:4*1024*1024});
+        cwd:root,encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe'],maxBuffer:4*1024*1024, windowsHide: true});
     };
     let directory;
     const packageDirectory=()=>directory ??= mkdtempSync(join(tmpdir(),'dharma-recovery-contracts-'));

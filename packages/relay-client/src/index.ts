@@ -1,3 +1,4 @@
+import {AsyncLocalStorage} from 'node:async_hooks';
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, type JsonWebKey } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -23,8 +24,10 @@ import {HostOperationFence, type HostOperationScope} from './hostOperationScope.
 import {commitSigningRecoveryJournal,resumeSigningRecoveryJournal,type SigningRecoveryJournalIO} from './signingRecoveryJournal.js';
 import {checkedRecoveryHostContext,retrieveSigningRecoveryDelivery,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 import {planSigningRecovery} from './signingRecoveryPlan.js';
-import {withDeviceSigningControl} from './deviceSigningControl.js';
-export {withDeviceSigningControl,type DeviceSigningControlLease} from './deviceSigningControl.js';
+import {handBackDeviceSigningControl,insideCallerSigningControlHold,insideDeviceSigningControlHold,outsideDeviceSigningControl,
+  withDeviceSigningControl} from './deviceSigningControl.js';
+export {withDeviceSigningControl,withDeviceSigningLineSignal,withSigningControlPerSend,type DeviceSigningControlLease}
+  from './deviceSigningControl.js';
 export {SigningRecoveryClientError,type SigningRecoveryClientPhase,type RecoverExpiredDeviceSigningTrustInput} from './signingRecoveryClient.js';
 export {progressPreparedDeviceSigningRecoveryOffer,SigningRecoveryOfferClientError,
   type ProgressPreparedDeviceSigningRecoveryOfferInput,type SigningRecoveryOfferClientPhase} from './signingRecoveryOfferClient.js';
@@ -36,6 +39,7 @@ export type {HostOperationScope} from './hostOperationScope.js';
 export type { SecureSecretStore } from '@dharma-ai-labs/agent-fabric-secure-store';
 export { claimSetupReference, setupClaimSourceRegistration, setupClaimFailureMessage, type ClaimSetupReferenceInput,
   type SetupClaimFailurePhase, type SetupClaimFailureReason, type SetupClaimFailureDiagnostic } from './setupClaim.js';
+import { SIGNATURE_SENDABLE_MS } from './setupClaim.js';
 export {planDeviceSigningRecovery, type DeviceSigningRecoveryPlanInput, type DeviceSigningRecoverySourceSelection,
   type DeviceSigningRecoverySessionSelection, type DeviceSigningRecoveryHostBinding,
   planDeviceSigningMaintenance, type DeviceSigningMaintenancePlanInput, type DeviceTrustMaintenanceController} from './signingRecoveryPlan.js';
@@ -68,13 +72,80 @@ interface PendingRequest {
   headers: Record<string, string>;
 }
 
+/** One client's outbox in the shared protocol-state file. Only its owner signs, sends or writes it, with one
+ * exception: another client sends the kept request of an orphaned entry (see orphanDue). */
+interface OutboxEntry {
+  sessionId: string | null;
+  nextSequence: number;
+  pending: PendingRequest | null;
+  ownerPid: number;
+  updatedAt: string;
+  /** When another client last took this entry's kept request to send it, written before the send. With a kept request
+   * left, it got no definite answer (or its sender stopped); without one, the owner, if it still runs, takes the outcome
+   * from the file instead of sending the request again. */
+  adoptedAt?: string;
+  /** The definite answer that client got, so the owner returns it to a retry of the same call instead of signing the
+   * call again. The owner's next write of its entry clears it. */
+  adoptedOutcome?: AdoptedOutcome;
+  /** Completions the server accepted whose receipts found no room in the recovered completion list when the owner
+   * wrote them. Any client moves them to the list once it has room. Until then the entry stays like one with a kept
+   * request, so a later write, a restart or another process never loses them. */
+  keptCompletions?: RecoveredTaskCompletion[];
+}
+
+interface AdoptedOutcome {
+  /** The message id the owner signed the request with. */
+  messageId: string;
+  /** 2xx when accepted, or a definitive 4xx refusal (see #sendPendingWithSigningControl). */
+  status: number;
+  response: Record<string, unknown>;
+}
+
 interface ProtocolState {
   schema: 'dharma.protocol-state/v1';
+  /** In memory: this client's own session, sequence and kept request. In the file each client's own are in outboxes,
+   * and these hold a copy of the oldest due kept request, for a session open of an earlier version to replay (see
+   * #persist). */
   sessionId: string | null;
   nextSequence: number;
   pending: PendingRequest | null;
   recoveredTaskCompletions?: RecoveredTaskCompletion[];
+  /** Each client's outbox, by owner key: 'relay:<workspaceId>' for a workspace loop, 'cli:<pid>:<process>:<n>'
+   * otherwise. */
+  outboxes?: Record<string, OutboxEntry>;
 }
+
+/** The most entries in one file. Another client's entry stays only while it holds a kept request, kept completions or
+ * an answer of the last ORPHAN_RETRY_INTERVAL_MS (see #persist). */
+const OUTBOX_ENTRIES_MAX = 256;
+/** The most recovered task completions in one file. */
+const RECOVERED_TASK_COMPLETIONS_MAX = 1_000;
+/** An entry whose kept request stood unchanged this long is orphaned, and another client sends an orphaned request
+ * that got no definite answer again only after this interval. */
+const ORPHAN_RETRY_INTERVAL_MS = 10 * 60_000;
+/** Orphans one hold of signing control sends, so another process that waits for the lock file waits for at most one
+ * such send. While more are due, the client's next request sends the next one, in a section of its own. */
+const ORPHAN_SENDS_PER_SECTION = 1;
+/** What one hold's part of a signed request returns after it sent another kept request first, so that the caller's
+ * request is signed in a hold of its own. Any answer the server gives, a JSON null among them, is the caller's. */
+const HANDED_BACK: unique symbol = Symbol('handed_back');
+/** Task leases held in this process, by client, until when they run unless extended. While one is held, no client of
+ * this process sends an orphan after its own request, so a lease heartbeat never waits behind such a send. */
+const taskLeases = new Map<object, number>();
+function taskLeaseHeld(now: number): boolean {
+  for (const [client, until] of taskLeases) if (until <= now) taskLeases.delete(client);
+  return taskLeases.size > 0;
+}
+const OWNER_KEY_PATTERN = /^(?:relay|cli|migrated):[A-Za-z0-9_.:-]{1,128}$/;
+/** Part of every default owner key, so a later process that gets the same pid never takes over an earlier entry. */
+const PROCESS_INSTANCE = randomBytes(9).toString('base64url');
+let clientInstances = 0;
+
+// Several durable clients share one protocol-state file: one per relay workspace loop, plus ad hoc commands. Each
+// read-modify-write of it runs inside one device signing-control section that starts by reloading the other clients'
+// entries from the file. A section deactivates when its work settles, so a detached callback cannot write after it.
+interface ProtocolStateSection { client: AgentFabricClient; active: boolean; }
+const protocolStateSections = new AsyncLocalStorage<ProtocolStateSection>();
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -94,29 +165,179 @@ function isRecoveredTaskCompletion(value: unknown): value is RecoveredTaskComple
     && Number.isFinite(Date.parse(String(item.recoveredAt || '')));
 }
 
-function assertProtocolState(value: unknown): asserts value is ProtocolState {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Relay protocol state is invalid.');
-  const state = value as Record<string, unknown>;
-  const recovered = state.recoveredTaskCompletions;
-  const pending = state.pending as Record<string, unknown> | null;
-  const pendingValid = pending === null || (
-    typeof pending === 'object' && !Array.isArray(pending)
-    && (pending.method === 'POST' || pending.method === 'GET')
+function isPendingRequest(value: unknown): value is PendingRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const pending = value as Record<string, unknown>;
+  return (pending.method === 'POST' || pending.method === 'GET')
     && typeof pending.pathname === 'string' && pending.pathname.startsWith('/')
     && typeof pending.body === 'string'
     && pending.headers !== null && typeof pending.headers === 'object' && !Array.isArray(pending.headers)
     && Object.entries(pending.headers as Record<string, unknown>)
-      .every(([name, header]) => name.length > 0 && typeof header === 'string')
-  );
+      .every(([name, header]) => name.length > 0 && typeof header === 'string');
+}
+
+const isInstant = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value));
+
+function isAdoptedOutcome(value: unknown): value is AdoptedOutcome {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const outcome = value as Record<string, unknown>;
+  const status = Number(outcome.status);
+  return typeof outcome.messageId === 'string' && outcome.messageId.length > 0 && Number.isSafeInteger(outcome.status)
+    && ((status >= 200 && status < 300) || (status >= 400 && status < 500 && status !== 408 && status !== 429))
+    && !!outcome.response && typeof outcome.response === 'object' && !Array.isArray(outcome.response);
+}
+
+function isOutboxEntry(value: unknown): value is OutboxEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  return (entry.sessionId === null || typeof entry.sessionId === 'string')
+    && Number.isSafeInteger(entry.nextSequence) && Number(entry.nextSequence) >= 1
+    && (entry.pending === null || isPendingRequest(entry.pending))
+    && Number.isSafeInteger(entry.ownerPid) && Number(entry.ownerPid) >= 0
+    && isInstant(entry.updatedAt) && (entry.adoptedAt === undefined || isInstant(entry.adoptedAt))
+    && (entry.adoptedOutcome === undefined || (entry.adoptedAt !== undefined && isAdoptedOutcome(entry.adoptedOutcome)))
+    && (entry.keptCompletions === undefined || (Array.isArray(entry.keptCompletions)
+      && entry.keptCompletions.length <= RECOVERED_TASK_COMPLETIONS_MAX && entry.keptCompletions.every(isRecoveredTaskCompletion)))
+    // A marker an earlier build of this version wrote; it is still read, and has no effect.
+    && (entry.asSignedOnly === undefined || entry.asSignedOnly === true);
+}
+
+function assertProtocolState(value: unknown): asserts value is ProtocolState {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Relay protocol state is invalid.');
+  const state = value as Record<string, unknown>;
+  const recovered = state.recoveredTaskCompletions;
+  const outboxes = state.outboxes;
   if (state.schema !== 'dharma.protocol-state/v1'
     || !(state.sessionId === null || typeof state.sessionId === 'string')
     || !Number.isSafeInteger(state.nextSequence) || Number(state.nextSequence) < 1
-    || !pendingValid
+    || !(state.pending === null || isPendingRequest(state.pending))
+    || (outboxes !== undefined && (!outboxes || typeof outboxes !== 'object' || Array.isArray(outboxes)
+      || Object.keys(outboxes).length > OUTBOX_ENTRIES_MAX
+      || Object.entries(outboxes as Record<string, unknown>)
+        .some(([owner, entry]) => !OWNER_KEY_PATTERN.test(owner) || !isOutboxEntry(entry))))
     || (recovered !== undefined && (!Array.isArray(recovered)
-      || recovered.length > 1_000
+      || recovered.length > RECOVERED_TASK_COMPLETIONS_MAX
       || recovered.some((item) => !isRecoveredTaskCompletion(item))))) {
     throw new Error('Relay protocol state is invalid.');
   }
+}
+
+/** Every outbox entry of a file. The kept request of an earlier single-slot file becomes an orphan keyed by its
+ * session; a request that is always rebuilt is dropped as before. Once due, it can be sent only signed again, which
+ * only the earlier process could do, so it is settled unsent (see ownerOnlyEntry). Such an entry has
+ * no owner process, so it counts as unchanged from when its request was last signed or stamped: an earlier version
+ * that still runs keeps 10 minutes to send its own request (see orphanDue). A top-level request with the message id of
+ * an entry's kept request is that entry's copy (see #persist), not another orphan. The top-level session and next
+ * sequence are never read: only the process that opened a session signs in it, from the sequence it holds in memory. */
+function outboxesOf(state: ProtocolState): Record<string, OutboxEntry> {
+  const outboxes: Record<string, OutboxEntry> = {};
+  for (const [owner, entry] of Object.entries(state.outboxes ?? {})) outboxes[owner] = durableOutboxEntry(entry);
+  const pending = state.pending;
+  const messageId = pending?.headers['x-dharma-message-id'];
+  const copied = !!messageId && Object.values(outboxes).some(entry => entry.pending?.headers['x-dharma-message-id'] === messageId);
+  if (pending && !copied && !isExplicitlyRebuiltPath(pending.pathname) && !isSessionOpen(pending)) {
+    const session = pending.headers['x-dharma-session-id'] || state.sessionId || '';
+    const key = `migrated:${/^[A-Za-z0-9_-]{1,128}$/.test(session) ? session : sha256(session).slice(0, 32)}`;
+    const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] ?? '');
+    const updatedAt = new Date(Number.isFinite(signedAt) ? Math.min(signedAt, Date.now()) : Date.now()).toISOString();
+    outboxes[key] ??= {sessionId: session || null, nextSequence: state.nextSequence, pending, ownerPid: 0, updatedAt};
+  }
+  return outboxes;
+}
+
+const ACTION_ACKNOWLEDGEMENT_PATH = /\/agent-fabric\/decisions\/[^/]+\/enforcements$/;
+
+/** Whether an action acknowledgement time is outside the window the server accepts, so a kept acknowledgement is sent
+ * again only re-signed with a fresh time, a new message id and a new sequence. */
+function acknowledgementTimeStale(acknowledgedAt: string, now: number): boolean {
+  const at = Date.parse(acknowledgedAt);
+  return !Number.isFinite(at) || now - at > 8 * 60_000 || at > now + 5 * 60_000;
+}
+
+// SIGNATURE_SENDABLE_MS (setupClaim.ts): a kept request signed longer ago is sent again only with a new time and
+// signature, because the server refuses a signature more than 5 minutes old. Setup's clock-skew limit is derived
+// from it. Only its owner signs it again (see #sendPendingWithSigningControl).
+
+/** Whether a kept request's signature is too old to send it again exactly as signed. */
+function signatureTooOld(pending: PendingRequest, now: number): boolean {
+  const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] ?? '');
+  return !Number.isFinite(signedAt) || now - signedAt > SIGNATURE_SENDABLE_MS;
+}
+
+/** Whether a kept request can be sent again only with a new signature at a new sequence, or not at all: a
+ * content-bearing request, which is never replayed implicitly, or an action acknowledgement that is invalid or outside
+ * its time window. Only the process that opened a session signs in it (see #sendPendingWithSigningControl), so another
+ * client never sends such a request. */
+function cannotResendAsSigned(pending: PendingRequest, now: number): boolean {
+  if (isContentBearingPath(pending.pathname)) return true;
+  if (!ACTION_ACKNOWLEDGEMENT_PATH.test(pending.pathname)) return false;
+  let acknowledgement: ActionDecisionAcknowledgement;
+  try { acknowledgement = JSON.parse(pending.body) as ActionDecisionAcknowledgement; } catch { return true; }
+  return !validateActionDecisionAcknowledgementContract(acknowledgement).ok
+    || acknowledgementTimeStale(acknowledgement.acknowledgedAt, now);
+}
+
+/** Whether the process that wrote an outbox entry still runs. A migrated entry has no owner process. */
+function ownerProcessAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fffffff) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+}
+
+/** A request that is always rebuilt is never kept in the file, as before. */
+function durableOutboxEntry(entry: OutboxEntry): OutboxEntry {
+  return entry.pending && isExplicitlyRebuiltPath(entry.pending.pathname)
+    ? {...entry, nextSequence: entry.nextSequence + 1, pending: null} : entry;
+}
+
+/** A kept session open matters only to its owner, whose next session open replaces it. Another client drops an
+ * orphaned one without sending it, and a full file does not keep one. */
+function isSessionOpen(pending: PendingRequest): boolean {
+  return pending.method === 'POST' && pending.pathname.endsWith('/agent-fabric/sessions');
+}
+
+/** A kept request only its owner can use: a session open, a poll, whose answer hands work or content to the owner (a
+ * task it claimed lapses with its lease), or a read. Another client drops an orphaned one without sending it, so such
+ * an answer never reaches the file, and an earlier version is never handed one to replay. */
+function isOwnerOnlyRequest(pending: PendingRequest): boolean {
+  return pending.method === 'GET' || isSessionOpen(pending) || pending.pathname.endsWith('/poll');
+}
+
+/** Whether another client may send an entry's kept request now. It is orphaned once its owner process has exited,
+ * or once it stood unchanged for ORPHAN_RETRY_INTERVAL_MS, since a pid can be reused or belong to another account. A
+ * workspace loop's entry waits that long even after its process exited, so a loop that restarts promptly replays its
+ * own request first. So does a migrated entry, whose request an earlier version that may still run left in the file.
+ * An orphan sent without a definite answer is due again after the same interval. */
+function orphanDue(owner: string, entry: OutboxEntry, now: number): boolean {
+  if (!entry.pending || recentlyAdopted(entry, now)) return false;
+  return now - Date.parse(entry.updatedAt) >= ORPHAN_RETRY_INTERVAL_MS
+    || (owner.startsWith('cli:') && !ownerProcessAlive(entry.ownerPid));
+}
+
+/** A kept request another client never sends: one only its owner can use, or one that could be sent only signed again,
+ * including one whose signature is too old to send exactly as signed. Another client sends a kept request only byte for
+ * byte as signed. */
+function ownerOnlyEntry(entry: OutboxEntry, now: number): boolean {
+  return isOwnerOnlyRequest(entry.pending!) || cannotResendAsSigned(entry.pending!, now) || signatureTooOld(entry.pending!, now);
+}
+
+/** Whether an entry's owner can never come back: a command that exited, or an entry moved from an earlier version's file. */
+function ownerGone(owner: string, entry: OutboxEntry): boolean {
+  return owner.startsWith('migrated:') || (owner.startsWith('cli:') && !ownerProcessAlive(entry.ownerPid));
+}
+
+/** Whether two kept requests are one call: the same message id, or the same session, path and idempotency key (an
+ * action acknowledgement signed again keeps those). */
+function sameKeptRequest(a: PendingRequest, b: PendingRequest): boolean {
+  const same = (name: string) => !!a.headers[name] && a.headers[name] === b.headers[name];
+  return same('x-dharma-message-id')
+    || (a.pathname === b.pathname && same('idempotency-key') && same('x-dharma-session-id'));
+}
+
+/** Whether another client took the entry's kept request less than ORPHAN_RETRY_INTERVAL_MS ago. */
+function recentlyAdopted(entry: OutboxEntry, now: number): boolean {
+  return entry.adoptedAt !== undefined && now - Date.parse(entry.adoptedAt) < ORPHAN_RETRY_INTERVAL_MS;
 }
 
 export interface EnrollmentResult {
@@ -737,12 +958,16 @@ function errorMessage(body: unknown, status: number) {
 export class AgentFabricRequestError extends Error {
   readonly status: number;
   readonly definitive: boolean;
+  /** The server's error code, kept only in the stable form diagnostics may record. The message stays free text. */
+  readonly serverCode?: string;
 
   constructor(body: unknown, status: number, definitive: boolean) {
     super(errorMessage(body, status));
     this.name = 'AgentFabricRequestError';
     this.status = status;
     this.definitive = definitive;
+    const code = body && typeof body === 'object' ? (body as { error?: { code?: unknown } }).error?.code : undefined;
+    if (typeof code === 'string' && /^[a-z0-9_]{1,80}$/.test(code)) this.serverCode = code;
   }
 }
 
@@ -1176,11 +1401,38 @@ export class AgentFabricClient {
   readonly #isolatedSession: boolean;
   #readSessionAdmissionUsed = false;
   #state: ProtocolState;
+  readonly #ownerKey: string;
+  /** The other clients' entries as of this client's last read of the file. */
+  #otherOutboxes: Record<string, OutboxEntry>;
+  /** The definite answer another client got for this client's kept request, with the request as this client signed
+   * it. Only the next call can take it, and only when it is the same call. */
+  #adoptedOutcome: (Pick<PendingRequest, 'method' | 'pathname' | 'body'> & Pick<AdoptedOutcome, 'status' | 'response'>) | null = null;
+  /** Completions this client recorded that no state write has stored yet, such as when the write after the server's
+   * answer failed. A reload of the file keeps them until a write succeeds. */
+  #unwrittenCompletions = new Map<string, RecoveredTaskCompletion>();
+  /** The completions in this client's own entry that wait for room in the queue, as of the last read or write. */
+  #keptCompletions: RecoveredTaskCompletion[] = [];
+  /** Whether this client's kept request is in its own entry in the file, as of the last read or write. A kept request
+   * that is not there is written back before it is sent (see #sendPendingWithSigningControl). */
+  #keptOnDisk: boolean;
+  /** An action acknowledgement past its time window that this client kept from an earlier session, while openSession
+   * opens a new one: it stays in this client's entry, and is signed again only in the new session once the server
+   * answered its session open (see openSession). */
+  #deferredAcknowledgement: PendingRequest | null = null;
+  /** Opened with an owner key, as a workspace loop is: it also sends due orphans after its own requests. */
+  readonly #longLived: boolean;
+  /** Whether the server accepted this client's latest session open. Until it did, a client with a deferred
+   * acknowledgement signs no other call (see #signedRequestWithSigningControl). */
+  #sessionAccepted = false;
+  /** Whether the section that signs the deferred acknowledgement again waits for its caller's hold to end (see
+   * openSession). Until it ran, no other call of this client is signed or sent (see #signedRequestWithSigningControl). */
+  #reissueWaiting = false;
   #serial: Promise<unknown> = Promise.resolve();
 
   private constructor(input: {
     config: DeviceConfig; privateJwk: JsonWebKey; configPath: string; statePath: string;
     state: ProtocolState; store: SecureSecretStore; fetcher?: typeof fetch; hostFence?: HostOperationFence; readOnly?: boolean; isolatedSession?: boolean;
+    ownerKey: string; longLived: boolean; otherOutboxes: Record<string, OutboxEntry>; keptOnDisk: boolean;
   }) {
     this.config = input.config;
     this.#privateJwk = input.privateJwk;
@@ -1194,6 +1446,10 @@ export class AgentFabricClient {
     this.#hostBinding = this.#binding();
     this.#readOnly = input.readOnly === true;
     this.#isolatedSession = input.isolatedSession === true;
+    this.#ownerKey = input.ownerKey;
+    this.#longLived = input.longLived;
+    this.#otherOutboxes = input.otherOutboxes;
+    this.#keptOnDisk = input.keptOnDisk;
   }
 
   #binding() {
@@ -1215,10 +1471,20 @@ export class AgentFabricClient {
     /** Isolated in-memory protocol session; no enrollment repair, durable outbox replay or application POSTs. */
     readOnly?: boolean;
     /** Fresh in-memory protocol state for an explicit workflow; application requests retain their normal authorization. */
-    isolatedSession?: boolean }) {
+    isolatedSession?: boolean;
+    /** The owner of this client's outbox entry: 'relay:<workspaceId>' for a workspace loop, so a restarted loop finds
+     * its own kept request and replays it. Such a client also sends due orphans after its own requests. Omitted, the
+     * client gets an entry of its own, unique to this process, and sends due orphans only when it opens its session,
+     * so a one-shot command exits once its last call returns. */
+    ownerKey?: string }) {
     const {configPath, statePath, store: suppliedStore, fetcher, hostScope, readOnly, isolatedSession} = input;
     if (readOnly !== undefined && typeof readOnly !== 'boolean') throw new Error('relay_read_only_option_invalid');
     if (isolatedSession !== undefined && typeof isolatedSession !== 'boolean') throw new Error('relay_isolated_session_option_invalid');
+    if (input.ownerKey !== undefined && (typeof input.ownerKey !== 'string'
+      || !/^(?:relay|cli):/.test(input.ownerKey) || !OWNER_KEY_PATTERN.test(input.ownerKey))) {
+      throw new Error('relay_owner_key_invalid');
+    }
+    const ownerKey = input.ownerKey ?? `cli:${process.pid}:${PROCESS_INSTANCE}:${++clientInstances}`;
     const fence = hostScope === undefined ? undefined : new HostOperationFence(hostScope);
     const rawStore = fence ? await fence.step(async () => suppliedStore ?? await createSystemSecureStore())
       : suppliedStore ?? await createSystemSecureStore();
@@ -1241,11 +1507,22 @@ export class AgentFabricClient {
       schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1, pending: null,
       recoveredTaskCompletions: [],
     };
+    let otherOutboxes: Record<string, OutboxEntry> = {};
+    let keptOnDisk = false;
     if (!readOnly && !isolatedSession) try {
       const bytes = fence ? await fence.step(() => readFile(statePath, 'utf8')) : await readFile(statePath, 'utf8');
       const parsed = JSON.parse(bytes) as unknown;
       assertProtocolState(parsed);
-      state = parsed;
+      const {[ownerKey]: own, ...others} = outboxesOf(parsed);
+      otherOutboxes = others;
+      keptOnDisk = !!own?.pending;
+      // Only the kept request of this owner key is taken over, to be sent again exactly as signed (or, an action
+      // acknowledgement past its time window, signed again in this process's own session; see openSession). The
+      // session that signed it belongs to the process that opened it, so this client opens its own and never signs there.
+      state = {
+        schema: 'dharma.protocol-state/v1', sessionId: null, nextSequence: 1,
+        pending: own?.pending ?? null, recoveredTaskCompletions: parsed.recoveredTaskCompletions ?? [],
+      };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         if (fence) await fence.assert();
@@ -1256,7 +1533,8 @@ export class AgentFabricClient {
     await fence?.assert();
     return new AgentFabricClient({
       config, privateJwk: identity.privateJwk, configPath,
-      statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession,
+      statePath, state, store, fetcher, hostFence: fence, readOnly, isolatedSession, ownerKey,
+      longLived: input.ownerKey !== undefined, otherOutboxes, keptOnDisk,
     });
   }
 
@@ -1266,23 +1544,73 @@ export class AgentFabricClient {
     if (this.#readOnly && (this.#state.sessionId || this.#readSessionAdmissionUsed)) {
       throw new Error('relay_read_only_session_already_started');
     }
-    if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
-      // Content-bearing requests require refreshed consent. Repository connect
-      // requests depend on current workspace registration. Both are rebuilt by
-      // their explicit workflows instead of replayed from stale prerequisites.
+    // A durable client sends one due orphan or replays its own kept request, and writes its new session from the
+    // latest file, all in one signing-control section. It calls the sends directly: waiting on #serial while holding
+    // control could deadlock. The section ends before the session POST, which takes control again through #serial.
+    // In a hold of signing control its caller took itself, perSend or not, this client adds no send of its own to that
+    // hold beyond the session open: it sends no orphan there, and after it sends its own earlier kept request there, a
+    // perSend hold is handed back and the session open runs again in a fresh hold, while in any other hold the session
+    // open fails with relay_retry_after_recovery, unsent, and a retry opens it in a hold of its own.
+    const callerHold = insideDeviceSigningControlHold();
+    const replace = async () => {
+      const pending = this.#state.pending;
+      // An action acknowledgement past its time window can be sent again only signed again. Only the process that
+      // opened a session signs in it, and this one may have taken the acknowledgement over from another process with
+      // its owner key, so it is signed again only in the new session, after its session open (see below).
+      const deferred = !!pending && ACTION_ACKNOWLEDGEMENT_PATH.test(pending.pathname) && cannotResendAsSigned(pending, Date.now());
+      // Not while a task lease is held in this process, so the lease heartbeat of a sibling loop never waits on them,
+      // and not when this section replays this client's own kept request, so it holds signing control for one send.
+      const replays = !!pending && !deferred && !isExplicitlyRebuiltPath(pending.pathname);
+      if (this.#durable && !replays && !callerHold && !taskLeaseHeld(Date.now())) await this.#adoptOrphans();
+      if (this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)) {
+        // Content-bearing requests require refreshed consent. Repository connect
+        // requests depend on current workspace registration. Both are rebuilt by
+        // their explicit workflows instead of replayed from stale prerequisites.
+        this.#state.pending = null;
+        await this.#persist();
+      } else if (this.#state.pending && !deferred) {
+        await this.#sendPendingWithSigningControl(this.#state);
+        if (callerHold) {
+          handBackDeviceSigningControl();
+          throw new Error('relay_retry_after_recovery');
+        }
+      }
+      if (deferred) this.#deferredAcknowledgement = this.#state.pending;
+      this.#sessionAccepted = false;
+      this.#state.sessionId = randomUUID();
+      this.#state.nextSequence = 1;
       this.#state.pending = null;
       await this.#persist();
-    } else if (this.#state.pending) {
-      await this.#sendPending();
-    }
-    this.#state = {
-      schema: 'dharma.protocol-state/v1', sessionId: randomUUID(), nextSequence: 1, pending: null,
-      recoveredTaskCompletions: this.#state.recoveredTaskCompletions || [],
     };
-    await this.#persist();
-    return this.signedPost('/agent-fabric/sessions', {
+    if (this.#durable || this.#state.pending) await this.#withProtocolState(replace);
+    else await replace();
+    const opened = await this.signedPost('/agent-fabric/sessions', {
       connectionId: randomBytes(24).toString('base64url'), durableCursor: null, relayVersion, deviceTelemetry,
     });
+    if (this.#deferredAcknowledgement) {
+      // In a section of its own, as this client's next request: the acknowledgement is signed again at the next
+      // sequence of the new session, with its idempotency key, and sent. Its outcome is never this caller's: a
+      // retryable failure keeps it for this client's next request.
+      const send = () => this.#withProtocolState(async () => {
+        if (!this.#deferredAcknowledgement || this.#state.pending) return;
+        this.#state.pending = this.#deferredAcknowledgement;
+        this.#deferredAcknowledgement = null;
+        try { await this.#sendPendingWithSigningControl(this.#state); } catch { await this.#assertHostScope(); }
+      });
+      if (callerHold) {
+        // Never in the caller's hold: in a hold of its own once that hold ends. It is not awaited, and not queued in
+        // #serial, since it waits for the caller's hold to end, and the caller's next call in that hold must not wait on it.
+        // Until it ran, another call of this client fails with relay_retry_after_recovery, unsent (owner review 3).
+        this.#reissueWaiting = true;
+        void outsideDeviceSigningControl(() => protocolStateSections.exit(send)).catch(() => undefined)
+          .finally(() => { this.#reissueWaiting = false; });
+      } else {
+        const reissue = this.#serial.then(send);
+        this.#serial = reissue.catch(() => undefined);
+        await reissue;
+      }
+    }
+    return opened;
   }
 
   async registerWorkspace(body: Record<string, unknown>, telemetry: DeviceTelemetryOptions = {}) {
@@ -1325,15 +1653,37 @@ export class AgentFabricClient {
     return (this.#state.recoveredTaskCompletions || []).map((item) => ({ ...item }));
   }
   acknowledgeRecoveredTaskCompletion(taskId: string, receiptHash: string): Promise<void> {
+    const acknowledge = async () => {
+      // A receipt can wait outside the stored list: in this client's memory or entry, or in another client's entry,
+      // until there is room. It is removed wherever it waits, so no later read moves it back to the list.
+      const current = this.#state.recoveredTaskCompletions || [];
+      const entries = Object.values(this.#otherOutboxes);
+      const matching = [...current, ...this.#keptCompletions, ...this.#unwrittenCompletions.values(),
+        ...entries.flatMap(entry => entry.keptCompletions ?? [])].filter(item => item.taskId === taskId);
+      if (!matching.length) return;
+      if (matching.some(item => item.receiptHash !== receiptHash)) {
+        throw new Error('Recovered task completion receipt does not match.');
+      }
+      const other = (item: RecoveredTaskCompletion) => item.taskId !== taskId;
+      this.#state.recoveredTaskCompletions = current.filter(other);
+      this.#keptCompletions = this.#keptCompletions.filter(other);
+      this.#unwrittenCompletions.delete(taskId);
+      for (const entry of entries) {
+        const waiting = entry.keptCompletions?.filter(other);
+        if (waiting?.length) entry.keptCompletions = waiting; else delete entry.keptCompletions;
+      }
+      await this.#persist();
+    };
+    if (this.#durable) {
+      // The completion queue belongs to the whole device: acknowledge against the latest file, under signing control.
+      // Never on this client's request queue: a request that already holds signing control can wait there, and this
+      // acknowledgement would then wait in the signing-control line for that request while it waits for us.
+      return (async () => { await this.#assertHostScope(); return this.#withProtocolState(acknowledge); })();
+    }
     const operation = this.#serial.then(async () => {
       await this.#assertHostScope();
       if (this.#readOnly) throw new Error('relay_read_only_mutation_denied');
-      const current = this.#state.recoveredTaskCompletions || [];
-      const matching = current.find((item) => item.taskId === taskId);
-      if (!matching) return;
-      if (matching.receiptHash !== receiptHash) throw new Error('Recovered task completion receipt does not match.');
-      this.#state.recoveredTaskCompletions = current.filter((item) => item.taskId !== taskId);
-      await this.#persist();
+      return acknowledge();
     });
     this.#serial = operation.catch(() => undefined);
     return operation;
@@ -1377,13 +1727,240 @@ export class AgentFabricClient {
   }
 
   async #signedRequestNow(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
-    const hostScope=this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
-    return withDeviceSigningControl({config:this.config,hostScope},()=>this.#signedRequestWithSigningControl(method,route,body));
+    const event = method === 'POST' && /^\/agent-fabric\/tasks\/[^/]+\/events$/.test(route)
+      ? (body as { eventType?: unknown } | null)?.eventType : undefined;
+    if (event === 'completed' || event === 'failed' || event === 'cancelled') taskLeases.delete(this);
+    // Each hold of signing control makes at most one network send. When another kept request is sent first (this
+    // client's own earlier call, or a due orphan that makes room in a full file), that hold ends there, and the caller's
+    // request is signed in a fresh hold, from a fresh read of the file, behind every caller that waited meanwhile. Under
+    // the admission line the line's hold is handed back (see withSigningControlPerSend). A hold its caller took itself
+    // without perSend keeps its work, so this client adds no send to it: it sends no orphan to make room there, and
+    // after it sends its own earlier kept call there, the caller's call fails with relay_retry_after_recovery, a failure
+    // with no outcome that a retry sends in a hold of its own.
+    const callerHold = insideCallerSigningControlHold();
+    let result: Record<string, unknown>;
+    for (;;) {
+      const answer = await this.#withProtocolState(() => this.#signedRequestWithSigningControl(method, route, body, callerHold));
+      if (answer !== HANDED_BACK) { result = answer; break; }
+      if (callerHold) throw new Error('relay_retry_after_recovery');
+      handBackDeviceSigningControl();
+    }
+    if (method === 'POST' && route === '/agent-fabric/sessions') this.#sessionAccepted = true;
+    if (!this.#durable) return result;
+    if (route === '/agent-fabric/tasks/poll' && result.task && typeof result.task === 'object') {
+      const seconds = Number((body as { leaseSeconds?: unknown } | null)?.leaseSeconds);
+      this.#leaseMs = (Number.isFinite(seconds) && seconds > 0 ? seconds : 120) * 1000;
+      taskLeases.set(this, Date.now() + this.#leaseMs);
+    } else if (event === 'started' || event === 'lease_extended') {
+      taskLeases.set(this, Date.now() + this.#leaseMs);
+    }
+    // A long-lived client, such as a workspace loop, also sends due orphans after its own requests, so they do not wait
+    // for another session open (which has just sent them before its own POST). A one-shot command does not: a send
+    // after its last call would keep its process running after it has its answer.
+    if (this.#longLived && !(method === 'POST' && route === '/agent-fabric/sessions')) this.#sendDueOrphansLater();
+    return result;
   }
 
-  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown): Promise<Record<string, unknown>> {
+  /** The lease length of the task this client last polled. */
+  #leaseMs = 120_000;
+  /** Whether a section that sends due orphans is waiting or running. */
+  #orphanSection = false;
+
+  /** Sends at most one due orphan in a signing-control section of its own, after the caller already has its answer. It
+   * waits in the signing-control line like any root, so this client's next request may wait for that one send, but
+   * never while a task lease is held in this process. It never runs inside the caller's hold of signing control. */
+  #sendDueOrphansLater(): void {
+    if (this.#orphanSection || !this.#orphanWorkDue(Date.now()) || taskLeaseHeld(Date.now())) return;
+    this.#orphanSection = true;
+    const send = () => this.#withProtocolState(async () => {
+      if (!taskLeaseHeld(Date.now())) await this.#adoptOrphans();
+    });
+    void outsideDeviceSigningControl(() => protocolStateSections.exit(send))
+      .catch(() => undefined) // A later request tries again; the caller already has its answer.
+      .finally(() => { this.#orphanSection = false; });
+  }
+
+  get #durable(): boolean { return !this.#readOnly && !this.#isolatedSession; }
+
+  #controlScope(): HostOperationScope | undefined {
+    return this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
+  }
+
+  /** Runs work under device signing control. A root section of a durable client first reloads the device-wide
+   * protocol state from the file; a nested call inside this client's live section reuses it without a reload. */
+  async #withProtocolState<T>(work: () => Promise<T>): Promise<T> {
+    const input = {config: this.config, hostScope: this.#controlScope()};
+    const current = protocolStateSections.getStore();
+    if (current?.client === this && current.active) return withDeviceSigningControl(input, work);
+    return withDeviceSigningControl(input, () => {
+      const section: ProtocolStateSection = {client: this, active: true};
+      return protocolStateSections.run(section, async () => {
+        try {
+          if (this.#durable) await this.#reloadSharedState();
+          return await work();
+        } finally { section.active = false; }
+      });
+    });
+  }
+
+  /** The file wins for every other client's entry and for the recovered completion queue, except for a completion this
+   * client recorded and no write has stored yet, which it keeps. A completion waiting in any entry, or one this client
+   * has not written yet, joins the queue only while the queue stays within what a reader accepts; otherwise it waits
+   * for room, in its entry or, until the next write puts it in this client's entry, in memory. This client's own
+   * session, sequence and kept request are written only by this client, so they are never reloaded. */
+  async #reloadSharedState(): Promise<void> {
+    let disk: ProtocolState | null = null;
+    try {
+      const bytes = this.#hostFence ? await this.#hostFence.step(() => readFile(this.#statePath, 'utf8'))
+        : await readFile(this.#statePath, 'utf8');
+      const parsed = JSON.parse(bytes) as unknown;
+      assertProtocolState(parsed);
+      disk = parsed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        await this.#hostFence?.assert();
+        throw new Error('Relay protocol state is invalid; preserve the file for recovery and re-enroll if necessary.', { cause: error });
+      }
+    }
+    const others = disk ? outboxesOf(disk) : {};
+    const own = others[this.#ownerKey];
+    delete others[this.#ownerKey];
+    this.#otherOutboxes = others;
+    const merged = [...disk?.recoveredTaskCompletions ?? []];
+    /** Whether the completion is in the queue, adding it while there is room. */
+    const listed = (item: RecoveredTaskCompletion) => {
+      if (merged.some(other => other.taskId === item.taskId)) return true;
+      if (merged.length >= RECOVERED_TASK_COMPLETIONS_MAX) return false;
+      merged.push(item);
+      return true;
+    };
+    this.#keptCompletions = (own?.keptCompletions ?? []).filter(item => !listed(item));
+    for (const item of this.#unwrittenCompletions.values()) listed(item);
+    for (const entry of Object.values(others)) {
+      const waiting = entry.keptCompletions?.filter(item => !listed(item));
+      if (waiting?.length) entry.keptCompletions = waiting; else delete entry.keptCompletions;
+    }
+    this.#state.recoveredTaskCompletions = merged;
+    // This client's session, sequence and kept request are its own, and only it signs in its session, so the file never
+    // changes them, with one exception below: another client's answer to its kept request.
+    const kept = this.#state.pending;
+    if (!kept) return;
+    if (own?.adoptedAt && (own.pending ? sameKeptRequest(own.pending, kept) : true)) {
+      // Another client sent this client's kept request after it stood unchanged (see orphanDue). The file then holds
+      // its outcome: no kept request once it was answered, with the answer, or the request as last sent. When the
+      // answer is not there (never kept, or removed after ORPHAN_RETRY_INTERVAL_MS), this client keeps its signed
+      // request, so a retry sends it again with the same message id and idempotency key instead of signing the call
+      // again. That client sent it only exactly as signed, so no sequence in this session is new to this client.
+      const outcome = own.adoptedOutcome;
+      const answered = !own.pending && !!outcome && outcome.messageId === kept.headers['x-dharma-message-id'];
+      if (answered) {
+        this.#state.pending = null;
+        this.#state.nextSequence = Math.max(this.#state.nextSequence, Number(kept.headers['x-dharma-sequence'] || 0) + 1);
+      } else if (own.pending) this.#state.pending = own.pending;
+      else this.#keptOnDisk = false;
+      this.#adoptedOutcome = answered
+        ? {method: kept.method, pathname: kept.pathname, body: kept.body, status: outcome!.status, response: outcome!.response}
+        : null;
+      return;
+    }
+    if (own?.pending && sameKeptRequest(own.pending, kept)) return;
+    // The kept request left this client's entry, although no write by this client drops one: the entry was removed (by
+    // an earlier version that rewrote the file without outboxes, or with the file), or came back in an older state (an
+    // earlier version writes back the whole file it read when it opened) without it. This client keeps it, in its
+    // session, and writes it back to its own entry before it sends it again exactly as signed. Another entry that holds
+    // the same call (the top-level copy, moved to a migrated entry) gives it up, so only this client's entry holds it.
+    this.#keptOnDisk = false;
+    for (const [owner, entry] of Object.entries(others)) {
+      if (entry.pending && sameKeptRequest(entry.pending, kept)) others[owner] = {...entry, pending: null};
+    }
+  }
+
+  /** Whether the entries as last read, which each request of this client reads again, hold work for #adoptOrphans: a
+   * due orphan it sends, or one it removes unsent because its owner is gone. A request only its owner can use, while
+   * that owner can come back, is no such work. */
+  #orphanWorkDue(now: number): boolean {
+    return Object.entries(this.#otherOutboxes).some(([owner, entry]) => orphanDue(owner, entry, now)
+      && (!ownerOnlyEntry(entry, now) || ownerGone(owner, entry)));
+  }
+
+  /** Sends the kept requests of orphaned entries (see orphanDue): at most ORPHAN_SENDS_PER_SECTION, and none after one
+   * without a definite answer. Their outcome is never this caller's and is never thrown. Each entry is marked in the
+   * file before its send, so when this client stops during the send, the next one waits ORPHAN_RETRY_INTERVAL_MS too.
+   * An answered entry keeps no request; it holds the answer only when its owner may still read it (a workspace loop, or a process
+   * that still runs), so a live owner takes the outcome from the file, and #persist drops that answer after
+   * ORPHAN_RETRY_INTERVAL_MS. A request without a definite answer stays and is due again after
+   * ORPHAN_RETRY_INTERVAL_MS. An orphan is sent only exactly as signed, so this client never signs in another client's
+   * session. While more are due, this client's next request sends the next one. A kept request only its owner can use
+   * (see isOwnerOnlyRequest), or one that could be sent only signed again (see cannotResendAsSigned), is never sent by
+   * another client: it stays in its entry while its owner can come back (a workspace loop that restarts, or a process
+   * that still runs), and is settled unsent once that owner is gone (a command that exited, or a migrated entry).
+   * Returns whether it sent one. */
+  async #adoptOrphans(): Promise<boolean> {
+    const now = Date.now();
+    const due = Object.entries(this.#otherOutboxes).filter(([owner, entry]) => orphanDue(owner, entry, now));
+    const ownerOnly = (entry: OutboxEntry) => ownerOnlyEntry(entry, now);
+    let unwritten = false;
+    for (const [owner, entry] of due) {
+      if (!ownerOnly(entry) || !ownerGone(owner, entry)) continue;
+      entry.pending = null;
+      entry.adoptedAt = entry.updatedAt = new Date().toISOString();
+      delete entry.adoptedOutcome;
+      unwritten = true;
+    }
+    let sent = 0;
+    for (const [owner, entry] of due) {
+      if (!entry.pending || ownerOnly(entry)) continue;
+      if (sent === ORPHAN_SENDS_PER_SECTION) break;
+      sent += 1;
+      const messageId = entry.pending.headers['x-dharma-message-id'] ?? '';
+      const ownerReads = owner.startsWith('relay:') || ownerProcessAlive(entry.ownerPid);
+      entry.adoptedAt = new Date().toISOString();
+      delete entry.adoptedOutcome;
+      await this.#persist();
+      unwritten = false;
+      try {
+        await this.#sendPendingWithSigningControl(entry, (status, response) => {
+          // Only an answer every reader accepts is kept; without one, the owner signs its retry again.
+          const outcome = {messageId, status, response};
+          if (ownerReads && isAdoptedOutcome(outcome)) entry.adoptedOutcome = outcome;
+        });
+      } catch { await this.#assertHostScope(); }
+      entry.adoptedAt = new Date().toISOString();
+      if (!entry.pending) entry.updatedAt = entry.adoptedAt;
+      await this.#persist();
+      if (entry.pending) break;
+    }
+    if (unwritten) await this.#persist();
+    return sent > 0;
+  }
+
+  /** The call a due orphan was just sent to make room for in a full file. Its next hold signs it without sending
+   * another orphan first, so a file that is still full refuses it, as before. */
+  #madeRoomFor: string | null = null;
+
+  /** One hold's part of a signed request: it makes at most one network send. It returns the caller's answer, whatever
+   * its JSON body, or HANDED_BACK after it sent another kept request first (this client's own earlier call, or a due
+   * orphan that makes room in a full file); the caller's request is then signed in a hold of its own. In a hold its
+   * caller took itself (callerHold), it sends no orphan to make room, so only this client's own earlier call hands back. */
+  async #signedRequestWithSigningControl(method: PendingRequest['method'], route: string, body: unknown,
+    callerHold: boolean): Promise<Record<string, unknown> | typeof HANDED_BACK> {
     await this.#assertHostScope();
     if (!this.#state.sessionId) throw new Error('Relay session is not open.');
+    // An acknowledgement this client took over waits for its new session (see openSession). Until the server accepted
+    // that session open, no other call is signed or replayed, so its request never takes the acknowledgement's place in
+    // this client's entry: the session is open only once the server accepted it, and the next openSession opens it.
+    if (this.#deferredAcknowledgement && !this.#sessionAccepted && !(method === 'POST' && route === '/agent-fabric/sessions')) {
+      throw new Error('Relay session is not open.');
+    }
+    if (this.#deferredAcknowledgement && !(method === 'POST' && route === '/agent-fabric/sessions')) {
+      // Once the session is accepted, the acknowledgement still keeps its place in this client's entry until it has had a
+      // hold of its own. While its own section waits for the caller's hold to end, another call is neither signed nor
+      // sent, so it never takes that place: it fails with relay_retry_after_recovery, and a retry signs it once that
+      // section ran. Otherwise the acknowledgement is this client's earlier kept call, sent first, as below.
+      if (this.#reissueWaiting) throw new Error('relay_retry_after_recovery');
+      this.#state.pending = this.#deferredAcknowledgement;
+      this.#deferredAcknowledgement = null;
+    }
     if (this.#readOnly) {
       if (this.#state.pending) throw new Error('relay_read_only_pending_request');
       if (method !== 'GET') {
@@ -1395,6 +1972,14 @@ export class AgentFabricClient {
     }
     const pathname = `/api/v1/orgs/${encodeURIComponent(this.config.organizationId)}${route}`;
     const serialized = method === 'GET' ? '' : canonicalize(body);
+    const adopted = this.#adoptedOutcome;
+    this.#adoptedOutcome = null;
+    if (adopted && !this.#state.pending && adopted.method === method && adopted.pathname === pathname
+      && adopted.body === serialized) {
+      // Another client delivered this call's kept request: the retry gets that answer, as a recovery of its own would.
+      if (adopted.status >= 200 && adopted.status < 300) return adopted.response;
+      throw new AgentFabricRequestError(adopted.response, adopted.status, true);
+    }
     if (this.#state.pending && isContentBearingPath(this.#state.pending.pathname)) {
       // An ambiguous content delivery is never replayed implicitly. The next
       // explicit caller must rebuild the capsule after rechecking disclosure
@@ -1407,9 +1992,22 @@ export class AgentFabricClient {
       const sameRequest = this.#state.pending.method === method
         && this.#state.pending.pathname === pathname
         && this.#state.pending.body === serialized;
-      const recovered = await this.#sendPending();
-      // Recovery acknowledges only its original caller's request identity.
-      if (sameRequest) return recovered;
+      const recovered = await this.#sendPendingWithSigningControl(this.#state);
+      // Recovery acknowledges only its original caller's request identity. Another call is signed in a hold of its own.
+      return sameRequest ? recovered : HANDED_BACK;
+    }
+    // In a file full of other clients' kept requests, a due orphan is sent first to make room for this one, in a hold
+    // of its own. A completion the queue has no room for is refused before that. In a hold its caller took itself, no
+    // orphan is sent, and the full file refuses this request (relay_protocol_state_outbox_full).
+    const call = `${method} ${pathname} ${serialized}`, unsigned: PendingRequest = {method, pathname, body: serialized, headers: {}};
+    const madeRoom = this.#madeRoomFor === call;
+    this.#madeRoomFor = null;
+    this.#assertRecoveredTaskCompletionCapacity(unsigned);
+    if (!madeRoom && !callerHold && this.#durable && !isExplicitlyRebuiltPath(pathname) && !isSessionOpen(unsigned)
+      && Object.values(this.#otherOutboxes).filter(entry => entry.pending).length >= OUTBOX_ENTRIES_MAX
+      && await this.#adoptOrphans()) {
+      this.#madeRoomFor = call;
+      return HANDED_BACK;
     }
     const timestamp = new Date().toISOString();
     await this.#assertHostScope();
@@ -1435,30 +2033,28 @@ export class AgentFabricClient {
         'x-dharma-sequence': String(sequence), 'x-dharma-signature': signature,
       },
     };
-    this.#assertRecoveredTaskCompletionCapacity(pending);
     this.#state.pending = pending;
-    await this.#persist();
-    return this.#sendPending();
-  }
-
-  async #sendPending(): Promise<Record<string, unknown>> {
-    const hostScope=this.#hostFence?{signal:this.#hostFence.signal,current:async()=>{await this.#assertHostScope();return true;}}:undefined;
-    return withDeviceSigningControl({config:this.config,hostScope},()=>this.#sendPendingWithSigningControl());
-  }
-
-  async #sendPendingWithSigningControl(): Promise<Record<string, unknown>> {
-    await this.#assertHostScope();
-    const pending = this.#state.pending;
-    if (!pending) throw new Error('No pending protocol request.');
-    try {
-      this.#assertRecoveredTaskCompletionCapacity(pending);
-    } catch (error) {
-      this.#state.nextSequence += 1;
-      this.#state.pending = null;
-      await this.#persist();
+    try { await this.#persist(); } catch (error) {
+      // A request the full file refused is never sent, so it is not kept for a later replay either.
+      if ((error as Error).message === 'relay_protocol_state_outbox_full') this.#state.pending = null;
       throw error;
     }
-    if (/\/agent-fabric\/decisions\/[^/]+\/enforcements$/.test(pending.pathname)) {
+    return this.#sendPendingWithSigningControl(this.#state);
+  }
+
+  /** Sends the kept request of one outbox entry: this client's own, or an orphan in #adoptOrphans. answered sees a
+   * definite answer before the entry is written without its request. This client's own kept request is in its entry
+   * in the file before it is sent: when the entry left the file (see #reloadSharedState), it is written back first, so
+   * after a failed send, a crash or a new client with the same owner key, it is still there to send again. */
+  async #sendPendingWithSigningControl(slot: Pick<OutboxEntry, 'nextSequence' | 'pending'>,
+    answered?: (status: number, response: Record<string, unknown>) => void): Promise<Record<string, unknown>> {
+    await this.#assertHostScope();
+    const pending = slot.pending;
+    if (!pending) throw new Error('No pending protocol request.');
+    if (slot === this.#state && !this.#keptOnDisk) await this.#persist();
+    // A kept completion is sent again even when the queue is full: the server may already have accepted it, and its
+    // receipt then waits in this client's entry for room (see #recordRecoveredTaskCompletion).
+    if (ACTION_ACKNOWLEDGEMENT_PATH.test(pending.pathname)) {
       let acknowledgement: ActionDecisionAcknowledgement;
       try {
         acknowledgement = JSON.parse(pending.body) as ActionDecisionAcknowledgement;
@@ -1467,20 +2063,27 @@ export class AgentFabricClient {
       }
       const contract = validateActionDecisionAcknowledgementContract(acknowledgement);
       if (!contract.ok) {
-        this.#state.nextSequence = Math.max(
-          this.#state.nextSequence + 1,
+        slot.nextSequence = Math.max(
+          slot.nextSequence + 1,
           Number(pending.headers['x-dharma-sequence'] || 0) + 1,
         );
-        this.#state.pending = null;
+        slot.pending = null;
         await this.#persist();
         throw new Error('Stale action acknowledgement is invalid and was discarded.');
       }
-      const acknowledgedAt = Date.parse(acknowledgement.acknowledgedAt);
-      if (!Number.isFinite(acknowledgedAt)
-        || Date.now() - acknowledgedAt > 8 * 60_000
-        || acknowledgedAt > Date.now() + 5 * 60_000) {
+      if (acknowledgementTimeStale(acknowledgement.acknowledgedAt, Date.now())) {
+        // Only the process that opened a session signs in it, from the sequences it holds in memory: this client signs
+        // the acknowledgement again only as its own kept request, in its own open session, at its next sequence. It
+        // keeps the idempotency key, so the server can tell it is the same acknowledgement. Every other client sends a
+        // kept request only exactly as signed (see #adoptOrphans), so nothing else signs here.
+        const sessionId = this.#state.sessionId;
+        if (slot !== this.#state || !sessionId) {
+          throw new Error('Stale action acknowledgement can be signed again only in its owner\'s own session.');
+        }
         const refreshed = refreshActionDecisionAcknowledgement(acknowledgement);
-        const sequence = Number(pending.headers['x-dharma-sequence'] || 0) + 1;
+        // The next sequence of this session, above the acknowledgement's own when it was signed in this session too.
+        const sequence = Math.max(this.#state.nextSequence, pending.headers['x-dharma-session-id'] === sessionId
+          ? Number(pending.headers['x-dharma-sequence'] || 0) + 1 : 0);
         const timestamp = new Date().toISOString();
         const messageId = randomUUID();
         const nonce = randomBytes(24).toString('base64url');
@@ -1489,8 +2092,9 @@ export class AgentFabricClient {
           bodyHash: `sha256:${sha256(pending.body)}`,
           deviceId: this.config.deviceId, messageId, method: pending.method, nonce,
           organizationId: this.config.organizationId, pathname: pending.pathname,
-          sequence, sessionId: pending.headers['x-dharma-session-id'], timestamp,
+          sequence, sessionId, timestamp,
         }), 'utf8');
+        pending.headers['x-dharma-session-id'] = sessionId;
         pending.headers['x-dharma-message-id'] = messageId;
         pending.headers['x-dharma-timestamp'] = timestamp;
         pending.headers['x-dharma-nonce'] = nonce;
@@ -1498,12 +2102,15 @@ export class AgentFabricClient {
         pending.headers['x-dharma-signature'] = sign(
           null, signingPayload, { key: this.#privateJwk, format: 'jwk' },
         ).toString('base64url');
-        this.#state.nextSequence = sequence;
+        slot.nextSequence = sequence;
         await this.#persist();
       }
     }
-    const signedAt = Date.parse(pending.headers['x-dharma-timestamp'] || '');
-    if (!Number.isFinite(signedAt) || Date.now() - signedAt > 4 * 60_000) {
+    if (signatureTooOld(pending, Date.now())) {
+      // Only this client's own kept request gets a new time and signature, with its message id, session, sequence,
+      // body and idempotency key unchanged. Another client sends a kept request only byte for byte as signed: one too
+      // old for that stays in its entry for its owner (see ownerOnlyEntry), so nothing is signed or sent here.
+      if (slot !== this.#state) throw new Error('A kept request too old to send as signed is signed again only by its owner.');
       const timestamp = new Date().toISOString();
       const nonce = randomBytes(24).toString('base64url');
       const messageId = pending.headers['x-dharma-message-id']!;
@@ -1569,15 +2176,17 @@ export class AgentFabricClient {
       // signed request, as do upstream failures whose commit state is unknown.
       const definitive = status >= 400 && status < 500 && status !== 408 && status !== 429;
       if (definitive) {
-        this.#state.nextSequence += 1;
-        this.#state.pending = null;
+        answered?.(status, body);
+        slot.nextSequence += 1;
+        slot.pending = null;
         await this.#persist();
       }
       throw new AgentFabricRequestError(body, status, definitive);
     }
     this.#recordRecoveredTaskCompletion(pending, body);
-    this.#state.nextSequence += 1;
-    this.#state.pending = null;
+    answered?.(status, body);
+    slot.nextSequence += 1;
+    slot.pending = null;
     await this.#persist();
     return body;
   }
@@ -1608,18 +2217,18 @@ export class AgentFabricClient {
       throw new Error('Task completion acknowledgement is missing a valid durable receipt.');
     }
     const current = this.#state.recoveredTaskCompletions || [];
-    const existing = current.find((item) => item.taskId === taskId);
+    const existing = [...current, ...this.#keptCompletions, ...this.#unwrittenCompletions.values()]
+      .find((item) => item.taskId === taskId);
     if (existing) {
       if (existing.receiptHash !== receiptHash || existing.trajectoryCapsuleHash !== trajectoryCapsuleHash) {
         throw new Error('Recovered task completion conflicts with its durable receipt.');
       }
       return;
     }
-    if (current.length >= 1_000) throw new Error('Recovered task completion queue is full.');
-    this.#state.recoveredTaskCompletions = [
-      ...current,
-      { taskId, trajectoryCapsuleHash, receiptHash, recoveredAt: new Date().toISOString() },
-    ];
+    const completion = { taskId, trajectoryCapsuleHash, receiptHash, recoveredAt: new Date().toISOString() };
+    // An accepted completion is never dropped: without room in the queue it waits in this client's entry (see #persist).
+    if (current.length < RECOVERED_TASK_COMPLETIONS_MAX) this.#state.recoveredTaskCompletions = [...current, completion];
+    this.#unwrittenCompletions.set(taskId, completion);
   }
 
   #assertRecoveredTaskCompletionCapacity(pending: PendingRequest): void {
@@ -1630,7 +2239,7 @@ export class AgentFabricClient {
     if (request.eventType !== 'completed') return;
     const taskId = decodeURIComponent(route[1]!);
     const current = this.#state.recoveredTaskCompletions || [];
-    if (!current.some((item) => item.taskId === taskId) && current.length >= 1_000) {
+    if (!current.some((item) => item.taskId === taskId) && current.length >= RECOVERED_TASK_COMPLETIONS_MAX) {
       throw new Error('Recovered task completion queue is full; acknowledge stored completions before sending another completion.');
     }
   }
@@ -1646,19 +2255,29 @@ export class AgentFabricClient {
       const finish = (callback: () => void, closeSocket = true) => {
         if (settled) return;
         settled = true;
+        clearTimeout(connectTimeout);
         clearTimeout(timeout);
         this.#hostFence?.signal.removeEventListener('abort', abort);
         callback();
         if (closeSocket && socket.readyState < WebSocket.CLOSING) socket.close(1000);
       };
       const timeout = setTimeout(
-        () => finish(() => reject(new Error('Relay response timed out.'))),
+        () => finish(() => reject(Object.assign(new Error('Relay response timed out.'), {code: 'relay_response_timeout'}))),
         RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS,
+      );
+      // #512: before the socket opens this attempt has sent nothing, so this limit fails it cleanly. The kept signed
+      // request is sent on the next attempt, exactly as after any other failure that keeps it (an earlier attempt
+      // may already have sent it). It never shortens the window after send.
+      const connectTimeout = setTimeout(
+        () => finish(() => reject(Object.assign(
+          new Error('Relay connection timed out before the request was sent.'), {code: 'relay_connect_timeout'}))),
+        RELAY_CONNECT_TIMEOUT_MS,
       );
       const abort = () => finish(() => reject(new Error('relay_host_scope_unavailable')));
       this.#hostFence?.signal.addEventListener('abort', abort, {once: true});
       if (this.#hostFence?.signal.aborted) abort();
       socket.addEventListener('open', () => {
+        clearTimeout(connectTimeout);
         const send = () => {if (!settled) socket.send(JSON.stringify({
           requestId: pending.headers['x-dharma-message-id'], method: pending.method,
           pathname: pending.pathname, headers: pending.headers, body: pending.body,
@@ -1686,18 +2305,81 @@ export class AgentFabricClient {
 
   async #persist() {
     if (this.#readOnly || this.#isolatedSession) { await this.#assertHostScope();return; }
+    const section = protocolStateSections.getStore();
+    if (section?.client !== this || !section.active) throw new Error('relay_protocol_state_unserialized');
     await this.#assertHostScope();
     // Authorized content and state-dependent repository connects are rebuilt
     // from their governed source. Do not retain them as an automatic replay
     // that can outlive consent or the workspace registration they depend on.
-    const durableState = this.#state.pending && isExplicitlyRebuiltPath(this.#state.pending.pathname)
-      ? { ...this.#state, nextSequence: this.#state.nextSequence + 1, pending: null }
-      : this.#state;
-    return atomicJson(this.#statePath, durableState, this.#hostFence);
+    // Each other client's entry is written back as read while it holds a kept
+    // request, kept completions, or an answer another client got for it in the
+    // last ORPHAN_RETRY_INTERVAL_MS (its owner may still retry the call); every
+    // other entry is dropped, so entries of clients that come and go never fill
+    // the file. A kept request is never dropped.
+    const outboxes: Record<string, OutboxEntry> = {};
+    const now = Date.now();
+    for (const [owner, read] of Object.entries(this.#otherOutboxes)) {
+      let entry = durableOutboxEntry(read);
+      if (entry.adoptedOutcome && !recentlyAdopted(entry, now)) {
+        const {adoptedOutcome: _answer, ...rest} = entry;
+        entry = rest;
+      }
+      if (entry.pending || entry.keptCompletions || entry.adoptedOutcome) outboxes[owner] = entry;
+    }
+    // A file never holds more entries than a reader accepts. Only a new kept request an earlier version left at the
+    // top level of a full file can exceed them (see outboxesOf); it stays at the top level until it is sent.
+    let leftover: OutboxEntry | undefined;
+    const migrated = Object.keys(outboxes).filter(owner => owner.startsWith('migrated:')).at(-1); // outboxesOf adds it last
+    if (Object.keys(outboxes).length > OUTBOX_ENTRIES_MAX && migrated) {
+      leftover = outboxes[migrated];
+      delete outboxes[migrated];
+    }
+    const {sessionId, nextSequence} = this.#state;
+    // An acknowledgement kept from an earlier session while a new one opens stays in this client's entry, also while
+    // the session open is in flight: a kept session open matters only to this client, whose next open replaces it,
+    // while the acknowledgement must reach the next process with this owner key if this one never re-issues it.
+    const deferred = this.#deferredAcknowledgement;
+    const pending = deferred && (!this.#state.pending || isSessionOpen(this.#state.pending)) ? deferred : this.#state.pending;
+    // A completion this client recorded that the queue has no room for waits in its own entry, which is then kept.
+    const listed = this.#state.recoveredTaskCompletions ?? [];
+    const waiting = [...this.#keptCompletions, ...[...this.#unwrittenCompletions.values()].filter(item =>
+      !listed.some(other => other.taskId === item.taskId) && !this.#keptCompletions.some(other => other.taskId === item.taskId))];
+    // The next sequence is written only because the file format has it; no client reads another's.
+    const own = durableOutboxEntry({sessionId, nextSequence, pending, ownerPid: process.pid,
+      updatedAt: new Date().toISOString(), ...(waiting.length ? {keptCompletions: waiting} : {})});
+    const room = OUTBOX_ENTRIES_MAX - Object.keys(outboxes).length;
+    if (room < 1 && (waiting.length || (own.pending && !isSessionOpen(own.pending)))) {
+      throw new Error('relay_protocol_state_outbox_full');
+    }
+    if (room > 0) outboxes[this.#ownerKey] = own;
+    // An earlier version reads only the top-level session, sequence and kept request, and its session open replays
+    // that request and then writes a file without outboxes. So the oldest kept request that is already due (see
+    // orphanDue) also goes there, exactly as signed: after a rollback the earlier version still sends that one, with
+    // the same message id. A live client's fresh request is never handed to it, nor any request another client never
+    // sends (see ownerOnlyEntry), nor an action acknowledgement: the earlier version would sign either again in its
+    // owner's session. That version gives a request signed more than 4 minutes ago a new time and signature, so a
+    // request copied here was signed within the last 4 minutes, and it replays that one byte for byte. In practice that
+    // is a command's request after the command exited, since any other entry is due only after 10 minutes unchanged.
+    // outboxesOf never takes this copy for another orphan.
+    const [copy] = leftover ? [leftover] : Object.entries(outboxes)
+      .filter(([owner, entry]) => entry.pending && orphanDue(owner, entry, now) && !ownerOnlyEntry(entry, now)
+        && !ACTION_ACKNOWLEDGEMENT_PATH.test(entry.pending.pathname))
+      .map(([, entry]) => entry)
+      .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt));
+    await atomicJson(this.#statePath, {
+      schema: 'dharma.protocol-state/v1', sessionId: copy?.sessionId ?? null, nextSequence: copy?.nextSequence ?? 1,
+      pending: copy?.pending ?? null, recoveredTaskCompletions: this.#state.recoveredTaskCompletions ?? [], outboxes,
+    } satisfies ProtocolState, this.#hostFence);
+    // Every completion this client recorded is now in the queue or in its own entry.
+    this.#unwrittenCompletions.clear();
+    this.#keptCompletions = waiting;
+    this.#keptOnDisk = !!outboxes[this.#ownerKey]?.pending;
   }
 }
 
 export const RELAY_ACKNOWLEDGEMENT_TIMEOUT_MS = 90_000;
+/** Limit for the relay connection to open. Nothing is sent before it opens; the acknowledgement window is unchanged. */
+export const RELAY_CONNECT_TIMEOUT_MS = 30_000;
 
 /** schemas/device-keyset-telemetry.schema.json. Reported for lag alerts only; the server never authorizes on it. */
 export type DeviceKeysetTelemetry = {

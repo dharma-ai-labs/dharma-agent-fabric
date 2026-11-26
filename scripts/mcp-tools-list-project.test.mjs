@@ -393,7 +393,7 @@ test('ready projection does not waive the independent aggregate manifest byte bu
 // v1 server-boundary snapshot with one command. The caller supplies identity
 // and version; observed is true because the caller captured it.
 const CLI = resolve(root, 'scripts/mcp-tools-list-project.mjs');
-const runCli = (args, input) => spawnSync(process.execPath, [CLI, ...args], { input, encoding: 'utf8' });
+const runCli = (args, input) => spawnSync(process.execPath, [CLI, ...args], { input, encoding: 'utf8', windowsHide: true });
 
 test('--stdin CLI writes a server-boundary snapshot of the projected tools', () => {
   const raw = rawResult();

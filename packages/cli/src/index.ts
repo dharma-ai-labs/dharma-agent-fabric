@@ -48,7 +48,9 @@ import { superviseRelay } from './relaySupervisor.js';
 import { currentRelayChildFailure, relayChildExitReceipt, relayStartFailureReceipt } from './relayChildFailure.js';
 import { currentRepositoryRelayFailure, repositoryRelayObservationReady, runRegisteredRepositoryRelays,
   selectRepositoryRelayRegistrations, serializeRelayWork, waitForRelayRefresh,
-  repositoryRelayFailureReceipt, repositoryRelayTimestampMs, withRepositoryRelayStage } from './repositoryRelaySupervisor.js';
+  repositoryRelayFailureReceipt, repositoryRelayTimestampMs, retrySigningControlBusy, withRepositoryRelayStage,
+  appendRepositoryRelayFailureHistory, currentRepositoryRelayFailureHistory, recentRepositoryRelayFailure,
+  type RepositoryRelayFailureHistory, type RepositoryRelayObservation } from './repositoryRelaySupervisor.js';
 import { relayOpenFailureRemedyForHost } from './relayOpenFailure.js';
 import { assertRelayStartupOwnership,assertRelayAutostartPaused, disableRelayAutostart, enableRelayAutostart, inspectOwnedRelayAutostart, relayAutostartStatus, relayAutostartTelemetry, startRelayAutostart, startupPreflightFailure, stopRelayAutostart } from './relayAutostart.js';
 import { runOwnedContainerEntrypoint, inspectOwnedContainerStartup, readContainerProcessIdentity } from './containerRelayLifecycle.js';
@@ -642,6 +644,7 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
   fabric: AgentFabricClient,
 ) {
   const providers = await providerCapabilitiesForWorkspacePolicy(null);
+  const telemetry = await relayAutostartReport();
   return withWorkspacePolicySyncOrder(fabric, workspaceId, async () => {
     const item = (await registry()).find((candidate) => candidate.workspaceId === workspaceId);
     if (!item) throw new Error('Content transmission workspace is not registered locally.');
@@ -657,7 +660,7 @@ async function refreshVerifiedWorkspacePolicyForTransmission(
     if (current.organizationId !== item.organizationId) {
       throw new Error('Workspace policy organization does not match registration.');
     }
-    await syncWorkspacePolicyHoldingRefreshLock(fabric, item, current.revision, true, providers);
+    await syncWorkspacePolicyHoldingRefreshLock(fabric, item, current.revision, true, providers, telemetry);
     return loadVerifiedWorkspacePolicy(policyPath, workspaceId);
   });
 }
@@ -1414,6 +1417,16 @@ export async function withWorkspaceSkillActivationLock<T>(
   );
 }
 
+/** The named session activation boundary: the workspace skill activation lock around a turn's local activation work.
+ * It takes no hold of signing control. Each signed call in a turn (the lifetime check, the policy sync, the source
+ * policy, the work authorization and the channel calls) takes a hold of its own, the policy sync perSend and every
+ * other call through the admission line, so each hold makes at most one network send, and a kept call or a full file
+ * is sent in a hold of its own instead of failing a call in the turn. The activation lock comes before signing
+ * control here, as on every other path that takes it. */
+export function withNamedSessionActivationBoundary<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
+  return withWorkspaceSkillActivationLock(workspaceId, 'codex', operation);
+}
+
 async function assertWorkspaceAuthorizationCurrent(
   workspaceId: string,
   authorization: NonNullable<OrganizationPolicy['serverAuthorization']>,
@@ -1700,10 +1713,10 @@ async function readBootstrapSourceIdentityForRequalification(workspace: string, 
   const options = {timeout: 10_000, maxBuffer: 65_536, windowsHide: true, signal,
     env: providerProcessEnvironment(process.env)};
   signal.throwIfAborted();
-  const root = await execFileAsync('git', ['-C', workspace, 'rev-parse', '--show-toplevel'], options);
+  const root = await execFileAsync('git', ['-C', workspace, 'rev-parse', '--show-toplevel'], { ...options, windowsHide: true });
   signal.throwIfAborted();
   if (!root.stdout.trim()) throw new Error('Bootstrap workspace must be a Git repository.');
-  const remote = await execFileAsync('git', ['-C', workspace, 'config', '--get', 'remote.origin.url'], options);
+  const remote = await execFileAsync('git', ['-C', workspace, 'config', '--get', 'remote.origin.url'], { ...options, windowsHide: true });
   signal.throwIfAborted();
   return sourceRepositoryFingerprint(remote.stdout.trim() || null);
 }
@@ -1850,7 +1863,7 @@ async function gitValue(workspace: string, argv: string[]) {
   const operation = () => execFileAsync('git', args, scope ? {
     timeout: 10_000, maxBuffer: 65_536, windowsHide: true, signal: scope.signal,
     env: providerProcessEnvironment(process.env),
-  } : {timeout: 10_000});
+  } : {timeout: 10_000, windowsHide: true});
   try {
     const result = scope ? await scope.step(operation) : await operation();
     return result.stdout.trim() || null;
@@ -1861,10 +1874,12 @@ async function gitValue(workspace: string, argv: string[]) {
   }
 }
 
-async function client(telemetry: DeviceTelemetryOptions = {}) {
+/** ownerKey names a stable outbox entry, such as the one of a relay workspace loop, so a restarted loop replays its
+ * own kept request; other callers get an entry of their own. */
+async function client(telemetry: DeviceTelemetryOptions = {}, ownerKey?: string) {
   const hostScope = currentBootstrapHostScope();
   const instance = admitSignedRequests(await AgentFabricClient.open({ configPath: configPath(), statePath: protocolStatePath(),
-    hostScope, isolatedSession: isIsolatedDeviceSession() }), hostScope);
+    hostScope, isolatedSession: isIsolatedDeviceSession(), ...(ownerKey === undefined ? {} : { ownerKey }) }), hostScope);
   await instance.openSession(VERSION, telemetry);
   return instance;
 }
@@ -2431,7 +2446,7 @@ async function startRelayDaemon(policyPath: string) {
     } else {
       await step(async () => {
         const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'supervise', '--policy', policyPath], {
-          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: relayChildEnvironment(),
+          cwd: dirname(dirname(policyPath)), detached: !hostScope, stdio: 'ignore', env: relayChildEnvironment(), windowsHide: true,
         });
         if (hostScope) captureBootstrapHostChild(hostScope, child);
         else child.unref();
@@ -2544,7 +2559,7 @@ async function relaySupervise(flags: Map<string, string | boolean>): Promise<Out
       start: () => spawn(process.execPath, [fileURLToPath(import.meta.url), 'relay', 'start', '--policy', policyPath], {
         cwd: dirname(dirname(policyPath)),
         stdio: 'ignore',
-        env: relayChildEnvironment(),
+        env: relayChildEnvironment(), windowsHide: true,
       }),
       onExit: async exit => {
         const path = relayChildFailurePath();
@@ -5757,7 +5772,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
     await step(async () => {
       const start = () => {
         const child = spawn(process.execPath, args, { cwd: item.path, detached: !hostScope && !supervisorOwner,
-          stdio: setupSessionScope ? ['ignore', 'ignore', 'pipe', 'ipc'] : ['ignore', 'ignore', 'pipe'], env: relayChildEnvironment() });
+          stdio: setupSessionScope ? ['ignore', 'ignore', 'pipe', 'ipc'] : ['ignore', 'ignore', 'pipe'], env: relayChildEnvironment(), windowsHide: true });
         startupChild = observeNamedSessionStartupChild(child);
         return child;
       };
@@ -5956,7 +5971,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
         identity: registration!.identity,
         loadPolicy: () => refreshVerifiedWorkspacePolicyForTransmission(policyPath, workspaceId, fabric),
         send: codexTaskExportUpload(fabric) }),
-      withActivationBoundary: (operation, work) => withClientSigningControl({config:fabric.config},()=>withWorkspaceSkillActivationLock(workspaceId, 'codex', async () => {
+      withActivationBoundary: (operation, work) => withNamedSessionActivationBoundary(workspaceId, async () => {
         await refreshLifetime();
         const skill = await verifyAgentFabricSkillInstallation({ provider: 'codex', workspace: item.path });
         const sharedReady = await repositorySharedReady(item);
@@ -5976,7 +5991,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
               const versionEnvironment = providerProcessEnvironment(process.env);
               const versionLaunch = providerLaunch('codex', ['--version'], versionEnvironment);
               const version = (await execFileAsync(versionLaunch.command, versionLaunch.argv, { timeout: 10_000, maxBuffer: 4096,
-                env: versionEnvironment })).stdout.trim();
+                env: versionEnvironment, windowsHide: true })).stdout.trim();
               if (!/^codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?$/.test(version)) {
                 throw new Error('named_session_runtime_version_unavailable');
               }
@@ -6004,7 +6019,7 @@ async function namedSessionCommand(action: string, flags: Map<string, string | b
           return await operation(context);
         }
         finally { taskState = null; }
-      })),
+      }),
       retainRepositoryState: async capture => {
         const current = await loadVerifiedWorkspacePolicy(policyPath, workspaceId);
         if (current.evidence.automaticDisclosure?.mode !== 'customer_authorized_content') {
@@ -6078,29 +6093,35 @@ async function syncWorkspacePolicy(
   providerIds: ProviderId[] | null = null,
 ) {
   const providers = await providerCapabilitiesForWorkspacePolicy(providerIds);
+  const telemetry = await relayAutostartReport();
   return withWorkspacePolicySyncOrder(fabric, item.workspaceId,
-    () => syncWorkspacePolicyHoldingRefreshLock(fabric, item, policyRevision, apply, providers));
+    () => syncWorkspacePolicyHoldingRefreshLock(fabric, item, policyRevision, apply, providers, telemetry));
 }
 
-// Provider probes spawn up to six blocking commands, so they run before either lock
-// of a policy sync. A slow CLI must not stall every signed request on this device.
+// Provider probes spawn up to six blocking commands, and the relay autostart report can
+// start PowerShell, systemctl or launchctl, so both run before either lock of a policy
+// sync. A slow command must not stall every signed request on this device.
 async function providerCapabilitiesForWorkspacePolicy(providerIds: ProviderId[] | null) {
   return receiptAwareProviderCapabilities(
     await Promise.all(selectedProviderAdapters(providerIds).map(async (adapter) => (await relayProviderCapability(adapter)).capability)),
   );
 }
 
-// Every policy sync takes device signing control and then the refresh lock. A named
-// work turn holds signing control and then refreshes, so the reverse order makes that
-// turn lose a timeout to the relay. The control nests through its async owner, so a
-// sync inside the turn reuses it.
+// Every policy sync takes device signing control and then the refresh lock. A caller
+// that holds signing control and then refreshes would lose a timeout to the relay in the
+// reverse order. The control nests through its async owner, so a sync inside such a
+// hold reuses it. A sync makes one signed call (registerWorkspace) and
+// only reads local files before it, so its hold makes at most one network send: when
+// that call first sends another kept request, the hold and the refresh lock end, and
+// the sync runs again, taking control and then the refresh lock, before its own
+// request is signed.
 async function withWorkspacePolicySyncOrder<T>(
   fabric: AgentFabricClient,
   workspaceId: string,
   operation: () => Promise<T>,
 ): Promise<T> {
   return withClientSigningControl({ config: fabric.config, hostScope: currentBootstrapHostScope() },
-    () => withWorkspacePolicyRefreshLock(workspaceId, operation));
+    () => withWorkspacePolicyRefreshLock(workspaceId, operation), { perSend: true });
 }
 
 async function syncWorkspacePolicyHoldingRefreshLock(
@@ -6109,13 +6130,14 @@ async function syncWorkspacePolicyHoldingRefreshLock(
   policyRevision: string,
   apply: boolean,
   providers: ProviderCapability[],
+  telemetry: DeviceTelemetryOptions,
 ) {
   const response = await fabric.registerWorkspace({
     workspaceId: item.workspaceId, name: item.name, routeHash: item.routeHash,
     repositoryRemoteHash: item.repositoryRemoteHash, defaultBranch: item.defaultBranch,
     repositoryAgentId: item.repositoryAgentId,
     policyRevision, providers,
-  }, await relayAutostartReport());
+  }, telemetry);
   const canonical = reconcileWorkspaceRegistration(await registry(), item, response);
   const generated = await materializeWorkspacePolicy({
     workspace: canonical.path,
@@ -8149,7 +8171,7 @@ export async function trustHermesProject(input: {
   execute?: HermesSkillExecutor;
 }) {
   const workspace = await realpath(input.workspace);
-  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, { ...options, windowsHide: true }));
   await execute('hermes', ['skills', 'trust', workspace], {
     timeout: 30_000,
     env: providerProcessEnvironment(input.env),
@@ -8326,7 +8348,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     try {
       const listAgyPlugins = input.listAgyPlugins
         || ((executable: string, argv: string[], options: { timeout: number; env: NodeJS.ProcessEnv }) => (
-          execFileAsync(executable, argv, options)
+          execFileAsync(executable, argv, { ...options, windowsHide: true })
         ));
       const { stdout } = await listAgyPlugins('agy', ['plugin', 'list'], {
         timeout: 30_000,
@@ -8346,7 +8368,7 @@ export async function verifyAgentFabricSkillInstallation(input: {
     try {
       const listHermesSkills = input.listHermesSkills
         || ((executable: string, argv: string[], options: { timeout: number; env: NodeJS.ProcessEnv; cwd: string }) => (
-          execFileAsync(executable, argv, options)
+          execFileAsync(executable, argv, { ...options, windowsHide: true })
         ));
       const { stdout } = await listHermesSkills('hermes', ['skills', 'list', '--source', 'local', '--enabled-only'], {
         timeout: 30_000,
@@ -8429,7 +8451,7 @@ export async function attestHermesSkillBundleActivation(input: {
     };
   }
   const workspace = await realpath(input.workspace);
-  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, { ...options, windowsHide: true }));
   await trustHermesProject({ workspace, env: input.env, execute });
   let stdout: string | Buffer | undefined;
   try {
@@ -8494,7 +8516,7 @@ export async function activateAgyPlugin(input: {
 } = {}) {
   await ensureAgyReadOnlyAttestationPermission({ env: input.env, home: input.home });
   const root = resolve(nativeSkillDirectory('agy', input.env, input.home), '..');
-  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, { ...options, windowsHide: true }));
   const options = { timeout: 30_000, env: providerProcessEnvironment(input.env) };
   await mkdir(root, { recursive: true, mode: 0o700 });
   const manifest = resolve(root, 'plugin.json');
@@ -8594,7 +8616,7 @@ export async function attestAgySkillActivation(input: {
     },
   });
   const prompt = `/${input.skillId}\nDharma activation attestation. Do not use tools or inspect files. Return only JSON with fields challenge and activationToken. Challenge: ${challenge}`;
-  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, options));
+  const execute = input.execute || ((executable, argv, options) => execFileAsync(executable, argv, { ...options, windowsHide: true }));
   let stdout: string | Buffer;
   try {
     ({ stdout } = await execute('agy', [
@@ -8936,11 +8958,11 @@ export async function prepareSkillUpdate(input: {
     }
     await rm(sourceRoot, { recursive: true, force: true });
     assertCurrent();
-    await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000 });
+    await execFileAsync('git', ['clone', '--filter=blob:none', '--no-checkout', repositories[0]!, sourceRoot], { timeout: 120_000, windowsHide: true });
     assertCurrent();
-    await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000 });
+    await execFileAsync('git', ['-C', sourceRoot, 'fetch', '--no-tags', '--depth=1', 'origin', commits[0]!], { timeout: 120_000, windowsHide: true });
     assertCurrent();
-    await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000 });
+    await execFileAsync('git', ['-C', sourceRoot, 'checkout', '--detach', commits[0]!], { timeout: 30_000, windowsHide: true });
     assertCurrent();
   }
   for (const skill of bundle.skills) {
@@ -9215,6 +9237,38 @@ async function currentSessionOpenFailure() {
     at: failure.at, stage: failure.stage, category: failure.category, ...(remedy ? { remedy } : {}) };
 }
 
+// Each failed loop of the running relay, per workspace, from the bounded failure-history.json (#514).
+async function currentRepositoryRelayFailureHistories() {
+  const read = (path: string) => readFile(path, 'utf8').then(value => JSON.parse(value) as unknown).catch(() => null);
+  const relay = resolve(dharmaHome(), 'relay');
+  const config = await read(configPath()) as Record<string, unknown> | null;
+  const pid = await readFile(resolve(relay, 'relay.pid'), 'utf8').then(value => Number(value.trim())).catch(() => 0);
+  const pidState = await stat(resolve(relay, 'relay.pid')).catch(() => null);
+  const histories = new Map<string, RepositoryRelayFailureHistory>();
+  for (const workspaceId of await readdir(resolve(relay, 'repositories')).catch(() => [] as string[])) {
+    if (!UUID_PATTERN.test(workspaceId)) continue;
+    const history = currentRepositoryRelayFailureHistory({
+      record: await read(resolve(relay, 'repositories', workspaceId, 'failure-history.json')),
+      organizationId: String(config?.organizationId), deviceId: String(config?.deviceId), workspaceId, pid,
+      relayPidMtimeMs: pidState?.mtimeMs ?? null, relayPidCtimeMs: pidState?.ctimeMs ?? null });
+    if (history) histories.set(workspaceId, history);
+  }
+  return histories;
+}
+
+// One failed loop leaves the latest-failure receipt and adds the failure to the bounded workspace history.
+async function recordRepositoryRelayFailure(event: RepositoryRelayObservation, binding: { organizationId: string;
+  deviceId: string; pid: number; relayPidMtimeMs: number; relayPidCtimeMs: number }) {
+  const workspaceId = event.workspaceId!;
+  const repository = resolve(dharmaHome(), 'relay', 'repositories', workspaceId);
+  // The receipt keeps the time of the stage line it records.
+  await writeJsonAtomic(resolve(repository, 'last-failure.json'), repositoryRelayFailureReceipt(event, binding, event.at));
+  const previous = await readFile(resolve(repository, 'failure-history.json'), 'utf8')
+    .then(value => JSON.parse(value) as unknown).catch(() => null);
+  const history = appendRepositoryRelayFailureHistory(previous, event, { ...binding, workspaceId });
+  if (history) await writeJsonAtomic(resolve(repository, 'failure-history.json'), history);
+}
+
 async function relayStart(flags: Map<string, string | boolean>,
   startup: { workspaceId: string | null; leased: boolean } = { workspaceId: null, leased: false }): Promise<Output> {
   const anchor = resolve(required(flags, 'policy'));
@@ -9258,18 +9312,15 @@ async function relayStart(flags: Map<string, string | boolean>,
     observe: async event => {
       process.stderr.write(`${JSON.stringify({ event: 'repository_relay', ...event })}\n`);
       if (event.code === 'repository_relay_failed' && event.workspaceId && UUID_PATTERN.test(event.workspaceId)) {
-        const at = new Date().toISOString();
         const pidState = await relayPidState;
         if (!pidState) return;
-        const failure = repositoryRelayFailureReceipt(event, { organizationId: config.organizationId,
-          deviceId: config.deviceId, pid: process.pid, ...pidState }, at);
         let writer = diagnosticWriters.get(event.workspaceId);
         if (!writer) {
           writer = serializeRelayWork();
           diagnosticWriters.set(event.workspaceId, writer);
         }
-        await writer(() => writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', event.workspaceId!,
-          'last-failure.json'), failure));
+        await writer(() => recordRepositoryRelayFailure(event, { organizationId: config.organizationId,
+          deviceId: config.deviceId, pid: process.pid, ...pidState }));
       }
     } });
     return { ok: true, stopped: true };
@@ -9312,7 +9363,10 @@ async function relayWorkspaceLoop(flags: Map<string, string | boolean>, signal: 
   const verifiedPolicy = await withRepositoryRelayStage('policy_verification',
     () => loadVerifiedWorkspacePolicyUnlessReplayAhead(policyPath, canonicalWorkspace.workspaceId));
   signal.throwIfAborted();
-  const fabric = await withRepositoryRelayStage('session_open', async () => client(await relayAutostartReport()));
+  const fabric = await withRepositoryRelayStage('session_open', async () => {
+    const telemetry = await relayAutostartReport();
+    return retrySigningControlBusy(() => client(telemetry, `relay:${canonicalWorkspace.workspaceId}`), { signal });
+  });
   // The first poll receipt can follow a long task, so status needs this earlier success.
   await writeJsonAtomic(resolve(dharmaHome(), 'relay', 'repositories', canonicalWorkspace.workspaceId,
     'last-session-open.json'), { at: new Date().toISOString() }).catch(() => undefined);
@@ -9982,10 +10036,15 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
   if (command === 'msg') return sessionMessageCommand(String(subcommand), flags, sessionMessagingHost());
   if (command === 'hook') {
     // Run by the Claude plugin 1.0.7-preview hooks; an empty result prints nothing.
+    // `session-start --session-id <uuid>` is the hand-run recovery that the hook and `sessions attach` print.
     if (subcommand !== 'claude' || !['session-start', 'inbox'].includes(String(positional[2])) || positional.length !== 3
-      || [...flags].some(([key, value]) => key !== 'dry-run' || value !== true)) throw new Error('claude_hook_command_invalid');
+      || [...flags].some(([key, value]) => !(key === 'dry-run' && value === true)
+        && !(key === 'session-id' && typeof value === 'string' && positional[2] === 'session-start'))) {
+      throw new Error('claude_hook_command_invalid');
+    }
+    const sessionId = flags.get('session-id');
     return claudeHookCommand(String(positional[2]), { host: sessionMessagingHost(), stdin: () => readHookStdin(process.stdin),
-      dryRun: flags.get('dry-run') === true });
+      dryRun: flags.get('dry-run') === true, ...(typeof sessionId === 'string' ? { sessionId } : {}) });
   }
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);
@@ -10060,6 +10119,13 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
     const lastFailure = sessionOpenFailure ?? (relay !== 'running' && supervisor === 'running'
       ? currentRelayChildFailure(await readFile(relayChildFailurePath(), 'utf8')
         .then(value => JSON.parse(value) as unknown).catch(() => null), supervisorPid) : null);
+    // #514: a later success hides lastFailure, so name each workspace that failed in the last 24 hours.
+    const failureHistories = relay === 'running' ? await currentRepositoryRelayFailureHistories()
+      : new Map<string, RepositoryRelayFailureHistory>();
+    const recentRelayFailures = [...failureHistories].flatMap(([workspaceId, history]) => {
+      const recent = recentRepositoryRelayFailure(history);
+      return recent ? [{ workspaceId, ...recent }] : [];
+    }).sort((a, b) => Date.parse(b.latest.at) - Date.parse(a.latest.at) || a.workspaceId.localeCompare(b.workspaceId));
     const reconnect = {
       state: relay !== 'running' ? (supervisor === 'running' ? (lastFailure ? 'failing' : 'restarting') : 'stopped')
         : sessionOpenFailure ? 'failing'
@@ -10070,7 +10136,8 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
     };
     try {
       const config = JSON.parse(await readFile(configPath(), 'utf8')) as DeviceConfig;
-      const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay, supervisor, autostart, reconnect };
+      const status: Record<string, unknown> = { version: VERSION, enrolled: true, relay, supervisor, autostart, reconnect,
+        ...(recentRelayFailures.length ? { recentRelayFailures } : {}) };
       if (flags.has('verbose') || flags.has('diagnostic')) {
         const relayPid = await readFile(resolve(dharmaHome(), 'relay', 'relay.pid'), 'utf8')
           .then(value => Number(value.trim())).catch(() => 0);
@@ -10100,6 +10167,7 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
                 organizationId: config.organizationId, deviceId: config.deviceId,
                 workspaceId: row.workspaceId, pid: relayPid, relayPidMtimeMs: relayPidState?.relayPidMtimeMs ?? null,
                 relayPidCtimeMs: relayPidState?.relayPidCtimeMs ?? null, lastSuccessfulPollAt: lastSuccess });
+              const failureHistory = failureHistories.get(row.workspaceId);
               const skillActivation = await readRelaySkillActivationState(dharmaHome(), row.workspaceId);
               // The record keeps only codes; name the PATH entry the relay refuses, and the fix, from this host.
               const providerPathRemedies: Record<string, { path: string; remedy: string }> = {};
@@ -10113,7 +10181,9 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
                 state: relay === 'running' && repositoryRelayObservationReady({ observation,
                   workspaceId: row.workspaceId, version: VERSION, pid: relayPid }) ? 'acknowledged_recently' : 'pending',
                 lastSuccessfulPollAt, ...(lastFailure ? { lastFailure } : {}),
-                skillActivation, ...(Object.keys(providerPathRemedies).length ? { providerPathRemedies } : {}) });
+                skillActivation, ...(Object.keys(providerPathRemedies).length ? { providerPathRemedies } : {}),
+                ...(failureHistory ? { failureHistory: { count: failureHistory.count, since: failureHistory.since,
+                  recent: [...failureHistory.entries].reverse() } } : {}) });
             }
             status.repositoryRelays = { state: 'observed', repositories: observations };
           }

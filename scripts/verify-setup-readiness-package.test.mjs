@@ -27,7 +27,7 @@ for (const defect of ['pin', 'missing-export', 'wrong-export', 'missing-session-
       const source = await readFile(new URL('./verify-setup-readiness-package.mjs', import.meta.url));
       await writeFile(resolve(root, 'scripts/verify.mjs'), source);
       await assert.rejects(execute(process.execPath, [resolve(root, 'scripts/verify.mjs')], {
-        cwd: root, timeout: 10_000, env: {...process.env, npm_execpath: resolve(root, 'must-not-execute.mjs')},
+        cwd: root, timeout: 10_000, env: {...process.env, npm_execpath: resolve(root, 'must-not-execute.mjs')}, windowsHide: true,
       }), error => error.code === 1 && error.stdout === '' && /setup_readiness_package_pin_invalid/.test(error.stderr)
         && !/MODULE_NOT_FOUND/.test(error.stderr));
     } finally {

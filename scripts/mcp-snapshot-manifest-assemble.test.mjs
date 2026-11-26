@@ -15,7 +15,7 @@ const good = fixtures.cases.compatible;
 const clone = value => structuredClone(value);
 const expectedArgs = ['--expected-identity', good.expected.identity, '--expected-version', good.expected.version];
 const run = args => spawnSync(process.execPath, [script, ...args], {
-  cwd: root, encoding: 'utf8', timeout: 10_000, maxBuffer: 2 * 1024 * 1024,
+  cwd: root, encoding: 'utf8', timeout: 10_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true,
 });
 function workspace(t) {
   const dir = mkdtempSync(join(tmpdir(), 'mcp-offline-assembly-'));
@@ -404,7 +404,7 @@ fs.closeSync = fd => { counts.close++; return c(fd); };
 fs.readFileSync = (p, ...a) => { if (typeof p === 'string') counts.readFile.push(p); return r(p, ...a); };
 syncBuiltinESMExports(); process.on('exit', () => w(process.env.FS_COUNT_FILE, JSON.stringify(counts)));`;
   const runCounted = args => spawnSync(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(preload)}`, script, ...expectedArgs, ...args], {
-    cwd: root, encoding: 'utf8', timeout: 10_000, env: { ...process.env, FS_COUNT_FILE: countFile },
+    cwd: root, encoding: 'utf8', timeout: 10_000, env: { ...process.env, FS_COUNT_FILE: countFile }, windowsHide: true,
   });
   const sidecarPath = ws.file('once-sidecar.json', sidecarFor([bytes]));
   for (const [args, status] of [[['--snapshot', path, '--snapshot', path, '--snapshot-sidecar', sidecarPath], 2],

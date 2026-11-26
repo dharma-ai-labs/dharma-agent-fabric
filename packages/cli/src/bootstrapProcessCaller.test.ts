@@ -62,12 +62,12 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
       if (serviceUnavailable) throw new Error('autostart_conflict: owned service unavailable');
       effects.push(container ? 'container_start' : 'user_service_start'); running = true;
       if (standingService) serviceChildren.push(spawn(process.execPath,
-        ['-e', 'setInterval(() => {}, 1000)'], {cwd: workspace, stdio: 'ignore'}));
+        ['-e', 'setInterval(() => {}, 1000)'], {cwd: workspace, stdio: 'ignore', windowsHide: true}));
       if (withdrawInContainerStart) prepared.scope.close();
     },
     spawn: (_command: string, argv: string[], options: Record<string, unknown>) => {
       spawnCalls.push({argv, options}); effects.push('spawn');
-      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {cwd: workspace, stdio: 'ignore'});
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {cwd: workspace, stdio: 'ignore', windowsHide: true});
       children.push(child); running = true;
       if (withdrawInSpawn) prepared.scope.close();
       return child;
@@ -97,7 +97,7 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
   const baseline = process.env.DHARMA_RELAY_CALLER_BASELINE_SHA;
   if (baseline && !/^[a-f0-9]{40}$/.test(baseline)) throw new Error('relay_caller_baseline_invalid');
   const source = baseline ? (await promisify(execFile)('git', ['show', `${baseline}:packages/cli/src/index.ts`],
-    {cwd: resolve(import.meta.dirname, '../../..'), maxBuffer: 4 * 1024 * 1024})).stdout
+    {cwd: resolve(import.meta.dirname, '../../..'), maxBuffer: 4 * 1024 * 1024, windowsHide: true})).stdout
     : await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   async function declaration(name: string) {
