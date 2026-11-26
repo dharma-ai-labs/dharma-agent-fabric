@@ -1,6 +1,6 @@
 # Dharma Agent Fabric session messages (preview add-on)
 
-`dharma-agent-fabric-preview` 1.0.7-preview is a **prototype**. It works only for the two allowlisted HQ members and only with a Dharma CLI build that has session messaging (`dharma sessions attach`, `dharma msg`, `dharma hook claude`). It is a separate marketplace entry: install it beside `dharma-agent-fabric` 1.0.6 or later, which gets no hooks.
+`dharma-agent-fabric-preview` 1.0.7-preview is a **prototype**. It works only for the two allowlisted HQ members and only with a Dharma CLI build that has session messaging (`dharma sessions attach`, `dharma msg`, `dharma hook claude`). It is not listed in the marketplace for now: load it with `claude --plugin-dir <path to this folder>`, or keep a copy installed before the listing was removed, beside `dharma-agent-fabric` 1.0.6 or later, which gets no hooks. A restart of a session needs the same: pass `--plugin-dir` again if you used it. The listing returns with a version bump.
 
 ## What's included
 
@@ -22,4 +22,4 @@ There is no `Stop` hook: a message waits for the user's next prompt and never st
 
 - The name proves the member and the device, not the session (no per-session key in the prototype).
 - Messages are org-wide within the HQ allowlist; there are no per-name sender policies or block lists yet.
-- Hooks run in a POSIX shell (Git Bash on Windows).
+- The hooks need `node` on PATH. They need no POSIX shell: the same hook command runs under sh, Git Bash, Windows PowerShell 5.1 and pwsh.
