@@ -348,7 +348,10 @@ export async function executeProviderTask(input: {
     // tool, so Edit and Write do not exist for a read-only task. Glob and Grep
     // only read and need no approval inside the worktree. acceptEdits also
     // auto-approves edits and filesystem shell commands such as touch, so a
-    // read-only task uses dontAsk: only the pre-approved tools above can run.
+    // read-only task uses dontAsk, which denies any built-in tool call that
+    // --allowedTools does not pre-approve. These flags limit built-in tools only.
+    // Allow rules from the settings sources Claude loads (user and project), MCP
+    // tools and project hooks are not limited here.
     const availableTools = [
       'Read', 'Glob', 'Grep',
       ...(input.allowWrites ? ['Edit', 'Write'] : []),
