@@ -158,6 +158,40 @@ test('a connect without --provider leaves the relay registering every adapter, a
   assert.deepEqual(f.registrations, [null, null, null]);
 });
 
+// A workspace that setup, a plain connect or an earlier release registered has no recorded selection and serves
+// every adapter. A later connect that names one provider must not cut the relay down to that provider.
+test('a connect with --provider after setup leaves the relay registering every adapter', async t => {
+  const f = await fixture(t);
+  const setup = await f.setup('claude');
+  assert.equal(setup.stage, 'repository_source_authorization_required');
+  await f.connect('codex');
+  await f.relayPolicyRefresh();
+  await f.transmissionRefresh();
+  assert.deepEqual(f.registrations, [['claude'], ['codex'], null, null]);
+  assert.deepEqual(await findScopeFiles(f.home), []);
+});
+
+test('a connect with --provider after a plain connect leaves the relay registering every adapter', async t => {
+  const f = await fixture(t);
+  await f.connect();
+  await f.connect('codex');
+  await f.relayPolicyRefresh();
+  assert.deepEqual(f.registrations, [null, ['codex'], null]);
+});
+
+test('a first connect that stops at workspace registration still keeps the relay to its selection', async t => {
+  const f = await fixture(t);
+  const register = f.dependencies.syncWorkspacePolicyHoldingRefreshLock;
+  f.dependencies.syncWorkspacePolicyHoldingRefreshLock = async () => {
+    throw new Error('fixture_registration_unavailable');
+  };
+  await assert.rejects(f.connect('codex'), /fixture_registration_unavailable/);
+  f.dependencies.syncWorkspacePolicyHoldingRefreshLock = register;
+  await f.connect('codex');
+  await f.relayPolicyRefresh();
+  assert.deepEqual(f.registrations, [['codex'], ['codex'], ['codex']]);
+});
+
 // Setup and a connect without --provider name no connect selection. On a workspace whose connect recorded one,
 // setup adds its provider to it and a plain connect returns the relay to every adapter, so neither has the relay's
 // next refresh drop the provider that run just registered.
