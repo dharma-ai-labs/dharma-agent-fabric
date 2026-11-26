@@ -439,7 +439,9 @@ dharma repositories status --repo "$PWD" --json
 
 Repeat `--provider` to attach only the local runtimes that should serve the
 selected repository agent. Omitting it preserves compatibility by attaching
-every installed supported provider.
+every installed supported provider. The local relay keeps to the selection when
+it refreshes the workspace policy, including after a connect that stopped
+early, and a later connect with another `--provider` adds that provider.
 
 One selected source repository becomes one logical organization agent and one
 permanent branch in the organization's private Dharma control repository.
