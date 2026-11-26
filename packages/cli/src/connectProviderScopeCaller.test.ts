@@ -134,6 +134,8 @@ test('after a refused connect that selected codex, the relay and transmission re
   const refused = await f.connect('codex');
   assert.equal(refused.ok, false);
   assert.equal(refused.repositories[0].stage, 'repository_source_authorization_required');
+  // The relay keeps to this selection, so the connect reports no wider scope.
+  assert.equal(refused.repositories[0].providerScope, undefined);
   await f.relayPolicyRefresh();
   await f.transmissionRefresh();
   // The rerun of the same command after the owner allows the source policy starts the same way.
@@ -164,19 +166,22 @@ test('a connect with --provider after setup leaves the relay registering every a
   const f = await fixture(t);
   const setup = await f.setup('claude');
   assert.equal(setup.stage, 'repository_source_authorization_required');
-  await f.connect('codex');
+  const scoped = await f.connect('codex');
   await f.relayPolicyRefresh();
   await f.transmissionRefresh();
   assert.deepEqual(f.registrations, [['claude'], ['codex'], null, null]);
   assert.deepEqual(await findScopeFiles(f.home), []);
+  // The connect's output names only codex, so it must say that the relay still registers every provider.
+  assertKeepsEveryProvider(f.home, scoped.repositories[0]);
 });
 
 test('a connect with --provider after a plain connect leaves the relay registering every adapter', async t => {
   const f = await fixture(t);
   await f.connect();
-  await f.connect('codex');
+  const scoped = await f.connect('codex');
   await f.relayPolicyRefresh();
   assert.deepEqual(f.registrations, [null, ['codex'], null]);
+  assertKeepsEveryProvider(f.home, scoped.repositories[0]);
 });
 
 test('a first connect that stops at workspace registration still keeps the relay to its selection', async t => {
@@ -237,6 +242,18 @@ test('a recorded selection ignores unknown entries, and an unreadable one falls 
   await f.relayPolicyRefresh();
   assert.deepEqual(f.registrations, [['codex'], ['codex'], null]);
 });
+
+function assertKeepsEveryProvider(home: string, result: Row) {
+  const recordPath = resolve(home, 'registry', 'connected-providers', `${workspaceId}.json`);
+  assert.deepEqual(result.providerScope, {
+    recorded: false,
+    relayRegisters: 'every_installed',
+    reason: 'workspace_has_no_recorded_selection',
+    recordPath,
+    message: 'This repository already serves every installed provider, so its relay keeps registering all of them. '
+      + `To keep it to codex, write ["codex"] to ${recordPath}.`,
+  });
+}
 
 async function findScopeFiles(home: string): Promise<string[]> {
   const found: string[] = [];
