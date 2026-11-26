@@ -118,7 +118,15 @@ async function fixture(t: test.TestContext) {
   const relayPolicyRefresh = () => source.syncWorkspacePolicy!(fabric, rows[0], policyRevision, true);
   const transmissionRefresh = () => source.refreshVerifiedWorkspacePolicyForTransmission!(
     resolve(repo, '.dharma', 'approved-policy.json'), workspaceId, fabric);
-  return { home, dependencies, registrations, connect, relayPolicyRefresh, transmissionRefresh };
+  // `dharma setup` onboards with the singular `provider`, which records no selection.
+  const setup = async (provider: string) => {
+    const flags = new Map<string, string | boolean>([
+      ['workspace', repo], ['organization-id', organizationId], ['policy-revision', policyRevision],
+      ['repository-key', 'fixture-repository'], ['provider', provider],
+    ]);
+    return JSON.parse(JSON.stringify(await source.onboard!(flags))) as Row;
+  };
+  return { home, dependencies, registrations, connect, setup, relayPolicyRefresh, transmissionRefresh };
 }
 
 test('after a refused connect that selected codex, the relay and transmission refreshes register codex only', async t => {
@@ -148,6 +156,40 @@ test('a connect without --provider leaves the relay registering every adapter, a
   await f.relayPolicyRefresh();
   await f.transmissionRefresh();
   assert.deepEqual(f.registrations, [null, null, null]);
+});
+
+// A workspace that setup, a plain connect or an earlier release registered has no recorded selection and serves
+// every adapter. A later connect that names one provider must not cut the relay down to that provider.
+test('a connect with --provider after setup leaves the relay registering every adapter', async t => {
+  const f = await fixture(t);
+  const setup = await f.setup('claude');
+  assert.equal(setup.stage, 'repository_source_authorization_required');
+  await f.connect('codex');
+  await f.relayPolicyRefresh();
+  await f.transmissionRefresh();
+  assert.deepEqual(f.registrations, [['claude'], ['codex'], null, null]);
+  assert.deepEqual(await findScopeFiles(f.home), []);
+});
+
+test('a connect with --provider after a plain connect leaves the relay registering every adapter', async t => {
+  const f = await fixture(t);
+  await f.connect();
+  await f.connect('codex');
+  await f.relayPolicyRefresh();
+  assert.deepEqual(f.registrations, [null, ['codex'], null]);
+});
+
+test('a first connect that stops at workspace registration still keeps the relay to its selection', async t => {
+  const f = await fixture(t);
+  const register = f.dependencies.syncWorkspacePolicyHoldingRefreshLock;
+  f.dependencies.syncWorkspacePolicyHoldingRefreshLock = async () => {
+    throw new Error('fixture_registration_unavailable');
+  };
+  await assert.rejects(f.connect('codex'), /fixture_registration_unavailable/);
+  f.dependencies.syncWorkspacePolicyHoldingRefreshLock = register;
+  await f.connect('codex');
+  await f.relayPolicyRefresh();
+  assert.deepEqual(f.registrations, [['codex'], ['codex'], ['codex']]);
 });
 
 test('a connect waiting for device approval resumes with the same providers and repository key', async t => {

@@ -6910,6 +6910,12 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     path: workspace,
     repositoryRemoteHash: repositoryIdentity.fingerprint,
   });
+  // Only `repositories connect` passes `providers`. Setup passes `provider`; its relay still registers every adapter.
+  const connectSelection = providerIds && typeof flags.get('providers') === 'string' ? providerIds : null;
+  // A workspace registered without a recorded selection (by setup, a plain connect or an earlier release) has its
+  // relay register every adapter. A later connect that names fewer providers leaves it that way and removes none.
+  const keepsEveryAdapter = connectSelection !== null && registered !== null
+    && await connectedProviderScope(registered.workspaceId) === null;
   if (!registered) {
     const addFlags = new Map<string, string | boolean>([
       ['organization-id', organizationId],
@@ -6924,16 +6930,17 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
       path: workspace,
       repositoryRemoteHash: repositoryIdentity.fingerprint,
     });
+    // Record a new workspace's selection at once, so a connect that stops before the record below still leaves it.
+    if (registered && connectSelection) await recordConnectedProviderScope(registered.workspaceId, connectSelection);
   }
   if (!registered) throw new Error('Workspace registration failed.');
   const fabric = await client();
   const prepared = await registerWorkspaceBeforeRepositoryBind(fabric, registered, policyRevision, providerIds);
   registered = prepared.registered;
-  // Only `repositories connect` passes `providers`. Record its selection before any step that can stop this
-  // connect, such as a source policy the owner has not allowed yet, so the relay registers no other provider.
-  // Setup passes `provider`; its relay still registers every adapter.
-  if (providerIds && typeof flags.get('providers') === 'string') {
-    await recordConnectedProviderScope(registered.workspaceId, providerIds);
+  // Record the connect's selection before any step that can stop this connect, such as a source policy the owner
+  // has not allowed yet, so the relay registers no other provider.
+  if (connectSelection && !keepsEveryAdapter) {
+    await recordConnectedProviderScope(registered.workspaceId, connectSelection);
   }
   const synced = prepared.synchronized as Record<string, unknown>;
   const localPolicy = synced.localPolicy as Record<string, unknown> | undefined;
