@@ -172,3 +172,20 @@ test('CLI pins provider-adapters, evidence-reduction, task-runner and local-vaul
   assert.equal(vault.dependencies[evidence.name], evidence.version);
   for (const runtime of [provider, evidence, runner, vault]) assert.equal(cli.dependencies[runtime.name], runtime.version);
 });
+
+test('CLI pins provider-adapters, evidence-reduction, task-runner and local-vault published with Claude tools limited to the task authority', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const [cli, provider, evidence, runner, vault] = await Promise.all(
+    ['cli', 'provider-adapters', 'evidence-reduction', 'task-runner', 'local-vault'].map(manifest));
+  const atLeast = (version, floor) => version.localeCompare(floor, undefined, {numeric: true}) >= 0;
+  // provider-adapters 0.1.43 is on npm with a Claude task argv that keeps Edit and Write available and
+  // auto-approved (acceptEdits, no --tools) for a read-only signed task. #508 passes --tools with only
+  // the authorized tools and runs read-only tasks with dontAsk. The CLI loads provider-adapters from npm,
+  // directly and through evidence-reduction, task-runner and local-vault, so each of those pins the
+  // later provider-adapters and the CLI pins them all.
+  assert.ok(atLeast(provider.version, '0.1.44'), `provider-adapters ${provider.version} lets read-only Claude tasks edit`);
+  assert.equal(evidence.dependencies[provider.name], provider.version);
+  assert.equal(runner.dependencies[provider.name], provider.version);
+  assert.equal(vault.dependencies[evidence.name], evidence.version);
+  for (const runtime of [provider, evidence, runner, vault]) assert.equal(cli.dependencies[runtime.name], runtime.version);
+});
