@@ -49,6 +49,8 @@ async function fixture(t: {after(fn: () => Promise<void>): void}) {
     isIsolatedDeviceSession, runInIsolatedDeviceSession, saveDeviceConnectionPreference, admitSignedRequests,
     configPath: () => configPath, pendingEnrollmentPath: () => join(home, 'pending.json'),
     workspaceRegistryPath: () => join(home, 'workspaces.json'), dharmaHome: () => home,
+    // No workspace in these fixtures has a recorded connect provider selection.
+    connectedProviderScope: async () => null,
     currentBootstrapHostScope: () => undefined,
     installationIdentityPath: () => installationPath, protocolStatePath: () => join(home, 'state.json'),
     connectionPreference, assertConnectionScope, assertInstallationContinuity, assertUnenrolledHome, assertReauthenticationSigningTrust, canonicalize,

@@ -11,7 +11,8 @@ import { bootstrapGrantMode } from './privateGrantInput.js';
 import {isIsolatedDeviceSession, runInIsolatedDeviceSession} from './connectionSessionScope.js';
 import { assertBootstrapHostSource, currentBootstrapHostScope, runCodexBootstrapHost } from './bootstrapHostScope.js';
 import {parseNamedCodexSkillObservation} from './namedCodexSkillDiscovery.js';
-import { repositoryAfterReadiness, setupProviderSharedReady } from './index.js';
+import { parseSelectedProviderIds, repositoryAfterReadiness, setupProviderSharedReady } from './index.js';
+import { onboardingResumeCommand } from './onboardingWorkspace.js';
 
 type Onboarding = Record<string, unknown>;
 type Caller = (...args: unknown[]) => Promise<Record<string, unknown>>;
@@ -33,7 +34,9 @@ async function caller(name: string, dependencies: Record<string, unknown>): Prom
   assert.equal(compiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${compiled.outputText}\n${name}`, {
     assertBootstrapHostSource, currentBootstrapHostScope, parseNamedCodexSkillObservation,
-    isIsolatedDeviceSession, runInIsolatedDeviceSession, ...dependencies,
+    isIsolatedDeviceSession, runInIsolatedDeviceSession,
+    // No workspace in these fixtures has a recorded connect provider selection.
+    connectedProviderScope: async () => null, ...dependencies,
   }, {
     timeout: 1000, contextCodeGeneration: { strings: false, wasm: false },
   }) as Caller;
@@ -56,6 +59,7 @@ function bootstrapDependencies(onboarding: Onboarding) {
       return { fingerprint: `sha256:${'e'.repeat(64)}` };
     },
     isLocalProviderId: (provider: string) => provider === 'codex',
+    parseSelectedProviderIds, onboardingResumeCommand,
     readDeviceConfig: async () => null,
     assertRelayStartupOwnership: async () => record('startup_preflight'),
     configPath: () => '/fixture-config/device.json',
