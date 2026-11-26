@@ -14,7 +14,7 @@ export interface WslHostOptions {
 }
 type Receipt = Context & {schema: 'dharma.wsl-relay-host/v1'; windowsSid: string;
   executable: string; taskName: string; arguments: string; description: string};
-type State = {exists: boolean; enabled: boolean; running: boolean};
+type State = {exists: boolean; enabled: boolean; running: boolean; legacy?: true};
 const fail = (conflict = false): never => {throw new Error(conflict
   ? 'autostart_conflict: the WSL host task is not owned by this installation.' : 'wsl_host_startup_unavailable');};
 const receiptPath = (home: string) => join(home, 'relay', 'wsl-host.json');
@@ -47,7 +47,7 @@ async function windows(script: string): Promise<{stdout: string}> {
   const scope = currentBootstrapHostScope();
   const operation = () => new Promise<{stdout: string}>((accept, reject) => {
     const child = execFile('/init', windowsArgs(script),
-    {cwd: '/mnt/c/Windows/System32', timeout: 15000, maxBuffer: 16384, signal: scope?.signal},
+    {cwd: '/mnt/c/Windows/System32', timeout: 15000, maxBuffer: 16384, signal: scope?.signal, windowsHide: true},
     (error, stdout) => error ? reject(error) : accept({stdout}));
     if (scope) captureBootstrapHostChild(scope, child);
   });
@@ -130,7 +130,10 @@ function lookup(receipt: Receipt, required = false) {
     + `-or [string]$_.CategoryInfo.Category -ne 'ObjectNotFound') {throw} }; `;
 }
 
-function taskAction(receipt: Receipt) {
+// Earlier releases registered PowerShell itself as the action. It is still owned,
+// and the next registration replaces it with the headless action. A rollback to one
+// of those releases puts it back, because they own only this action.
+function legacyTaskAction(receipt: Receipt) {
   // Direct WSL scheduled actions can exit before Linux starts. Preserve the
   // same limited identity while hosting the fixed native command in PowerShell.
   const script = `$ErrorActionPreference='Stop'; & ${literal(receipt.executable)} `
@@ -140,8 +143,16 @@ function taskAction(receipt: Receipt) {
     arguments: `-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`};
 }
 
+function taskAction(receipt: Receipt) {
+  // A headless console host runs PowerShell, so no console window opens at logon
+  // and none can be closed to stop the WSL host. Both paths are absolute.
+  const powershell = legacyTaskAction(receipt);
+  return {executable: receipt.executable.replace(/wsl\.exe$/i, 'conhost.exe'),
+    arguments: `--headless ${powershell.executable} ${powershell.arguments}`};
+}
+
 function taskPreamble(receipt: Receipt, operation: string): string {
-  const action = taskAction(receipt);
+  const action = taskAction(receipt), legacy = legacyTaskAction(receipt);
   return `# dharma-wsl-host:${operation}\n$ErrorActionPreference="Stop"; `
     + `$current=[System.Security.Principal.WindowsIdentity]::GetCurrent(); `
     + `if ($current.User.Value -cne ${literal(receipt.windowsSid)}) {throw 'wsl_host_identity_conflict'}; `
@@ -150,23 +161,27 @@ function taskPreamble(receipt: Receipt, operation: string): string {
     + `$definition=[xml](Export-ScheduledTask -TaskPath '\\' -TaskName ${literal(receipt.taskName)} -ErrorAction Stop); `
     + `$principals=@($definition.Task.Principals.Principal); `
     + `if ($value.Description -cne ${literal(receipt.description)} -or $actions.Count -ne 1 `
-    + `-or $actions[0].Execute -cne ${literal(action.executable)} -or $actions[0].Arguments -cne ${literal(action.arguments)} `
+    + `-or -not (($actions[0].Execute -ceq ${literal(action.executable)} -and $actions[0].Arguments -ceq ${literal(action.arguments)}) `
+    + `-or ($actions[0].Execute -ceq ${literal(legacy.executable)} -and $actions[0].Arguments -ceq ${literal(legacy.arguments)})) `
     + `-or $principals.Count -ne 1 -or $principals[0].UserId -cne $current.User.Value `
     + `-or [string]$value.Principal.LogonType -ne 'Interactive' -or [string]$value.Principal.RunLevel -ne 'Limited' `
     + `-or $triggers.Count -ne 1 -or $triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' -or !$triggers[0].Enabled `
     + `-or ($triggers[0].UserId -cne $current.User.Value -and $triggers[0].UserId -cne $current.Name) `
     + `-or [string]$value.Settings.MultipleInstances -ne 'IgnoreNew' `
     + `-or $value.Settings.ExecutionTimeLimit -ne 'PT0S' -or $value.Settings.RestartCount -ne 0 `
-    + `-or $value.Settings.DisallowStartIfOnBatteries -or $value.Settings.StopIfGoingOnBatteries) {throw 'wsl_host_task_conflict'} }; `;
+    + `-or $value.Settings.DisallowStartIfOnBatteries -or $value.Settings.StopIfGoingOnBatteries) {throw 'wsl_host_task_conflict'} }; `
+    + `function Test-LegacyAction($value) { @($value.Actions)[0].Execute -ceq ${literal(legacy.executable)} }; `;
 }
 
+// An owned task that still has the earlier action also reports legacy=true.
 const renderState = `if ($null -eq $task) { @{exists=$false;enabled=$false;running=$false}|ConvertTo-Json -Compress } `
-  + `else { Assert-OwnedTask $task; @{exists=$true;enabled=($task.State -ne 'Disabled');running=($task.State -eq 'Running')}|ConvertTo-Json -Compress }`;
+  + `else { Assert-OwnedTask $task; $state=@{exists=$true;enabled=($task.State -ne 'Disabled');running=($task.State -eq 'Running')}; `
+  + `if (Test-LegacyAction $task) {$state.legacy=$true}; $state|ConvertTo-Json -Compress }`;
 
 async function query(options: WslHostOptions, receipt: Receipt): Promise<State> {
   const value = await invoke(options, taskPreamble(receipt, 'status') + renderState);
-  if (!object(value) || Object.keys(value).sort().join(',') !== 'enabled,exists,running'
-    || Object.values(value).some(field => typeof field !== 'boolean')) return fail();
+  if (!object(value) || !['enabled,exists,running', 'enabled,exists,legacy,running'].includes(Object.keys(value).sort().join(','))
+    || Object.values(value).some(field => typeof field !== 'boolean') || value.legacy === false) return fail();
   if (!value.exists && (value.enabled || value.running) || value.running && !value.enabled) return fail();
   return value as State;
 }
@@ -179,7 +194,11 @@ export async function assertWslHostPreflight(options: WslHostOptions): Promise<v
   if (state.exists && !previous) return fail(true);
 }
 
-export async function enableWslRelayHost(options: WslHostOptions): Promise<void> {
+/**
+ * `restoreLegacyAction` is set when a rollback restores a release that owns only the
+ * earlier PowerShell action; the task then gets that action back.
+ */
+export async function enableWslRelayHost(options: WslHostOptions, restoreLegacyAction = false): Promise<void> {
   const current = await context(options); if (!current) return;
   const target = await expected(options, current), previous = await saved(options);
   if (previous && !sameReceipt(previous, target)) return fail(true);
@@ -187,13 +206,17 @@ export async function enableWslRelayHost(options: WslHostOptions): Promise<void>
   if (before.exists && !previous) return fail(true);
   await privateParent(options);
   if (!previous) await writeFile(receiptPath(options.home), `${JSON.stringify(target, null, 2)}\n`, {flag: 'wx', mode: 0o600});
-  if (before.exists && before.enabled) return;
+  if (before.exists && before.enabled && Boolean(before.legacy) === restoreLegacyAction) return;
   // Preserve ownership before external mutation. Lost responses require readback,
-  // not replacement of a possibly foreign task.
-  const action = taskAction(target);
+  // not replacement of a possibly foreign task. An owned task with the other
+  // action keeps its definition and gets the wanted action in place.
+  const action = restoreLegacyAction ? legacyTaskAction(target) : taskAction(target);
+  const replace = restoreLegacyAction ? '-not (Test-LegacyAction $task)' : 'Test-LegacyAction $task';
   await invoke(options, taskPreamble(target, 'register')
-    + `if ($null -ne $task) { Assert-OwnedTask $task; Enable-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)}|Out-Null } else { `
     + `$action=New-ScheduledTaskAction -Execute ${literal(action.executable)} -Argument ${literal(action.arguments)}; `
+    + `if ($null -ne $task) { Assert-OwnedTask $task; `
+    + `if (${replace}) { Set-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)} -Action $action|Out-Null }; `
+    + `Enable-ScheduledTask -TaskPath '\\' -TaskName ${literal(target.taskName)}|Out-Null } else { `
     + `$trigger=New-ScheduledTaskTrigger -AtLogOn -User $current.Name; `
     + `$principal=New-ScheduledTaskPrincipal -UserId $current.Name -LogonType Interactive -RunLevel Limited; `
     + `$settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; `
@@ -201,7 +224,7 @@ export async function enableWslRelayHost(options: WslHostOptions): Promise<void>
     + `-Action $action -Trigger $trigger -Principal $principal -Settings $settings|Out-Null }; `
     + lookup(target, true) + renderState);
   const after = await query(options, target);
-  if (!after.exists || !after.enabled) return fail();
+  if (!after.exists || !after.enabled || Boolean(after.legacy) !== restoreLegacyAction) return fail();
 }
 
 export async function wslRelayHostStatus(options: WslHostOptions) {

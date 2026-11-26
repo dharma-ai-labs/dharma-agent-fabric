@@ -85,7 +85,7 @@ function realIo() {
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'GitHub Actions context required');
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), directory = join(root, 'release');
   const run = (file, args, limit = 4 * 1024 * 1024) => execFileSync(file, args,
-    { cwd: root, encoding: 'utf8', timeout: 20000, maxBuffer: limit, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    { cwd: root, encoding: 'utf8', timeout: 20000, maxBuffer: limit, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }).trim();
   const snapshot = () => {
     const remote = run('git', ['ls-remote', '--exit-code', 'origin', 'refs/heads/main']);
     assert.match(remote, /^[a-f0-9]{40}\trefs\/heads\/main$(?![\s\S])/, 'exact current main required');

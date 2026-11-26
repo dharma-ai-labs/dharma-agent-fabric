@@ -196,7 +196,7 @@ test('an INSERT failure cannot unlink content committed by a later writer', { ti
     }
   `;
   const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source],
-    { stdio: ['ignore', 'pipe', 'pipe'] });
+    { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   const chunks: Buffer[] = [];
   child.stdout.on('data', bytes => chunks.push(bytes));
   child.stderr.on('data', bytes => chunks.push(bytes));
@@ -234,7 +234,7 @@ for (const afterRename of [false, true]) {
     `;
     try {
       const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source],
-        { stdio: ['ignore', 'pipe', 'pipe'] });
+        { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
       const chunks: Buffer[] = [];
       child.stdout.on('data', data => chunks.push(data)); child.stderr.on('data', data => chunks.push(data));
       const code = await new Promise<number | null>((resolveExit, reject) => {
@@ -298,7 +298,7 @@ test('orphan cleanup preserves a writer committed after its directory snapshot',
     } finally { reader?.close(); writer?.close(); replacement.restore(); await fs.rm(root, { recursive: true, force: true }); }
   `;
   const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--input-type=module', '-e', source],
-    { stdio: ['ignore', 'pipe', 'pipe'] });
+    { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   const chunks: Buffer[] = [];
   child.stdout.on('data', data => chunks.push(data)); child.stderr.on('data', data => chunks.push(data));
   const code = await new Promise<number | null>((resolveExit, reject) => { child.on('error', reject); child.on('exit', resolveExit); });
@@ -566,7 +566,7 @@ test('provider session lease recovers only after the recorded process has exited
     const original = first.tryAcquireProviderSessionLease(binding.bindingId, expected);
     assert.ok(original);
     assert.equal(second.tryAcquireProviderSessionLease(binding.bindingId, expected), null);
-    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', windowsHide: true });
     assert.ok(child.pid);
     await new Promise<void>((resolveChild, reject) => {
       child.once('error', reject);

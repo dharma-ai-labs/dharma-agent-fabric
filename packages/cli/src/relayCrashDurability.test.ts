@@ -131,7 +131,7 @@ test('the supervisor reports each unexpected child exit and keeps restarting', a
     onExit: async (exit: unknown) => {exits.push(exit); throw new Error('receipt storage unavailable');},
     start: () => {
       starts += 1;
-      const child = spawn(process.execPath, ['-e', 'process.exit(2)'], {stdio: 'ignore'});
+      const child = spawn(process.execPath, ['-e', 'process.exit(2)'], {stdio: 'ignore', windowsHide: true});
       started.push(child); return child;
     }};
   const result = await superviseRelay(options);
@@ -146,7 +146,7 @@ test('a requested stop is not reported as a child failure', async () => {
   const options = {signal: controller.signal, onExit: (exit: unknown) => {exits.push(exit);},
     start: () => {
       const child = spawn(process.execPath, ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'],
-        {stdio: ['ignore', 'pipe', 'ignore']});
+        {stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true});
       child.stdout!.once('data', () => controller.abort());
       return child;
     }};
@@ -364,7 +364,7 @@ async function signedWorkspace(t: {after(fn: () => Promise<void>): void}) {
 test('relay start on a NUL-filled replay state leaves a stable receipt before the lease', async t => {
   const f = await signedWorkspace(t);
   const failed = await execFileAsync(process.execPath, [bin, 'relay', 'start', '--policy', f.policyPath],
-    {env: f.env, timeout: 30_000}).then(() => null, (error: {code: number; stderr: string}) => error);
+    {env: f.env, timeout: 30_000, windowsHide: true}).then(() => null, (error: {code: number; stderr: string}) => error);
   assert.equal(failed?.code, 2);
   assert.match(failed?.stderr ?? '', new RegExp(REPLAY_TEXT));
   const text = await fs.readFile(f.receiptPath, 'utf8');
@@ -402,7 +402,7 @@ test('verbose status drops a repository failure only once a valid session open f
 test('a supervised relay on a NUL-filled replay state shows the failure in status', async t => {
   const f = await signedWorkspace(t);
   const supervisor = spawn(process.execPath, [bin, 'relay', 'supervise', '--policy', f.policyPath],
-    {env: f.env, stdio: 'ignore', detached: true});
+    {env: f.env, stdio: 'ignore', detached: true, windowsHide: true});
   try {
     let receipt: {supervisorPid?: number; exitCode?: number; code?: string} | null = null;
     for (let attempt = 0; attempt < 300 && !receipt?.supervisorPid; attempt += 1) {
@@ -414,11 +414,11 @@ test('a supervised relay on a NUL-filled replay state shows the failure in statu
     assert.equal(receipt?.exitCode, 2);
     const validate = await failureReceiptValidator();
     assert.equal(validate(receipt), true, JSON.stringify(validate.errors));
-    const {stdout} = await execFileAsync(process.execPath, [bin, 'status'], {env: f.env, timeout: 30_000});
+    const {stdout} = await execFileAsync(process.execPath, [bin, 'status'], {env: f.env, timeout: 30_000, windowsHide: true});
     const status = JSON.parse(stdout);
     assert.equal(status.reconnect.state, 'failing');
     assert.equal(status.reconnect.lastFailure.code, 'workspace_authorization_replay_state_invalid');
-    await execFileAsync(process.execPath, [bin, 'relay', 'stop'], {env: f.env, timeout: 30_000});
+    await execFileAsync(process.execPath, [bin, 'relay', 'stop'], {env: f.env, timeout: 30_000, windowsHide: true});
     assert.deepEqual(await fs.readFile(f.statePath), NUL_STATE);
   } finally {
     if (supervisor.exitCode === null) supervisor.kill('SIGTERM');
@@ -467,4 +467,126 @@ test('the failure receipt schema admits both receipt forms and refuses text or a
     {...start, pid: null}, {...start, pid: 0}, {...start, version: canary}, {...start, code: 'relay_child_exited'},
     {...start, exitCode: 2}, {...start, signal: 'SIGTERM'}, {...stamped, supervisorPid: 0}, {...stamped, signal: canary},
     withoutExitCode]) assert.equal(validate(receipt), false, JSON.stringify(receipt));
+});
+
+// #514: default status said running with no failure after 17 loop failures in about 12 hours.
+async function failureHistoryRecord(f: {home: string; workspaceId: string}, entries: Record<string, unknown>[],
+  overrides: Record<string, unknown> = {}) {
+  const relayPid = join(f.home, 'relay', 'relay.pid');
+  const {mtimeMs, ctimeMs} = await fs.stat(relayPid);
+  return {schema: 'dharma.local-repository-relay-failure-history/v1', organizationId: 'org_test', deviceId: 'device_test',
+    workspaceId: f.workspaceId, pid: process.pid, relayPidMtimeMs: mtimeMs, relayPidCtimeMs: ctimeMs,
+    count: 17, since: entries[0]!.at, entries, ...overrides};
+}
+const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+
+test('default status lists each workspace with a relay failure in the last 24 hours, even after a later success', async t => {
+  const f = await runningRelayHome(t);
+  const history = join(f.repository, 'failure-history.json');
+  const entries = [{at: minutesAgo(90), stage: 'session_open', failureCode: 'connection_identity_store_busy'},
+    {at: minutesAgo(30), stage: 'task_poll', httpStatus: 503, errorCode: 'upstream_unavailable'}];
+  await fs.writeFile(history, JSON.stringify(await failureHistoryRecord(f, entries)));
+  await fs.writeFile(join(f.repository, 'last-successful-poll.json'), JSON.stringify({at: minutesAgo(1)}));
+  const status = async () => withHome(f.home, () => run(['status'])) as Promise<Record<string, unknown>>;
+  const current = await status();
+  assert.deepEqual(current.recentRelayFailures, [{workspaceId: f.workspaceId, count: 17, since: entries[0]!.at,
+    latest: entries[1]}]);
+  assert.deepEqual(current.reconnect, {state: 'awaiting_acknowledgement', lastSuccessfulPollAt: null},
+    'reconnect keeps its fields; the summary is added beside it');
+  for (const stale of [await failureHistoryRecord(f, [{at: minutesAgo(25 * 60), stage: 'task_poll'}]),
+    await failureHistoryRecord(f, entries, {pid: process.pid + 1}),
+    await failureHistoryRecord(f, entries, {organizationId: 'org_other'}),
+    await failureHistoryRecord(f, [{...entries[1], message: 'token-sk-private-canary'}])]) {
+    await fs.writeFile(history, JSON.stringify(stale));
+    const reread = await status();
+    assert.equal(reread.recentRelayFailures, undefined, JSON.stringify(stale));
+    assert.doesNotMatch(JSON.stringify(reread), /canary/);
+  }
+  await fs.writeFile(history, NUL_STATE);
+  assert.equal((await status()).recentRelayFailures, undefined);
+});
+
+test('verbose status keeps the failure history after the next successful session open', async t => {
+  const f = await signedWorkspace(t);
+  const relayPid = join(f.home, 'relay', 'relay.pid'), repository = join(f.home, 'relay', 'repositories', f.workspaceId);
+  await fs.mkdir(repository, {recursive: true});
+  await fs.writeFile(relayPid, String(process.pid));
+  const entries = [{at: minutesAgo(40), stage: 'session_open', failureCode: 'connection_anchor_busy'},
+    {at: minutesAgo(20), stage: 'evidence_sync', errorCode: 'ECONNRESET'},
+    {at: minutesAgo(10), stage: 'task_poll', httpStatus: 502}];
+  await fs.writeFile(join(repository, 'failure-history.json'),
+    JSON.stringify(await failureHistoryRecord(f, entries, {count: 3})));
+  await fs.writeFile(join(repository, 'last-session-open.json'), JSON.stringify({at: minutesAgo(1)}));
+  const repository0 = await withHome(f.home, async () => (await run(['status', '--verbose']) as {
+    repositoryRelays: {repositories: Array<Record<string, unknown>>}}).repositoryRelays.repositories[0]);
+  assert.equal(repository0?.lastFailure, undefined);
+  assert.deepEqual(repository0?.failureHistory, {count: 3, since: entries[0]!.at, recent: [...entries].reverse()});
+});
+
+test('each failed loop keeps the last-failure receipt unchanged and adds to the bounded workspace history', async t => {
+  const home = await temporaryRoot(t, 'dharma-failure-history-');
+  const supervisor = await import('./repositoryRelaySupervisor.js') as Record<string, unknown>;
+  const writes: string[] = [];
+  const {recordRepositoryRelayFailure} = await privateFunctions(['recordRepositoryRelayFailure'], {
+    dharmaHome: () => home, repositoryRelayFailureReceipt: supervisor.repositoryRelayFailureReceipt,
+    appendRepositoryRelayFailureHistory: supervisor.appendRepositoryRelayFailureHistory,
+    writeJsonAtomic: async (path: string, value: unknown) => {
+      writes.push(path.slice(home.length));
+      await fs.mkdir(dirname(path), {recursive: true});
+      await fs.writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+    }});
+  const workspaceId = randomUUID(), repository = join(home, 'relay', 'repositories', workspaceId);
+  const binding = {organizationId: 'org_test', deviceId: 'device_test', pid: process.pid, relayPidMtimeMs: 1.5,
+    relayPidCtimeMs: 2.5};
+  const base = Date.now() - 60_000;
+  for (let index = 0; index < 22; index++) {
+    await recordRepositoryRelayFailure!({workspaceId, code: 'repository_relay_failed',
+      at: new Date(base + index * 1000).toISOString(), stage: 'task_poll', category: 'unexpected',
+      httpStatus: 503, errorCode: 'upstream_unavailable'}, binding);
+  }
+  const receipt = JSON.parse(await fs.readFile(join(repository, 'last-failure.json'), 'utf8'));
+  assert.deepEqual(Object.keys(receipt).sort(), ['at', 'category', 'deviceId', 'organizationId', 'pid', 'relayPidCtimeMs',
+    'relayPidMtimeMs', 'schema', 'stage', 'workspaceId'], 'the last-failure receipt schema is unchanged');
+  const history = JSON.parse(await fs.readFile(join(repository, 'failure-history.json'), 'utf8'));
+  assert.equal(history.count, 22);
+  assert.equal(history.since, new Date(base).toISOString());
+  assert.equal(history.entries.length, 20);
+  assert.deepEqual(history.entries.at(-1), {at: new Date(base + 21_000).toISOString(), stage: 'task_poll', httpStatus: 503,
+    errorCode: 'upstream_unavailable'});
+  const ajv = new Ajv2020({strict: true, strictRequired: false});
+  (createRequire(import.meta.url)('ajv-formats') as FormatsPlugin)(ajv);
+  const validate = ajv.compile(JSON.parse(await fs.readFile(
+    new URL('./schemas/local-repository-relay-failure-history.schema.json', import.meta.url), 'utf8')));
+  assert.equal(validate(history), true, JSON.stringify(validate.errors));
+  for (const invalid of [{...history, message: 'private'}, {...history, entries: [{...history.entries[0], message: 'private'}]},
+    {...history, entries: Array(21).fill(history.entries[0])}, {...history, entries: [{...history.entries[0], errorCode: 'has space'}]}]) {
+    assert.equal(validate(invalid), false, JSON.stringify(invalid).slice(0, 200));
+  }
+  assert.equal(writes.length, 44);
+});
+
+test('every relay workspace loop opens its client under its workspace owner key, so a restarted loop replays its own kept request', async () => {
+  const opened: Array<Record<string, unknown>> = [];
+  const {client} = await privateFunctions(['client'], {
+    AgentFabricClient: {open: async (input: Record<string, unknown>) => {
+      opened.push(input); return {openSession: async () => ({ok: true})};
+    }},
+    admitSignedRequests: (instance: unknown) => instance, configPath: () => 'device.json',
+    protocolStatePath: () => 'protocol-state.json', isIsolatedDeviceSession: () => false, VERSION: '0.0.0'});
+  await client!({}, 'relay:workspace-a');
+  await client!({}, 'relay:workspace-a');
+  await client!();
+  assert.deepEqual(opened.map(input => [input.statePath, input.ownerKey]),
+    [['protocol-state.json', 'relay:workspace-a'], ['protocol-state.json', 'relay:workspace-a'], ['protocol-state.json', undefined]],
+    'a loop restarted in the same process gets the same entry; an ad hoc command gets one of its own');
+  const source = await fs.readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
+  const loop = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'relayWorkspaceLoop')!;
+  const calls: string[][] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === 'client') calls.push(node.arguments.map(arg => arg.getText(ast)));
+    ts.forEachChild(node, visit);
+  };
+  visit(loop);
+  assert.deepEqual(calls, [['telemetry', '`relay:${canonicalWorkspace.workspaceId}`']]);
 });

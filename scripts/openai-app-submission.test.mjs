@@ -229,7 +229,7 @@ test('the submission-time check fails loudly while any placeholder is unsubstitu
   // provides the reviewer organization. The copy pasted into the OpenAI form
   // must pass this check first.
   const script = resolve(import.meta.dirname, 'openai-app-submission-filled.mjs');
-  const committed = spawnSync(process.execPath, [script, resolve(appDir, 'chatgpt-app-submission.json')], { encoding: 'utf8' });
+  const committed = spawnSync(process.execPath, [script, resolve(appDir, 'chatgpt-app-submission.json')], { encoding: 'utf8', windowsHide: true });
   assert.equal(committed.status, 1, 'the committed package still holds placeholders and must not pass');
   assert.match(committed.stderr, /\{\{REVIEWER_ORG_ID\}\} at test_cases\[0\]\.user_prompt/);
   assert.match(committed.stderr, /^not ready to submit: \d+ unsubstituted placeholder/m);
@@ -239,20 +239,20 @@ test('the submission-time check fails loudly while any placeholder is unsubstitu
     const filledPath = join(dir, 'filled.json');
     const filled = JSON.stringify(submission).replace(/\{\{([A-Z0-9_]+)\}\}/g, (_, name) => `seed-${name.toLowerCase()}`);
     writeFileSync(filledPath, filled);
-    const ok = spawnSync(process.execPath, [script, filledPath], { encoding: 'utf8' });
+    const ok = spawnSync(process.execPath, [script, filledPath], { encoding: 'utf8', windowsHide: true });
     assert.equal(ok.status, 0, ok.stderr);
     assert.deepEqual(JSON.parse(ok.stdout), { ok: true, placeholders: 0 });
 
     // A half-substituted copy (braces removed, name left) is still refused.
     writeFileSync(filledPath, filled.replace('seed-reviewer_org_id', 'REVIEWER_ORG_ID'));
-    const half = spawnSync(process.execPath, [script, filledPath], { encoding: 'utf8' });
+    const half = spawnSync(process.execPath, [script, filledPath], { encoding: 'utf8', windowsHide: true });
     assert.equal(half.status, 1);
     assert.match(half.stderr, /REVIEWER_ORG_ID at /);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 
-  const usage = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+  const usage = spawnSync(process.execPath, [script], { encoding: 'utf8', windowsHide: true });
   assert.equal(usage.status, 2);
   assert.match(checklist, /^- \[ \] Placeholders substituted .*`node scripts\/openai-app-submission-filled\.mjs <substituted-copy\.json>` passes/m,
     'the checklist requires the submission-time placeholder check');
@@ -470,7 +470,7 @@ function runDocumented(line, cwd, env) {
   }
   assert.match(args[0] ?? '', /^scripts\/[a-z-]+\.mjs$/, `documented command must run a repository script: ${line}`);
   args[0] = resolve(repoRoot, args[0]);
-  const result = spawnSync(process.execPath, args, { cwd, input, encoding: 'utf8' });
+  const result = spawnSync(process.execPath, args, { cwd, input, encoding: 'utf8', windowsHide: true });
   if (output) writeFileSync(join(cwd, output), result.stdout);
   return result;
 }

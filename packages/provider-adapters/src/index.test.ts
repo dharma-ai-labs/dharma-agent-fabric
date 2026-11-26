@@ -17,6 +17,7 @@ import {
   parseHermesSessionExport,
   providerFailureCategory,
   providerTaskReadiness,
+  providerCapabilityWithoutExecutable,
   providerExecutionRecords,
   providerProcessEnvironment,
 } from './index.js';
@@ -49,7 +50,8 @@ test('failed provider execution returns only a diagnostic category alongside pri
 
 test('provider task readiness distinguishes installation from authenticated execution', async () => {
   const environment = { HOME: '/home/customer', PATH: '/usr/bin:/bin' };
-  const authenticatedClaude = await providerTaskReadiness('claude', 'claude', environment, (_command, argv) => {
+  const authenticatedClaude = await providerTaskReadiness('claude', 'claude', environment, (_command, argv, options) => {
+    assert.equal(options.windowsHide, true);
     assert.deepEqual(argv, ['auth', 'status']);
     return { status: 0, stdout: JSON.stringify({ loggedIn: true }), stderr: '' };
   });
@@ -84,6 +86,7 @@ test('provider discovery finds supported per-user CLI installations outside the 
     (executable, argv, options) => {
       assert.equal(executable, 'agy');
       assert.deepEqual(argv, ['--version']);
+      assert.equal(options.windowsHide, true);
       observedPath = String(options.env.PATH || '');
       return { status: 0, stdout: '1.1.15\n', stderr: '' };
     },
@@ -117,6 +120,27 @@ test('Agy 1.1.13 capabilities fail closed for signed effects and host lifecycle 
     skillRollback: 'unavailable',
     usageEvidence: 'unavailable',
   });
+});
+
+// The platform marks an endpoint offline only when evidence and task execution are both unavailable. A Linux host with no
+// claude executable reported evidence 'available', so its claude endpoint was registered active.
+test('Codex and Claude with no executable report nothing available, like Agy and Hermes', () => {
+  for (const provider of ['codex', 'claude'] as const) {
+    assert.deepEqual(providerCapabilityWithoutExecutable(provider), {
+      provider,
+      version: null,
+      evidence: 'unavailable',
+      configuredAssets: 'unavailable',
+      taskExecution: 'unavailable',
+      sessionContinuation: 'unavailable',
+      skillInstall: 'unavailable',
+      activation: 'unavailable',
+      skillRollback: 'unavailable',
+      usageEvidence: 'unavailable',
+    });
+  }
+  assert.deepEqual(providerCapabilityWithoutExecutable('agy'), agyCapability(null));
+  assert.deepEqual(providerCapabilityWithoutExecutable('hermes'), hermesCapability(null));
 });
 
 test('Agy 1.1.15 advertises content-attested activation and transactional rollback support', () => {

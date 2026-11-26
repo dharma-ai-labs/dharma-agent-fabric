@@ -51,7 +51,7 @@ async function downloadArchive(url: string) {
 function extractArchive(platform: NodeJS.Platform) {
   return (file: string, destination: string) => new Promise<void>((done, fail) => {
     const tar = platform === 'win32' ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
-    const child = spawn(tar, [platform === 'win32' ? '-xf' : '-xzf', file, '-C', destination], { stdio: 'ignore' });
+    const child = spawn(tar, [platform === 'win32' ? '-xf' : '-xzf', file, '-C', destination], { stdio: 'ignore', windowsHide: true });
     child.once('error', fail);
     child.once('exit', code => code === 0 ? done() : fail(new Error(`node_runtime_extract_failed: exit ${code}`)));
   });

@@ -14,15 +14,15 @@ const encoded = Buffer.from(remote).toString('base64url');
 
 async function committedRepository(path: string, origin = remote) {
   await mkdir(path, { recursive: true });
-  await git('git', ['init', '-q', path]);
-  await git('git', ['-C', path, 'config', 'user.email', 'fixture@example.invalid']);
-  await git('git', ['-C', path, 'config', 'user.name', 'Fixture']);
-  await git('git', ['-C', path, 'commit', '--allow-empty', '-qm', 'fixture']);
-  await git('git', ['-C', path, 'remote', 'add', 'origin', origin]);
+  await git('git', ['init', '-q', path], { windowsHide: true });
+  await git('git', ['-C', path, 'config', 'user.email', 'fixture@example.invalid'], { windowsHide: true });
+  await git('git', ['-C', path, 'config', 'user.name', 'Fixture'], { windowsHide: true });
+  await git('git', ['-C', path, 'commit', '--allow-empty', '-qm', 'fixture'], { windowsHide: true });
+  await git('git', ['-C', path, 'remote', 'add', 'origin', origin], { windowsHide: true });
   // An empty commit is not enough to qualify a source checkout.
   await writeFile(resolve(path, 'README.md'), '# Fixture\n');
-  await git('git', ['-C', path, 'add', 'README.md']);
-  await git('git', ['-C', path, 'commit', '-qm', 'source']);
+  await git('git', ['-C', path, 'add', 'README.md'], { windowsHide: true });
+  await git('git', ['-C', path, 'commit', '-qm', 'source'], { windowsHide: true });
 }
 
 function selection(home: string, workspace: string, cloneRepository?: (url: string, target: string) => Promise<void>) {
@@ -75,8 +75,8 @@ test('empty starting directory clones selected remote once into isolated managed
     const cloneRepository = async (url: string, target: string) => {
       assert.equal(url, remote);
       clones++;
-      await git('git', ['clone', '-q', '--', source, target]);
-      await git('git', ['-C', target, 'remote', 'set-url', 'origin', remote]);
+      await git('git', ['clone', '-q', '--', source, target], { windowsHide: true });
+      await git('git', ['-C', target, 'remote', 'set-url', 'origin', remote], { windowsHide: true });
     };
     const first = await resolveBootstrapRepositoryWorkspace(selection(home, empty, cloneRepository));
     assert.equal(first.selection, 'managed_cloned');
@@ -102,10 +102,10 @@ test('failed clone and conflicting managed checkout fail without mutating the st
     const source = resolve(home, 'upstream');
     await committedRepository(source);
     const cloned = await resolveBootstrapRepositoryWorkspace(selection(home, empty, async (_url, target) => {
-      await git('git', ['clone', '-q', '--', source, target]);
-      await git('git', ['-C', target, 'remote', 'set-url', 'origin', remote]);
+      await git('git', ['clone', '-q', '--', source, target], { windowsHide: true });
+      await git('git', ['-C', target, 'remote', 'set-url', 'origin', remote], { windowsHide: true });
     }));
-    await git('git', ['-C', cloned.workspace, 'remote', 'set-url', 'origin', 'https://github.com/other/jobs.git']);
+    await git('git', ['-C', cloned.workspace, 'remote', 'set-url', 'origin', 'https://github.com/other/jobs.git'], { windowsHide: true });
     await assert.rejects(resolveBootstrapRepositoryWorkspace(selection(home, empty)), /repository_checkout_conflict/);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
@@ -129,11 +129,11 @@ test('a matching Git remote with only an empty commit is not eligible', async ()
   try {
     const workspace = resolve(home, 'empty-commit');
     await mkdir(workspace);
-    await git('git', ['init', '-q', workspace]);
-    await git('git', ['-C', workspace, 'config', 'user.email', 'fixture@example.invalid']);
-    await git('git', ['-C', workspace, 'config', 'user.name', 'Fixture']);
-    await git('git', ['-C', workspace, 'commit', '--allow-empty', '-qm', 'fixture']);
-    await git('git', ['-C', workspace, 'remote', 'add', 'origin', remote]);
+    await git('git', ['init', '-q', workspace], { windowsHide: true });
+    await git('git', ['-C', workspace, 'config', 'user.email', 'fixture@example.invalid'], { windowsHide: true });
+    await git('git', ['-C', workspace, 'config', 'user.name', 'Fixture'], { windowsHide: true });
+    await git('git', ['-C', workspace, 'commit', '--allow-empty', '-qm', 'fixture'], { windowsHide: true });
+    await git('git', ['-C', workspace, 'remote', 'add', 'origin', remote], { windowsHide: true });
     await assert.rejects(resolveBootstrapRepositoryWorkspace(selection(home, workspace)), /repository_checkout_empty/);
   } finally { await rm(home, { recursive: true, force: true }); }
 });

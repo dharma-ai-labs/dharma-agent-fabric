@@ -32,7 +32,7 @@ const runVerifier = (manifest) => {
   try {
     const path = join(dir, 'manifest.json');
     writeFileSync(path, JSON.stringify(manifest));
-    return spawnSync(process.execPath, [verifier, '--snapshot-manifest', path], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+    return spawnSync(process.execPath, [verifier, '--snapshot-manifest', path], { cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 };
 
@@ -407,7 +407,7 @@ test('reference derives from the actual catalog without hardcoded host inventory
 });
 
 test('no-argument verifier keeps its exact existing output', () => {
-  const child = spawnSync(process.execPath, [verifier], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+  const child = spawnSync(process.execPath, [verifier], { cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true });
   assert.equal(child.status, 0, child.stderr);
   assert.equal(child.stdout, '{"ok":true,"toolCount":65,"confirmationCount":38}\n');
 });
@@ -423,18 +423,18 @@ test('verifier opt-in snapshot mode runs the comparator against the real catalog
   try {
     const path = join(dir, 'manifest.json');
     writeFileSync(path, JSON.stringify(manifest));
-    const ok = spawnSync(process.execPath, [verifier, '--snapshot-manifest', path], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+    const ok = spawnSync(process.execPath, [verifier, '--snapshot-manifest', path], { cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true });
     assert.equal(ok.status, 0, ok.stderr);
     const receipt = JSON.parse(ok.stdout);
     assert.equal(receipt.verdict, 'compatible');
     assert.equal(receipt.referenceToolCount, catalog.tools.length);
     manifest.snapshots[4].tools = tools.slice(1);
     writeFileSync(path, JSON.stringify(manifest));
-    const drift = spawnSync(process.execPath, [verifier, '--snapshot-manifest', path], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+    const drift = spawnSync(process.execPath, [verifier, '--snapshot-manifest', path], { cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true });
     assert.equal(drift.status, 1);
     assert.equal(JSON.parse(drift.stdout).verdict, 'incompatible');
     for (const args of [['--snapshot-manifest'], ['--unknown'], ['--snapshot-manifest', join(dir, 'missing.json')], ['--snapshot-manifest', path, '--snapshot-manifest', path]]) {
-      const bad = spawnSync(process.execPath, [verifier, ...args], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+      const bad = spawnSync(process.execPath, [verifier, ...args], { cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true });
       assert.notEqual(bad.status, 0, args.join(' '));
       assert.doesNotMatch(bad.stdout, /"ok":true/);
     }
@@ -449,7 +449,7 @@ const runVerifierArgs = (manifest, extraArgs) => {
   try {
     const path = join(dir, 'manifest.json');
     writeFileSync(path, JSON.stringify(manifest));
-    return spawnSync(process.execPath, [verifier, '--snapshot-manifest', path, ...extraArgs], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+    return spawnSync(process.execPath, [verifier, '--snapshot-manifest', path, ...extraArgs], { cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 };
 const chatgptCaptureManifest = () => {
@@ -498,7 +498,7 @@ test('393-F3: --profile accepts only chatgpt and only with --snapshot-manifest',
     assert.equal(bad.status, 2, extraArgs.join(' '));
     assert.equal(bad.stdout, '', extraArgs.join(' '));
   }
-  const alone = spawnSync(process.execPath, [verifier, '--profile', 'chatgpt'], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+  const alone = spawnSync(process.execPath, [verifier, '--profile', 'chatgpt'], { cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true });
   assert.equal(alone.status, 2);
   assert.equal(alone.stdout, '');
 });

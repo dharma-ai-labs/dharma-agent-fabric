@@ -26,7 +26,7 @@ const execute = promisify(execFile);
 async function gitRead(workspace: string, args: string[]) {
   try {
     return (await execute('git', ['-C', workspace, ...args],
-      { encoding: 'buffer', timeout: 10_000, maxBuffer: 256_000 })).stdout;
+      { encoding: 'buffer', timeout: 10_000, maxBuffer: 256_000, windowsHide: true })).stdout;
   } catch {
     throw new Error('Legacy installer is not unchanged tracked Git content.');
   }

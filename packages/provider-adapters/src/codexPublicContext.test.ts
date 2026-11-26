@@ -119,7 +119,7 @@ test('native Codex public history API without credentials or an inference turn',
   assert.equal(result.context.turns.length, 0);
   assert.equal(result.context.executedModel, null);
   assert.deepEqual(calls, ['thread/read', 'thread/resume', 'thread/read']);
-  t.diagnostic(JSON.stringify({ runtimeVersion: execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim(),
+  t.diagnostic(JSON.stringify({ runtimeVersion: execFileSync('codex', ['--version'], { encoding: 'utf8', windowsHide: true }).trim(),
     inferenceTurns: 0, configuredModel: result.context.configuredModel,
     contextHash: result.contextHash, enrolledIdentity: false }));
 });

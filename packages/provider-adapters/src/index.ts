@@ -485,13 +485,13 @@ export async function executableVersion(
   probe?: (
     executable: string,
     argv: string[],
-    options: { encoding: 'utf8'; timeout: number; env: NodeJS.ProcessEnv },
+    options: { encoding: 'utf8'; timeout: number; env: NodeJS.ProcessEnv; windowsHide: boolean },
   ) => { status: number | null; stdout: string; stderr: string },
 ): Promise<string | null> {
   const run = probe || (await import('node:child_process')).spawnSync;
   const env = providerProcessEnvironment(source);
   const launch = providerLaunch(command, ['--version'], env);
-  const result = run(launch.command, launch.argv, { encoding: 'utf8', timeout: 5_000, env });
+  const result = run(launch.command, launch.argv, { encoding: 'utf8', timeout: 5_000, env, windowsHide: true });
   if (result.status !== 0) return null;
   const stdout = typeof result.stdout === 'string' ? result.stdout : result.stdout?.toString('utf8') || '';
   const stderr = typeof result.stderr === 'string' ? result.stderr : result.stderr?.toString('utf8') || '';
@@ -501,7 +501,7 @@ export async function executableVersion(
 type SynchronousProbe = (
   executable: string,
   argv: string[],
-  options: { encoding: 'utf8'; timeout: number; env: NodeJS.ProcessEnv },
+  options: { encoding: 'utf8'; timeout: number; env: NodeJS.ProcessEnv; windowsHide: boolean },
 ) => { status: number | null; stdout: string | Buffer; stderr: string | Buffer };
 
 function probeText(value: string | Buffer): string {
@@ -517,7 +517,7 @@ export async function providerTaskReadiness(
   const run = probe || (await import('node:child_process')).spawnSync;
   const env = providerProcessEnvironment(source);
   const launch = providerLaunch(command, provider === 'claude' ? ['auth', 'status'] : ['login', 'status'], env);
-  const result = run(launch.command, launch.argv, { encoding: 'utf8', timeout: 5_000, env });
+  const result = run(launch.command, launch.argv, { encoding: 'utf8', timeout: 5_000, env, windowsHide: true });
   const stdout = probeText(result.stdout);
   const stderr = probeText(result.stderr);
   if (result.status !== 0) return 'partial';
@@ -1177,7 +1177,7 @@ export const hermesAdapter: ProviderAdapter = {
     const { stdout } = await execFileAsync(launch.command, launch.argv, {
       timeout: 60_000,
       maxBuffer: 67_108_864,
-      env,
+      env, windowsHide: true,
     });
     return parseHermesSessionExport(String(stdout), request.workspace, request);
   },
@@ -1199,14 +1199,16 @@ function cliCapability(provider: Exclude<ProviderId, 'agy' | 'hermes'>, version:
   return {
     provider,
     version,
-    evidence: 'available',
-    configuredAssets: 'partial',
+    // With no executable the provider cannot run, so it reports nothing available, like Agy and Hermes. The platform
+    // marks an endpoint offline only when evidence and task execution are both unavailable.
+    evidence: version ? 'available' : 'unavailable',
+    configuredAssets: version ? 'partial' : 'unavailable',
     taskExecution,
     sessionContinuation: 'unavailable',
     skillInstall: version ? 'available' : 'unavailable',
-    activation: 'next_session',
+    activation: version ? 'next_session' : 'unavailable',
     skillRollback: version ? 'available' : 'unavailable',
-    usageEvidence: 'partial',
+    usageEvidence: version ? 'partial' : 'unavailable',
   };
 }
 
