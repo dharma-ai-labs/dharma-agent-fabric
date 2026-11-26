@@ -173,7 +173,7 @@ import {inspectNamedCodexRecoveryToolDeclaration} from './codexSigningRecoveryTo
 import {captureCredentialEnvironment, credentialVariable, relayChildEnvironment} from './credentialEnvironment.js';
 import {smokeCommandPolicy} from './smokeCommandEnvironment.js';
 
-const VERSION = '0.2.228';
+const VERSION = '0.2.229';
 const USAGE = CLI_USAGE;
 const execFileAsync = promisify(execFile);
 const LOCAL_PROVIDER_IDS = ['codex', 'claude', 'agy', 'hermes'] as const;
