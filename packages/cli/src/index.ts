@@ -6116,11 +6116,20 @@ async function connectedProviderScope(workspaceId: string): Promise<ProviderId[]
   return selected.length ? selected : null;
 }
 
-/** Adds a connect's provider selection to the one recorded for the workspace. A later connect removes none. */
+/**
+ * Adds a connect's provider selection, or setup's provider, to the one recorded for the workspace. A later connect
+ * with `--provider` removes none; a connect without it clears the record with clearConnectedProviderScope.
+ */
 async function recordConnectedProviderScope(workspaceId: string, providerIds: ProviderId[]) {
   if (!UUID_PATTERN.test(workspaceId)) throw new Error('Workspace identifier is invalid.');
   const selected = [...new Set([...((await connectedProviderScope(workspaceId)) ?? []), ...providerIds])];
   await writeJsonAtomic(resolve(dharmaHome(), 'registry', 'connected-providers', `${workspaceId}.json`), selected);
+}
+
+/** Removes a workspace's recorded selection, so its relay registers every adapter again. */
+async function clearConnectedProviderScope(workspaceId: string) {
+  if (!UUID_PATTERN.test(workspaceId)) throw new Error('Workspace identifier is invalid.');
+  await rm(resolve(dharmaHome(), 'registry', 'connected-providers', `${workspaceId}.json`), { force: true });
 }
 
 // Provider probes spawn up to six blocking commands, and the relay autostart report can
@@ -6985,12 +6994,19 @@ async function onboard(flags: Map<string, string | boolean>): Promise<Output> {
     path: workspace,
     repositoryRemoteHash: repositoryIdentity.fingerprint,
   });
-  // Only `repositories connect` passes `providers`. Setup passes `provider`; its relay still registers every adapter.
+  // Only `repositories connect --provider` passes `providers`. Setup passes `provider`, and a plain connect neither.
   const connectSelection = providerIds && typeof flags.get('providers') === 'string' ? providerIds : null;
+  const recordedSelection = registered ? await connectedProviderScope(registered.workspaceId) : null;
   // A workspace registered without a recorded selection (by setup, a plain connect or an earlier release) has its
   // relay register every adapter. A later connect that names fewer providers leaves it that way and removes none.
-  const keepsEveryAdapter = connectSelection !== null && registered !== null
-    && await connectedProviderScope(registered.workspaceId) === null;
+  const keepsEveryAdapter = connectSelection !== null && registered !== null && recordedSelection === null;
+  // On a workspace whose connect recorded a selection, setup adds its provider to the record and a plain connect
+  // removes the record, so the relay registers every adapter again. Both happen before this run registers the
+  // workspace, so the relay's next refresh never drops the provider this run registers.
+  if (registered && connectSelection === null && recordedSelection !== null) {
+    if (providerIds) await recordConnectedProviderScope(registered.workspaceId, providerIds);
+    else await clearConnectedProviderScope(registered.workspaceId);
+  }
   if (!registered) {
     const addFlags = new Map<string, string | boolean>([
       ['organization-id', organizationId],

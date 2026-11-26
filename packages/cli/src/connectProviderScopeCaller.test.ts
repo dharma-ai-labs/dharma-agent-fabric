@@ -29,7 +29,7 @@ const SOURCE_FUNCTIONS = ['repositoriesConnect', 'repositoryKeyAssignments', 're
   'registerWorkspaceBeforeRepositoryBind', 'syncWorkspacePolicy', 'refreshVerifiedWorkspacePolicyForTransmission'];
 // Helpers the fix adds. They are compiled when the source has them, so this file also runs
 // against the code before the fix and shows the selection being lost there.
-const SCOPE_FUNCTIONS = ['connectedProviderScope', 'recordConnectedProviderScope'];
+const SCOPE_FUNCTIONS = ['connectedProviderScope', 'recordConnectedProviderScope', 'clearConnectedProviderScope'];
 
 async function compile(dependencies: Row): Promise<Record<string, Run>> {
   const text = await readFile(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8');
