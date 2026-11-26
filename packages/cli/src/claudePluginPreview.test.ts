@@ -23,19 +23,16 @@ const read = (path: string) => readFileSync(join(root, path), 'utf8');
 const json = (path: string) => JSON.parse(read(path)) as Record<string, unknown>;
 const PREVIEW = 'plugins/claude/dharma-agent-fabric-preview';
 
-test('1.0.7-preview is a separate marketplace entry beside the stable 1.0.8 entry', () => {
+test('the marketplace lists only the stable 1.0.8 entry; the 1.0.7-preview folder stays unlisted', () => {
   const plugins = json('.claude-plugin/marketplace.json').plugins as Array<Record<string, unknown>>;
-  assert.equal(plugins.length, 2);
+  assert.equal(plugins.length, 1);
   const stable = plugins.find(item => item.name === 'dharma-agent-fabric')!;
   assert.equal(stable.version, '1.0.8');
   assert.equal(stable.source, './plugins/claude/dharma-agent-fabric');
   assert.equal(json('plugins/claude/dharma-agent-fabric/.claude-plugin/plugin.json').version, '1.0.8');
   assert.equal(existsSync(join(root, 'plugins/claude/dharma-agent-fabric/hooks')), false, 'the stable plugin gets no hooks');
-  const preview = plugins.find(item => item.name === 'dharma-agent-fabric-preview')!;
-  assert.equal(preview.version, '1.0.7-preview');
-  assert.equal(preview.source, `./${PREVIEW}`);
-  assert.match(String(preview.description), /preview/i);
-  assert.match(String(preview.description), /prototype/i);
+  // The preview listing waits for the SessionStart hook fix; it returns with a version bump.
+  assert.equal(plugins.some(item => item.name === 'dharma-agent-fabric-preview' || item.source === `./${PREVIEW}`), false);
   const manifest = json(`${PREVIEW}/.claude-plugin/plugin.json`);
   assert.equal(manifest.name, 'dharma-agent-fabric-preview');
   assert.equal(manifest.version, '1.0.7-preview');
