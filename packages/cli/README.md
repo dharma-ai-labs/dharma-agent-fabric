@@ -441,7 +441,21 @@ Repeat `--provider` to attach only the local runtimes that should serve the
 selected repository agent. Omitting it preserves compatibility by attaching
 every installed supported provider. The local relay keeps to the selection when
 it refreshes the workspace policy, including after a connect that stopped
-early, and a later connect with another `--provider` adds that provider.
+early, and a later connect with another `--provider` adds that provider. On a
+repository that keeps to a selection, `dharma setup` adds the provider it sets
+up, and a connect without `--provider` returns it to every provider. A
+repository that already serves every provider, because `dharma setup` or a
+connect without `--provider` registered it, keeps every provider when a later
+connect names some of them. So does a repository connected with `--provider` by
+CLI 0.2.228 or earlier, because those releases recorded no selection. Such a
+connect says so in its output: `providerScope.relayRegisters` is
+`every_installed`, and `providerScope.recordPath` is the record file. To keep
+such a repository to some providers, write their names as a JSON array, for
+example `["codex"]`, to
+`$DHARMA_HOME/registry/connected-providers/<workspaceId>.json` (`DHARMA_HOME`
+defaults to `~/.dharma`). `dharma repositories status --repo "$PWD" --json`
+prints the `workspaceId`. The relay's next policy refresh then registers only
+those providers.
 
 One selected source repository becomes one logical organization agent and one
 permanent branch in the organization's private Dharma control repository.

@@ -34,7 +34,9 @@ async function caller(name: string, dependencies: Record<string, unknown>): Prom
   assert.equal(compiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
   return runInNewContext(`${compiled.outputText}\n${name}`, {
     assertBootstrapHostSource, currentBootstrapHostScope, parseNamedCodexSkillObservation,
-    isIsolatedDeviceSession, runInIsolatedDeviceSession, ...dependencies,
+    isIsolatedDeviceSession, runInIsolatedDeviceSession,
+    // No workspace in these fixtures has a recorded connect provider selection.
+    connectedProviderScope: async () => null, ...dependencies,
   }, {
     timeout: 1000, contextCodeGeneration: { strings: false, wasm: false },
   }) as Caller;
