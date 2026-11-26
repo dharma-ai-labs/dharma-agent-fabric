@@ -1161,14 +1161,16 @@ function cliCapability(provider: Exclude<ProviderId, 'agy' | 'hermes'>, version:
   return {
     provider,
     version,
-    evidence: 'available',
-    configuredAssets: 'partial',
+    // With no executable the provider cannot run, so it reports nothing available, like Agy and Hermes. The platform
+    // marks an endpoint offline only when evidence and task execution are both unavailable.
+    evidence: version ? 'available' : 'unavailable',
+    configuredAssets: version ? 'partial' : 'unavailable',
     taskExecution,
     sessionContinuation: 'unavailable',
     skillInstall: version ? 'available' : 'unavailable',
-    activation: 'next_session',
+    activation: version ? 'next_session' : 'unavailable',
     skillRollback: version ? 'available' : 'unavailable',
-    usageEvidence: 'partial',
+    usageEvidence: version ? 'partial' : 'unavailable',
   };
 }
 
