@@ -6,7 +6,7 @@ import ts from 'typescript';
 import * as relayClient from '@dharma-ai-labs/agent-fabric-relay-client';
 
 // Run the bootstrap's actual diagnostic observer; the top-level handler still prints the bare code after it.
-async function stderrFor(diagnostic: Record<string, string>) {
+async function stderrFor(diagnostic: Record<string, string | number>) {
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
   let observer: string | undefined;
@@ -51,4 +51,13 @@ test('other finalize failures print their typed reason and server code', async (
 test('a phase without a typed reason keeps its existing single diagnostic line', async () => {
   const diagnostic = {...report, phase: 'store_preflight'};
   assert.deepEqual(await stderrFor(diagnostic), [`${JSON.stringify(diagnostic)}\n`]);
+});
+
+test('a clock too far off to correct names the measured offset and the next step', async () => {
+  const diagnostic = {...report, phase: 'challenge', reason: 'clock_skew', clockOffsetSeconds: -172_800};
+  const lines = await stderrFor(diagnostic);
+  assert.deepEqual(JSON.parse(lines[0]!), diagnostic);
+  assert.equal(lines[1], "setup_claim_failed (clock_skew): This computer's clock is about 2 days ahead of Dharma's time, more than setup corrects automatically (45 seconds). Turn on automatic date and time on this computer, then get a fresh setup prompt from Dharma and run it.\n");
+  assert.match((await stderrFor({...diagnostic, clockOffsetSeconds: 5_400}))[1]!, /clock is about 90 minutes behind Dharma's time/);
+  assert.match((await stderrFor({...diagnostic, clockOffsetSeconds: 241}))[1]!, /clock is about 241 seconds behind Dharma's time/);
 });

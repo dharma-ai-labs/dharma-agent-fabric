@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import {
   validateProviderSessionRegistrationV2Contract,
   type ProviderSessionRegistrationV2,
@@ -13,6 +14,8 @@ import {
   readSessionAttachment,
   recordClaudeSessionStart,
   sessionNamesCommand,
+  sessionStatePath,
+  writeSessionStateFile,
   type SessionMessageTransport,
   type SessionMessagingHost,
 } from './sessionNames.js';
@@ -137,6 +140,112 @@ test('claude --current without the hook environment needs exactly one SessionSta
     await assert.rejects(sessionNamesCommand('attach', flags([['provider', 'claude'], ['current', true],
       ['name', 'ops-claude'], ['yes', true]]), g.host), /claude_current_session_unavailable/);
   } finally { await g.cleanup(); }
+});
+
+// Live: the SessionStart hook was cancelled at its timeout and attach said only claude_current_session_unavailable.
+// The code stays first and unchanged; the message then says the hook did not record the session, why when the
+// launcher left a note, and the one-line recovery. The recovery holds only a session id checked as a UUID (the CLI
+// takes the folder from where it runs), and it names a session only when exactly one can be meant.
+const recoveryLine = (id: string) => `run this from this session's folder: dharma hook claude session-start --session-id ${id}`;
+const attachCurrent = (host: SessionMessagingHost) => sessionNamesCommand('attach', flags([['provider', 'claude'],
+  ['current', true], ['name', 'ops-claude'], ['yes', true]]), host);
+const unavailableMessage = (host: SessionMessagingHost) => attachCurrent(host).then(() => '', (error: unknown) => (error as Error).message);
+const failureNote = (sessionId: string, cwd: string, overrides: Record<string, unknown> = {}) => ({
+  schema: 'dharma.claude-session-start-failure/v1', sessionId, cwd, at: '2026-11-10T09:00:00.000Z', state: 'failed',
+  reason: 'cli_exit_2', ...overrides });
+const writeFailureNote = (home: string, sessionId: string, value: unknown) =>
+  writeSessionStateFile(sessionStatePath(home, 'claude-session-start-failures', `${sessionId}.json`), value);
+// A folder name with every character that breaks or injects into shell quoting, and non-ASCII text.
+const HOSTILE_CWD = 'project \'"$(x);& é 日本';
+
+test('claude attach without a SessionStart record explains why and gives the one-line recovery, keeping the error code', async () => {
+  const f = await fixture({ cwd: join(tmpdir(), HOSTILE_CWD) });
+  try {
+    // No note at all (an older plugin, or the hook never ran) and no exported id: restart; no session to name.
+    let message = await unavailableMessage(f.host);
+    assert.match(message, /^claude_current_session_unavailable: /);
+    assert.match(message, /SessionStart hook did not record this session/);
+    assert.match(message, /[Rr]estart this Claude Code session/);
+    assert.doesNotMatch(message, /--session-id|echo/);
+    // A note for another directory is not this session's.
+    const elsewhere = randomUUID();
+    await writeFailureNote(f.home, elsewhere, failureNote(elsewhere, join(f.home, 'elsewhere')));
+    assert.ok(!(await unavailableMessage(f.host)).includes(elsewhere));
+    // Exactly one note for this folder: a hook killed at its timeout leaves its pending note.
+    const killed = randomUUID();
+    await writeFailureNote(f.home, killed, failureNote(killed, f.host.cwd, { state: 'pending', reason: 'did_not_finish' }));
+    message = await unavailableMessage(f.host);
+    assert.match(message, /^claude_current_session_unavailable: /);
+    assert.match(message, /did not finish/);
+    assert.ok(message.endsWith(recoveryLine(killed)), message);
+    assert.match(message, /^[\x20-\x7e]*$/, 'ASCII only: the folder name is never printed');
+    assert.ok(!message.includes(HOSTILE_CWD) && !message.includes('echo'), message);
+    // Two windows in one folder both failed: naming either could record the other one, so no session is named.
+    const second = randomUUID();
+    await writeFailureNote(f.home, second, failureNote(second, f.host.cwd, { at: '2026-11-10T09:00:01.000Z' }));
+    message = await unavailableMessage(f.host);
+    assert.match(message, /^claude_current_session_unavailable: /);
+    assert.match(message, /[Rr]estart this Claude Code session/);
+    assert.ok(!message.includes(killed) && !message.includes(second), message);
+    assert.doesNotMatch(message, /--session-id|echo/);
+    assert.equal(f.deviceReads(), 0);
+  } finally { await f.cleanup(); }
+  // The hook exported this session's id: its note is found by id, whatever other notes share the folder.
+  const sessionId = randomUUID();
+  const g = await fixture({ env: { DHARMA_CLAUDE_SESSION_ID: sessionId }, cwd: join(tmpdir(), HOSTILE_CWD) });
+  try {
+    await writeFailureNote(g.home, sessionId, failureNote(sessionId, g.host.cwd));
+    const other = randomUUID();
+    await writeFailureNote(g.home, other, failureNote(other, g.host.cwd, { at: '2026-11-10T09:30:00.000Z' }));
+    const message = await unavailableMessage(g.host);
+    assert.match(message, /^claude_current_session_unavailable: /);
+    assert.match(message, /cli_exit_2/);
+    assert.ok(message.endsWith(recoveryLine(sessionId)), message);
+    assert.ok(!message.includes(other), message);
+    assert.match(message, /^[\x20-\x7e]*$/);
+  } finally { await g.cleanup(); }
+  // An exported id that is not a UUID is never echoed into a command line.
+  const h = await fixture({ env: { DHARMA_CLAUDE_SESSION_ID: 'not_a_uuid' } });
+  try {
+    const message = await unavailableMessage(h.host);
+    assert.match(message, /^claude_current_session_unavailable: /);
+    assert.doesNotMatch(message, /--session-id|not_a_uuid/);
+  } finally { await h.cleanup(); }
+});
+
+// The plugin writes the failure note and the CLI reads it; they ship separately, so the note is a runtime contract
+// (AGENTS.md rule 5). attach explains a note exactly when schemas/claude-session-start-failure.v1 accepts it.
+test('attach explains a failure note exactly when the claude-session-start-failure/v1 schema accepts it', async () => {
+  const schema = JSON.parse(await readFile(new URL('../../../schemas/claude-session-start-failure.v1.schema.json', import.meta.url), 'utf8'));
+  const validate = new Ajv2020({ strict: true }).compile(schema);
+  const sessionId = randomUUID();
+  const cwd = join(tmpdir(), 'work');
+  const valid = failureNote(sessionId, cwd);
+  const cases: Array<[string, Record<string, unknown>, boolean]> = [
+    ['failed', valid, true],
+    ['pending', { ...valid, state: 'pending', reason: 'did_not_finish' }, true],
+    ...['timed_out', 'cli_missing', 'cli_outdated', 'cli_killed', 'record_missing', 'cli_exit_1', 'cli_exit_3221225477']
+      .map(reason => [`failed ${reason}`, { ...valid, reason }, true] as [string, Record<string, unknown>, boolean]),
+    ['a hostile folder', { ...valid, cwd: join(tmpdir(), HOSTILE_CWD) }, true],
+    ['pending with a failure reason', { ...valid, state: 'pending' }, false],
+    ['an unknown reason', { ...valid, reason: 'see https://example.test' }, false],
+    ['an unknown state', { ...valid, state: 'done' }, false],
+    ['an extra field', { ...valid, recovery: `echo '{}' | dharma hook claude session-start` }, false],
+    ['a free-form time', { ...valid, at: 'yesterday' }, false],
+    ['an empty folder', { ...valid, cwd: '' }, false],
+    ['another schema', { ...valid, schema: 'dharma.claude-session-start/v1' }, false],
+    ['a session id with shell text', { ...valid, sessionId: 'x;rm' }, false],
+  ];
+  for (const [label, value, expected] of cases) {
+    assert.equal(validate(value), expected, `${label}: schema ${JSON.stringify(validate.errors)}`);
+    const f = await fixture({ env: { DHARMA_CLAUDE_SESSION_ID: sessionId }, cwd: String(value.cwd || cwd) });
+    try {
+      await writeFailureNote(f.home, sessionId, value);
+      const message = await unavailableMessage(f.host);
+      assert.match(message, /^claude_current_session_unavailable: /, label);
+      assert.equal(/ It (?:started|failed) at /.test(message), expected, `${label}: attach and the schema agree: ${message}`);
+    } finally { await f.cleanup(); }
+  }
 });
 
 test('attach needs --yes; --dry-run returns the plan; neither reads the device or calls the platform', async () => {

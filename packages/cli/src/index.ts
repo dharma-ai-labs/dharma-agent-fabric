@@ -10067,10 +10067,15 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
   if (command === 'msg') return sessionMessageCommand(String(subcommand), flags, sessionMessagingHost());
   if (command === 'hook') {
     // Run by the Claude plugin 1.0.7-preview hooks; an empty result prints nothing.
+    // `session-start --session-id <uuid>` is the hand-run recovery that the hook and `sessions attach` print.
     if (subcommand !== 'claude' || !['session-start', 'inbox'].includes(String(positional[2])) || positional.length !== 3
-      || [...flags].some(([key, value]) => key !== 'dry-run' || value !== true)) throw new Error('claude_hook_command_invalid');
+      || [...flags].some(([key, value]) => !(key === 'dry-run' && value === true)
+        && !(key === 'session-id' && typeof value === 'string' && positional[2] === 'session-start'))) {
+      throw new Error('claude_hook_command_invalid');
+    }
+    const sessionId = flags.get('session-id');
     return claudeHookCommand(String(positional[2]), { host: sessionMessagingHost(), stdin: () => readHookStdin(process.stdin),
-      dryRun: flags.get('dry-run') === true });
+      dryRun: flags.get('dry-run') === true, ...(typeof sessionId === 'string' ? { sessionId } : {}) });
   }
   if (command === 'onboard') return onboard(flags);
   if (command === 'login') return login(flags);

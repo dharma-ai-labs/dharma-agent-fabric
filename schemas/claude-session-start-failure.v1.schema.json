@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/claude-session-start-failure/v1",
+  "title": "Device-local note that a Claude Code SessionStart hook did not record its session; not an authority envelope",
+  "description": "Written by the dharma-agent-fabric-preview plugin's hook launcher at DHARMA_HOME/session-messages/claude-session-start-failures/<sessionId>.json and read by `dharma sessions attach --provider claude --current`. The plugin and the CLI ship separately. `pending` is written before the CLI runs, so a hook stopped at its timeout still leaves it; `failed` says why no session record followed. The CLI removes the note once the session is recorded. It holds the session id, the working directory, a time and a fixed reason code only; nothing from it is put into a command line.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "sessionId", "cwd", "at", "state", "reason"],
+  "properties": {
+    "schema": {"const": "dharma.claude-session-start-failure/v1"},
+    "sessionId": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$(?![\\s\\S])"},
+    "cwd": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$(?![\\s\\S])"},
+    "state": {"enum": ["pending", "failed"]},
+    "reason": {"type": "string", "pattern": "^(?:did_not_finish|timed_out|cli_missing|cli_outdated|cli_killed|record_missing|cli_exit_-?[0-9]{1,10})$(?![\\s\\S])"}
+  },
+  "if": {"properties": {"state": {"const": "pending"}}},
+  "then": {"properties": {"reason": {"const": "did_not_finish"}}},
+  "else": {"properties": {"reason": {"not": {"const": "did_not_finish"}}}}
+}
