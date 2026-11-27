@@ -31,7 +31,7 @@ const SERVER_CODES = new Set([
 export type SetupClaimFailurePhase = 'input_validation' | 'store_preflight' | 'identity' | 'challenge'
   | 'signing' | 'finalize' | 'recipient_approval' | 'credential_validation' | 'credential_commit';
 export type SetupClaimFailureReason = 'approval_expired' | 'server_rejected' | 'network_unavailable'
-  | 'response_invalid' | 'canceled' | 'clock_skew';
+  | 'response_invalid' | 'canceled' | 'clock_skew' | 'credential_store_unavailable';
 export interface SetupClaimFailureDiagnostic {
   schema: 'dharma.setup-claim-failure/v1';
   code: 'setup_claim_failed';
@@ -80,6 +80,7 @@ export function setupClaimFailureMessage(diagnostic: Readonly<SetupClaimFailureD
     response_invalid: `Dharma's setup response could not be verified. ${retry} If it fails again, send Dharma this line.`,
     canceled: `Setup was canceled before it finished. ${retry}`,
     clock_skew: `${clock}, more than setup corrects automatically (${approximateDuration(SETUP_CLAIM_MAX_CLOCK_SKEW_MS / 1_000)}). Turn on automatic date and time on this computer, then get a fresh setup prompt from Dharma and run it.`,
+    credential_store_unavailable: `Setup could not use the Linux Secret Service (secret-tool), where it keeps this device's key. Install libsecret-tools and gnome-keyring, and run setup in a session with an unlocked keyring: a desktop login, or on a host without one, dbus-run-session with gnome-keyring-daemon --unlock. ${retry}`,
   }[diagnostic.reason];
   return `${diagnostic.code} (${diagnostic.reason}): ${text}${diagnostic.correlationId ? ` Correlation ID: ${diagnostic.correlationId}.` : ''}`;
 }
@@ -201,6 +202,8 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
     };
     phase = 'store_preflight';
     const rawStore = await guarded(async () => input.store ?? await createSystemSecureStore());
+    // Linux outside WSL needs an unlocked Secret Service through secret-tool; name it when the probe fails.
+    if (rawStore.backend === 'linux-secret-service') failureReason = 'credential_store_unavailable';
     const store: SecureSecretStore = hostFence ? hostFence.store(rawStore) : rawStore;
     const probeAccount = `setup-claim-preflight-${randomBytes(16).toString('hex')}`;
     const probeValue = randomBytes(32).toString('base64url');
@@ -212,6 +215,7 @@ export async function claimSetupReference(input: ClaimSetupReferenceInput): Prom
       // or partially installed credentials to pretend protected-store rollback.
       await rawStore.delete(probeAccount);
     }
+    failureReason = undefined;
     await assertScope();
     // Existing protected identity access fails before challenge/approval/effects.
     phase = 'identity';

@@ -139,7 +139,8 @@ Prerequisites:
 - Git;
 - one supported provider installed and authenticated locally;
 - a clean source repository;
-- browser access to the signed-in Clerk organization.
+- browser access to the signed-in Clerk organization;
+- on Linux outside WSL, an unlocked Secret Service keyring for the device key: install `libsecret-tools` (for `secret-tool`) and `gnome-keyring`, and run setup in a session where the keyring is unlocked. A desktop login provides one. On a host without a desktop session, such as an SSH or headless server, start the coding agent inside `dbus-run-session` and unlock the keyring with `gnome-keyring-daemon --unlock` first. Without it, setup stops at `store_preflight` with reason `credential_store_unavailable` before contacting Dharma.
 
 Install the public CLI:
 
