@@ -4,7 +4,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
-import { claimSetupReference, parseSetupClaimRecipientApproval, setupClaimFailureMessage, setupClaimSourceRegistration } from './setupClaim.js';
+import { claimSetupReference, parseSetupClaimRecipientApproval, setupClaimFailureMessage, setupClaimSourceRegistration,
+  type SetupClaimFailureDiagnostic } from './setupClaim.js';
 import {loadOrganizationApiToken, saveDeviceEnrollmentAnchor, type DeviceConfig} from './index.js';
 import { sealSetupClaimCredential, signCanonicalObject, setupClaimSigningPayload, validateContract,
   type SetupClaimChallenge, type SealedSetupClaimCredential, type TrustedServerSigningKeyset } from '@dharma-ai-labs/agent-fabric-contracts';
@@ -44,7 +45,8 @@ test('claim failures expose only the locally observed phase, never vendor conten
       ...{onFailureDiagnostic}, fetcher: async () => { requests++; throw new Error('secret-canary'); }}),
     /^Error: setup_claim_failed$/);
     assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: value.phase,
-      ...(value.phase === 'challenge' ? {reason: 'network_unavailable'} : {})}]);
+      ...(value.phase === 'challenge' ? {reason: 'network_unavailable'}
+        : value.phase === 'store_preflight' ? {reason: 'credential_store_unavailable'} : {})}]);
     assert.equal(JSON.stringify(reports).includes('secret-canary'), false);
     assert.equal(requests, value.phase === 'challenge' ? 1 : 0);
   }
@@ -81,7 +83,8 @@ test('additive failure fields stay bounded by the schema', async () => {
   const schemaDir = resolve(import.meta.dirname, '../../../schemas');
   const schemaId = 'https://schemas.dharma-ai.io/setup-claim-failure/v1';
   const report = {schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'finalize'};
-  for (const reason of ['approval_expired', 'server_rejected', 'network_unavailable', 'response_invalid', 'canceled', 'clock_skew']) {
+  for (const reason of ['approval_expired', 'server_rejected', 'network_unavailable', 'response_invalid', 'canceled', 'clock_skew',
+    'credential_store_unavailable']) {
     assert.equal((await validateContract(schemaDir, schemaId, {...report, reason, serverCode: 'setup_claim_expired',
       correlationId: correlation})).ok, true);
   }
@@ -326,6 +329,33 @@ test('clock_skew without a measured offset still names the limit and the next st
   assert.match(setupClaimFailureMessage({schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed',
     phase: 'challenge', reason: 'clock_skew'}) ?? '',
   /clock is too far from Dharma's time, more than setup corrects automatically \(45 seconds\)\. Turn on automatic date and time/);
+});
+const keyringFix = "setup_claim_failed (credential_store_unavailable): Setup could not use the Linux Secret Service (secret-tool), where it keeps this device's key. Install libsecret-tools and gnome-keyring, and run setup in a session with an unlocked keyring: a desktop login, or on a host without one, dbus-run-session with gnome-keyring-daemon --unlock. Get a fresh setup prompt from Dharma and run it.";
+test('a Linux host without an unlocked Secret Service names it and the fix before any request', async () => {
+  const missing = Object.assign(new Error('spawn secret-tool ENOENT secret-canary'), {code: 'ENOENT'});
+  const absent: SecureSecretStore = {...store(), put: async () => { throw missing; }, delete: async () => { throw missing; }};
+  const locked: SecureSecretStore = {...store(), get: async () => null};
+  for (const failing of [absent, locked]) {
+    const reports: unknown[] = []; let requests = 0;
+    await assert.rejects(claimSetupReference({...scope, store: failing, onFailureDiagnostic: report => { reports.push(report); },
+      fetcher: async () => { requests++; throw new Error('network'); }}), /^Error: setup_claim_failed$/);
+    assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'store_preflight',
+      reason: 'credential_store_unavailable'}]);
+    assert.equal(requests, 0);
+    assert.equal(JSON.stringify(reports).includes('secret-canary'), false);
+    // No request was sent, so there is no correlation ID to print.
+    assert.equal(setupClaimFailureMessage(reports[0] as SetupClaimFailureDiagnostic), keyringFix);
+    const schemaDir = resolve(import.meta.dirname, '../../../schemas');
+    assert.equal((await validateContract(schemaDir, 'https://schemas.dharma-ai.io/setup-claim-failure/v1', reports[0])).ok, true);
+  }
+});
+test('a store failure on other protected stores keeps the plain store_preflight diagnostic', async () => {
+  for (const backend of ['macos-keychain', 'windows-credential-manager'] as const) {
+    const reports: unknown[] = [];
+    await assert.rejects(claimSetupReference({...scope, store: {...store(), backend, put: async () => { throw new Error('secret-canary'); }},
+      onFailureDiagnostic: report => { reports.push(report); }}), /^Error: setup_claim_failed$/);
+    assert.deepEqual(reports, [{schema: 'dharma.setup-claim-failure/v1', code: 'setup_claim_failed', phase: 'store_preflight'}]);
+  }
 });
 function rotatedKeyset(f: Awaited<ReturnType<typeof fixture>>, generation: number, issuedAt: number, expiresAt: number,
   keys: TrustedServerSigningKeyset['keys']): TrustedServerSigningKeyset {

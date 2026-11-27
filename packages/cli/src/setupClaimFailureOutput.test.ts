@@ -61,3 +61,11 @@ test('a clock too far off to correct names the measured offset and the next step
   assert.match((await stderrFor({...diagnostic, clockOffsetSeconds: 5_400}))[1]!, /clock is about 90 minutes behind Dharma's time/);
   assert.match((await stderrFor({...diagnostic, clockOffsetSeconds: 241}))[1]!, /clock is about 241 seconds behind Dharma's time/);
 });
+
+test('a Linux host without an unlocked Secret Service prints the keyring fix after the diagnostic', async () => {
+  const diagnostic = {...report, phase: 'store_preflight', reason: 'credential_store_unavailable'};
+  const lines = await stderrFor(diagnostic);
+  assert.deepEqual(JSON.parse(lines[0]!), diagnostic);
+  assert.equal(lines[1], "setup_claim_failed (credential_store_unavailable): Setup could not use the Linux Secret Service (secret-tool), where it keeps this device's key. Install libsecret-tools and gnome-keyring, and run setup in a session with an unlocked keyring: a desktop login, or on a host without one, dbus-run-session with gnome-keyring-daemon --unlock. Get a fresh setup prompt from Dharma and run it.\n");
+  assert.equal(lines.length, 2);
+});
