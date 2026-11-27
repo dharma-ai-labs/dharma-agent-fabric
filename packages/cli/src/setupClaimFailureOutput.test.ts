@@ -61,3 +61,11 @@ test('a clock too far off to correct names the measured offset and the next step
   assert.match((await stderrFor({...diagnostic, clockOffsetSeconds: 5_400}))[1]!, /clock is about 90 minutes behind Dharma's time/);
   assert.match((await stderrFor({...diagnostic, clockOffsetSeconds: 241}))[1]!, /clock is about 241 seconds behind Dharma's time/);
 });
+
+test('a Linux host without an unlocked Secret Service prints the keyring fix after the diagnostic', async () => {
+  const diagnostic = {...report, phase: 'store_preflight', reason: 'credential_store_unavailable'};
+  const lines = await stderrFor(diagnostic);
+  assert.deepEqual(JSON.parse(lines[0]!), diagnostic);
+  assert.equal(lines[1], "setup_claim_failed (credential_store_unavailable): Setup could not use the Linux Secret Service, where it keeps this device's key. Install secret-tool (libsecret-tools on Debian/Ubuntu, libsecret on Fedora/Arch) and a Secret Service keyring such as gnome-keyring or KWallet, unlocked in your user session, which the relay service also uses. A desktop login provides one. On a host without one, run loginctl enable-linger $USER, then start and unlock the keyring on the user bus (DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus), and unlock it again after each reboot. Get a fresh setup prompt from Dharma and run it.\n");
+  assert.equal(lines.length, 2);
+});

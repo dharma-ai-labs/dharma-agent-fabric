@@ -189,3 +189,13 @@ test('CLI pins provider-adapters, evidence-reduction, task-runner and local-vaul
   assert.equal(vault.dependencies[evidence.name], evidence.version);
   for (const runtime of [provider, evidence, runner, vault]) assert.equal(cli.dependencies[runtime.name], runtime.version);
 });
+
+test('CLI pins a relay client published with the Linux credential store setup failure', async () => {
+  const manifest = async workspace => JSON.parse(await readFile(resolve(sourceRoot, 'packages', workspace, 'package.json'), 'utf8'));
+  const relay = await manifest('relay-client'), cli = await manifest('cli');
+  // 0.2.41 is on npm with a setup claim that reports a failed Linux Secret Service probe at store_preflight
+  // without a reason or fix. #551 reports credential_store_unavailable with the keyring fix; an installed
+  // CLI gets it only when it pins a later relay-client.
+  assert.ok(relay.version.localeCompare('0.2.42', undefined, {numeric: true}) >= 0, `relay-client ${relay.version} has no credential_store_unavailable reason`);
+  assert.equal(cli.dependencies[relay.name], relay.version);
+});
