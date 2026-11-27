@@ -66,6 +66,6 @@ test('a Linux host without an unlocked Secret Service prints the keyring fix aft
   const diagnostic = {...report, phase: 'store_preflight', reason: 'credential_store_unavailable'};
   const lines = await stderrFor(diagnostic);
   assert.deepEqual(JSON.parse(lines[0]!), diagnostic);
-  assert.equal(lines[1], "setup_claim_failed (credential_store_unavailable): Setup could not use the Linux Secret Service (secret-tool), where it keeps this device's key. Install libsecret-tools and gnome-keyring, and run setup in a session with an unlocked keyring: a desktop login, or on a host without one, dbus-run-session with gnome-keyring-daemon --unlock. Get a fresh setup prompt from Dharma and run it.\n");
+  assert.equal(lines[1], "setup_claim_failed (credential_store_unavailable): Setup could not use the Linux Secret Service, where it keeps this device's key. Install secret-tool (libsecret-tools on Debian/Ubuntu, libsecret on Fedora/Arch) and a Secret Service keyring such as gnome-keyring or KWallet, unlocked in your user session, which the relay service also uses. A desktop login provides one. On a host without one, run loginctl enable-linger $USER, then start and unlock the keyring on the user bus (DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus), and unlock it again after each reboot. Get a fresh setup prompt from Dharma and run it.\n");
   assert.equal(lines.length, 2);
 });
