@@ -78,8 +78,9 @@ stays inside the relay's 5-minute window for signed requests. Keyset and key val
 the two clocks, so the server's time never makes an expired key current again. Beyond 45 seconds setup reports
 `clock_skew` with `clockOffsetSeconds` (server minus local). On Linux outside WSL, a failed
 protected-store probe reports `store_preflight` with `credential_store_unavailable`: the Secret
-Service is missing or locked (`secret-tool` from `libsecret-tools`, a keyring such as `gnome-keyring`,
-and an unlocked keyring session are required). It fails before any request, so it has no
+Service is missing or locked. It needs `secret-tool` (`libsecret-tools` on Debian/Ubuntu,
+`libsecret` on Fedora/Arch) and a Secret Service keyring such as `gnome-keyring` or KWallet,
+unlocked in the user session that the systemd user relay service also uses. It fails before any request, so it has no
 `correlationId`. The CLI emits this record to
 stderr, followed by the fixed `setupClaimFailureMessage` line when a reason is
 known; stdout and the existing sanitized exception remain unchanged. Observer

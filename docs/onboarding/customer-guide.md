@@ -140,7 +140,7 @@ Prerequisites:
 - one supported provider installed and authenticated locally;
 - a clean source repository;
 - browser access to the signed-in Clerk organization;
-- on Linux outside WSL, an unlocked Secret Service keyring for the device key: install `libsecret-tools` (for `secret-tool`) and `gnome-keyring`, and run setup in a session where the keyring is unlocked. A desktop login provides one. On a host without a desktop session, such as an SSH or headless server, start the coding agent inside `dbus-run-session` and unlock the keyring with `gnome-keyring-daemon --unlock` first. Without it, setup stops at `store_preflight` with reason `credential_store_unavailable` before contacting Dharma.
+- on Linux outside WSL, a Secret Service keyring for the device key: install `secret-tool` (`libsecret-tools` on Debian/Ubuntu, `libsecret` on Fedora/Arch) and a Secret Service keyring such as `gnome-keyring` or KWallet. The keyring must be unlocked in your user session, because the relay runs as a systemd user service and reads the key there. A desktop login provides this. On a host without a desktop session, such as an SSH or headless server, enable lingering with `loginctl enable-linger "$USER"`, start the keyring on the user bus (`DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus`) and unlock it, for example with `gnome-keyring-daemon --unlock`, which reads the keyring password from standard input. Unlock it again after each reboot. A keyring that runs only inside `dbus-run-session` is not visible to the relay service. Without an unlocked keyring, setup stops at `store_preflight` with reason `credential_store_unavailable` before contacting Dharma.
 
 Install the public CLI:
 
