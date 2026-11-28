@@ -89,7 +89,7 @@ test('an Ubuntu 22.04 job proves the real sandbox, the operator status command a
   assert.equal(job['continue-on-error'], undefined);
   assert.equal(job['timeout-minutes'], 15);
   const names = ['Check out source', 'Use Node.js 22', 'Install locked dependencies', 'Build packages',
-    'Prepare command sandbox', 'Run real-sandbox tests', 'Check the operator sandbox status',
+    'Prepare command sandbox', 'Use the distribution Git', 'Run real-sandbox tests', 'Check the operator sandbox status',
     'Prove sandbox refusal on a restricted host'];
   assert.deepEqual(job.steps.map(item => item.name), names);
   const step = name => job.steps.find(item => item.name === name);
@@ -98,6 +98,20 @@ test('an Ubuntu 22.04 job proves the real sandbox, the operator status command a
     assert.equal(item['continue-on-error'], undefined, `${item.name} may not continue on error`);
     assert.equal(item.if, undefined, `${item.name} always runs`);
   }
+  // The runner image adds a newer Git from a PPA; stock Ubuntu 22.04 has Git 2.34. The sandbox
+  // steps run with the distribution's Git, so the job proves what a stock host does with a
+  // task-written .gitattributes: Git older than 2.41 fails the task closed.
+  const distroGit = step('Use the distribution Git');
+  assert.equal(distroGit.shell, 'bash');
+  for (const line of [
+    `distro=$(apt-cache madison git | awk -F'|' '$3 !~ /launchpadcontent/ { gsub(/ /, "", $2); print $2; exit }')`,
+    'test -n "$distro"',
+    'sudo apt-get install -y --no-install-recommends --allow-downgrades "git=$distro" "git-man=$distro"',
+    "git --version | grep -E '^git version 2\\.34\\.'",
+  ]) assert.ok(distroGit.run.split('\n').includes(line), `Use the distribution Git runs: ${line}`);
+  assert.doesNotMatch(distroGit.run, /\|\|\s*true/);
+  const names2 = job.steps.map(item => item.name);
+  assert.ok(names2.indexOf('Use the distribution Git') > names2.indexOf('Build packages'), 'the build keeps the image Git');
   // The same pinned actions and runtime as the validation legs.
   assert.deepEqual(step('Check out source'), validateStep('Check out source'));
   assert.deepEqual(step('Use Node.js 22'), validateStep('Use Node.js 22'));
@@ -129,4 +143,92 @@ test('an Ubuntu 22.04 job proves the real sandbox, the operator status command a
   assert.match(refusal.run, /test ! -e "\$home"/);
   assert.match(refusal.run, /sysctl -w user\.max_user_namespaces="\$original"\s*$/);
   assert.doesNotMatch(refusal.run, /\|\|\s*true/);
+});
+
+// Stock Ubuntu 24.04 sets kernel.apparmor_restrict_unprivileged_userns=1 and has no AppArmor
+// profile for bubblewrap, so the sandbox is refused there. The runner images do not show that
+// (ubuntu-latest ships a profile for bubblewrap), so this job turns the restriction on itself,
+// proves the typed refusal, installs the documented profile from the one file the documentation
+// prints, and proves the sandbox usable with the full real-sandbox file. Removing the job or
+// weakening a step turns this test red.
+test('an Ubuntu 24.04 job proves the refusal under the AppArmor restriction and the documented profile', () => {
+  const job = workflow.jobs['sandbox-ubuntu-2404-restricted'];
+  assert.ok(job, 'missing job: sandbox-ubuntu-2404-restricted');
+  assert.equal(job.name, 'Command sandbox (ubuntu-24.04 restricted)');
+  assert.equal(job['runs-on'], 'ubuntu-24.04');
+  assert.equal(job.strategy, undefined);
+  assert.equal(job['continue-on-error'], undefined);
+  assert.equal(job['timeout-minutes'], 15);
+  const names = ['Check out source', 'Use Node.js 22', 'Install locked dependencies', 'Build packages',
+    'Prepare command sandbox', 'Restrict user namespaces through AppArmor', 'Prove the restricted host refuses',
+    'Install the documented AppArmor profile', 'Check the operator sandbox status', 'Run real-sandbox tests'];
+  assert.deepEqual(job.steps.map(item => item.name), names);
+  const step = name => job.steps.find(item => item.name === name);
+  const validateStep = name => validate.steps.find(item => item.name === name);
+  for (const item of job.steps) {
+    assert.equal(item['continue-on-error'], undefined, `${item.name} may not continue on error`);
+    assert.equal(item.if, undefined, `${item.name} always runs`);
+    if (item.run) assert.doesNotMatch(item.run, /\|\|\s*true/, `${item.name} may not swallow a failure`);
+  }
+  assert.deepEqual(step('Check out source'), validateStep('Check out source'));
+  assert.deepEqual(step('Use Node.js 22'), validateStep('Use Node.js 22'));
+  assert.equal(step('Install locked dependencies').run, 'npm ci');
+  assert.equal(step('Build packages').run, 'npm run build');
+  assert.equal(step('Prepare command sandbox').run, validateStep('Prepare command sandbox').run);
+  const restrict = step('Restrict user namespaces through AppArmor');
+  assert.equal(restrict.shell, 'bash');
+  assert.match(restrict.run, /^sudo sysctl -w kernel\.apparmor_restrict_unprivileged_userns=1\n/);
+  assert.match(restrict.run, /test "\$\(cat \/proc\/sys\/kernel\/apparmor_restrict_unprivileged_userns\)" = 1/);
+  // The operator command refuses with the typed reason, the AppArmor setting and the profile fix.
+  const refusal = step('Prove the restricted host refuses');
+  assert.equal(refusal.shell, 'bash');
+  assert.match(refusal.run, /DHARMA_HOME="\$home" node packages\/cli\/dist\/bin\.js relay sandbox status --json > "\$RUNNER_TEMP\/sandbox-restricted\.json" \|\| code=\$\?\n/);
+  assert.match(refusal.run, /test "\$code" = 1\n/);
+  assert.match(refusal.run, /s\.reason !== 'user_namespaces_unavailable'/);
+  assert.match(refusal.run, /!s\.detail\.includes\('apparmor_restrict_unprivileged_userns=1'\)/);
+  assert.match(refusal.run, /!s\.fix\.includes\('\/etc\/apparmor\.d\/bwrap-dharma'\)/);
+  assert.match(refusal.run, /test ! -e "\$home"/);
+  // The profile goes in exactly as the documentation says; the restriction stays on.
+  const install = step('Install the documented AppArmor profile');
+  assert.equal(install.shell, 'bash');
+  assert.match(install.run, /^sudo install -o root -g root -m 0644 packaging\/apparmor\/bwrap-dharma \/etc\/apparmor\.d\/bwrap-dharma\n/);
+  assert.match(install.run, /\nsudo apparmor_parser -r \/etc\/apparmor\.d\/bwrap-dharma\n/);
+  assert.match(install.run, /test "\$\(cat \/proc\/sys\/kernel\/apparmor_restrict_unprivileged_userns\)" = 1/);
+  const status = step('Check the operator sandbox status');
+  assert.equal(status.shell, 'bash');
+  assert.match(status.run, /DHARMA_HOME="\$home" node packages\/cli\/dist\/bin\.js relay sandbox status --json > "\$RUNNER_TEMP\/sandbox-usable\.json"\n/);
+  assert.match(status.run, /s\.usable !== true/);
+  assert.match(status.run, /test ! -e "\$home"/);
+  const real = step('Run real-sandbox tests');
+  assert.deepEqual(real.env, { DHARMA_SANDBOX_EXPECT: 'usable' });
+  assert.equal(real.run, 'node --test packages/task-runner/dist/registeredCommandSandbox.linux.test.js');
+  assert.ok(job.steps.every(item => !/apparmor_restrict_unprivileged_userns=0/.test(item.run ?? '')),
+    'the job never lifts the restriction');
+});
+
+// The documentation and CI share one profile file. The customer guide and the task-runner README
+// print it verbatim with the same install and load commands that CI runs, say not to lift the
+// restriction for the whole system, and list Git 2.41 or later.
+test('the documented AppArmor profile is the file CI installs, and the host requirements list Git 2.41', () => {
+  const profile = readFileSync(new URL('../packaging/apparmor/bwrap-dharma', import.meta.url), 'utf8');
+  assert.match(profile, /^abi <abi\/4\.0>,\ninclude <tunables\/global>\n\nprofile bwrap-dharma \/usr\/bin\/bwrap flags=\(unconfined\) \{\n {2}userns,\n\}\n$/m);
+  assert.ok(profile.endsWith('profile bwrap-dharma /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n'), 'the profile grants userns only');
+  const install = workflow.jobs['sandbox-ubuntu-2404-restricted'].steps
+    .find(item => item.name === 'Install the documented AppArmor profile').run;
+  const commands = ['sudo install -o root -g root -m 0644 bwrap-dharma /etc/apparmor.d/bwrap-dharma',
+    'sudo apparmor_parser -r /etc/apparmor.d/bwrap-dharma'];
+  assert.ok(install.includes(commands[0].replace(' bwrap-dharma ', ' packaging/apparmor/bwrap-dharma ')), 'CI installs the repository file');
+  assert.ok(install.includes(commands[1]), 'CI loads the profile as documented');
+  for (const path of ['../docs/onboarding/customer-guide.md', '../packages/task-runner/README.md']) {
+    const text = readFileSync(new URL(path, import.meta.url), 'utf8');
+    assert.ok(text.includes(profile.trimEnd()), `${path} prints packaging/apparmor/bwrap-dharma verbatim`);
+    assert.ok(text.includes('packaging/apparmor/bwrap-dharma'), `${path} names the profile file`);
+    for (const command of commands) assert.ok(text.includes(command), `${path} documents: ${command}`);
+    assert.match(text, /Do not set\s+`kernel\.apparmor_restrict_unprivileged_userns=0`/, `${path} warns against the system-wide setting`);
+    assert.match(text, /Git 2\.41 or\s+later/, `${path} lists Git 2.41 or later`);
+  }
+  const guide = readFileSync(new URL('../docs/onboarding/customer-guide.md', import.meta.url), 'utf8');
+  const requirements = guide.slice(guide.indexOf('## Host requirements for registered commands'));
+  assert.match(requirements.slice(0, requirements.indexOf('macOS and native Windows')), /Git 2\.41 or\s+later/,
+    'Git 2.41 or later is in the host requirement list');
 });
