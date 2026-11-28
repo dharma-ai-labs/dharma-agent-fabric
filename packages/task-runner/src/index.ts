@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { constants, type Stats } from 'node:fs';
+import { constants, type Dirent, type Stats } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, relative, resolve } from 'node:path';
@@ -541,7 +541,7 @@ export type RelayGitIsolationReason = 'pointer_changed' | 'git_files_changed' | 
 const RELAY_GIT_ISOLATION_MESSAGES: Record<RelayGitIsolationReason, string> = {
   pointer_changed: 'Task worktree Git pointer changed during the task.',
   git_files_changed: 'The repository configuration, the Git-directory attributes or exclude file, or a relay Git file changed during the task.',
-  attributes_changed: 'The task changed a .gitattributes file, and this Git cannot read attributes from the starting commit (Git 2.40 or later can).',
+  attributes_changed: 'The task changed a .gitattributes file, and this Git cannot read attributes from the starting commit (Git 2.41 or later can).',
   ignore_rules_changed: 'The task changed or added a .gitignore file that could hide files outside its write paths from the write-scope check.',
 };
 
@@ -627,7 +627,7 @@ interface PinnedRepository {
    * A configuration file may change only in entries that start no program in relay Git.
    */
   files: Array<{ path: string; bytes: Buffer | null; configuration: boolean }>;
-  /** The starting commit, when this Git reads attributes from it with `--attr-source` (Git 2.40 or later). */
+  /** The starting commit, when this Git reads attributes from it with `--attr-source` (Git 2.41 or later). */
   attributeSource?: string;
   /**
    * Otherwise, the `.gitattributes` files of the starting commit: their index blob ids and the
@@ -791,8 +791,9 @@ async function worktreeFileDigest(worktree: string, path: string): Promise<strin
 }
 
 /**
- * Pins how relay Git reads attributes after the task. Git 2.40 or later reads them from the
- * starting commit (`--attr-source`), so task-written `.gitattributes` files are never consulted.
+ * Pins how relay Git reads attributes after the task. Git 2.41 or later reads them from the
+ * starting commit (the global `--attr-source` option; Git 2.40 has only `check-attr --source`),
+ * so task-written `.gitattributes` files are never consulted.
  * An older Git cannot, so the relay records the starting `.gitattributes` files as checked out and
  * refuses the task if any of them changed or a new one appeared.
  */
@@ -800,7 +801,7 @@ async function pinAttributes(pinned: PinnedRepository, startingCommit: string): 
   const version = /^git version (\d+)\.(\d+)/.exec(await gitOutput(pinned.worktree, ['version'], pinned.isolation));
   const major = Number(version?.[1] ?? 0);
   const minor = Number(version?.[2] ?? 0);
-  if (major > 2 || (major === 2 && minor >= 40)) {
+  if (major > 2 || (major === 2 && minor >= 41)) {
     pinned.attributeSource = startingCommit;
     return;
   }
@@ -865,6 +866,21 @@ async function pinGitlinks(pinned: PinnedRepository, startingCommit: string): Pr
   }
 }
 
+/**
+ * Runs a write-scope `ls-files` listing. Git skips a folder it cannot open with only a warning on
+ * standard error and exit code 0, so any standard error output fails the check closed.
+ */
+async function writeScopeListing(worktree: string, argv: string[], pinned: PinnedRepository,
+  maximumOutputBytes?: number): Promise<string[]> {
+  const result = await relayGit(worktree, argv, pinned.isolation,
+    { requireCompleteOutput: true, pinned, ...(maximumOutputBytes === undefined ? {} : { maximumOutputBytes }) });
+  if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
+  if (result.stderr.trim()) {
+    throw new Error(`Write-scope check failed: Git reported a problem while listing files: ${result.stderr.trim().slice(0, 500)}`);
+  }
+  return gitPathList(result.stdout);
+}
+
 function folderWithinPolicy(folder: string, writePaths: string[]): boolean {
   return folder ? pathWithinPolicy(folder, writePaths)
     : writePaths.some(pattern => normalizePolicyPath(pattern).replace(/\/\*\*$/, '') === '.');
@@ -884,8 +900,7 @@ const TOOL_CACHE_FOLDERS = new Set(['.pytest_cache', '.mypy_cache', '.ruff_cache
 async function assertIgnoreRulesTrusted(worktree: string, trackedChanges: string[], writePaths: string[],
   pinned: PinnedRepository): Promise<void> {
   const isIgnoreFile = (path: string) => path === '.gitignore' || path.endsWith('/.gitignore');
-  const untracked = gitPathList(await gitOutput(worktree, ['ls-files', '-z', '--others', '--', IGNORE_RULES_PATHSPEC],
-    pinned.isolation, pinned));
+  const untracked = await writeScopeListing(worktree, ['ls-files', '-z', '--others', '--', IGNORE_RULES_PATHSPEC], pinned);
   const changed = new Set([...trackedChanges.filter(isIgnoreFile), ...untracked]);
   const folders = [...new Set([...changed].map(path => path.slice(0, -'.gitignore'.length).replace(/\/$/, '')))]
     .filter(folder => !folderWithinPolicy(folder, writePaths) && !TOOL_CACHE_FOLDERS.has(folder.slice(folder.lastIndexOf('/') + 1)));
@@ -909,15 +924,63 @@ async function assertIgnoreRulesTrusted(worktree: string, trackedChanges: string
   if (unignored !== undefined) throw refuse(unignored);
 }
 
+/**
+ * `git ls-files --others` never lists an entry named `.git` (at any depth), anything inside a folder
+ * it cannot open, or a file that is neither a regular file nor a link (a named pipe or socket). The
+ * relay walks the worktree itself, with `lstat` semantics, and refuses each of these outside the
+ * write paths. It skips the root `.git` pointer (checked around every relay Git call), submodule
+ * folders (compared with their digest) and folders that the ignore rules ignore, except tool caches.
+ * `assertIgnoreRulesTrusted` has already refused task-written rules that reach outside the write paths.
+ */
+async function assertNoUnlistedEntries(worktree: string, writePaths: string[], actor: 'Provider' | 'Acceptance command',
+  pinned: PinnedRepository): Promise<void> {
+  if (folderWithinPolicy('', writePaths)) return;
+  // An ignored folder is listed once, with a trailing slash. Git also lists an untracked folder that
+  // holds only ignored files (it does not count `.git` entries), so `check-ignore` must confirm that
+  // the rules ignore the folder itself.
+  const candidates = (await writeScopeListing(worktree,
+    ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], pinned, 256 * 1024 * 1024))
+    .filter(path => path.endsWith('/')).map(path => path.slice(0, -1)).filter(path => !pathWithinPolicy(path, writePaths));
+  const ignoredFolders = new Set<string>();
+  if (candidates.length > 0) {
+    // As in assertIgnoreRulesTrusted, the `./` prefix keeps a folder name from being read as pathspec magic.
+    const result = await relayGit(worktree, ['check-ignore', '-z', '--stdin'], pinned.isolation,
+      { requireCompleteOutput: true, pinned, input: candidates.map(folder => `./${folder}\0`).join(''),
+        maximumOutputBytes: 256 * 1024 * 1024 });
+    if (result.exitCode !== 0 && result.exitCode !== 1) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
+    for (const path of gitPathList(result.stdout)) ignoredFolders.add(path.replace(/^\.\//, ''));
+  }
+  const refuse = (kind: string) => new Error(`${actor} changed a path outside the signed task authority (${kind}).`);
+  const visit = async (folder: string): Promise<void> => {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(folder ? resolve(worktree, folder) : worktree, { withFileTypes: true });
+    } catch {
+      throw refuse('a folder the write-scope check cannot read');
+    }
+    for (const entry of entries) {
+      const path = folder ? `${folder}/${entry.name}` : entry.name;
+      if (path === '.git' || pinned.gitlinks?.has(path) || pathWithinPolicy(path, writePaths)) continue;
+      // Git compares `.git` without regard to case on case-insensitive file systems.
+      if (entry.name.toLowerCase() === '.git') throw refuse('a .git entry');
+      if (entry.isDirectory()) {
+        if (!ignoredFolders.has(path) || TOOL_CACHE_FOLDERS.has(entry.name)) await visit(path);
+      } else if (!entry.isFile() && !entry.isSymbolicLink()) {
+        throw refuse('a file that is neither a regular file nor a link');
+      }
+    }
+  };
+  await visit('');
+}
+
 async function assertTaskWriteScope(worktree: string, startingCommit: string, writePaths: string[],
   actor: 'Provider' | 'Acceptance command', pinned: PinnedRepository): Promise<void> {
   const trackedChanges = await gitOutput(worktree, [
     'diff', '--name-only', '-z', '--diff-filter=ACDMRTUXB', startingCommit, '--',
   ], pinned.isolation, pinned);
-  const untrackedChanges = await gitOutput(worktree, ['ls-files', '-z', '--others', '--exclude-standard'],
-    pinned.isolation, pinned);
   const trackedPaths = gitPathList(trackedChanges);
-  const changedPaths = [...trackedPaths, ...gitPathList(untrackedChanges)];
+  const changedPaths = [...trackedPaths,
+    ...await writeScopeListing(worktree, ['ls-files', '-z', '--others', '--exclude-standard'], pinned)];
   if (changedPaths.some(path => !pathWithinPolicy(path, writePaths))) {
     throw new Error(`${actor} changed a path outside the signed task authority.`);
   }
@@ -928,6 +991,7 @@ async function assertTaskWriteScope(worktree: string, startingCommit: string, wr
     }
   }
   await assertIgnoreRulesTrusted(worktree, trackedPaths, writePaths, pinned);
+  await assertNoUnlistedEntries(worktree, writePaths, actor, pinned);
 }
 
 export function verifyTaskEnvelope(

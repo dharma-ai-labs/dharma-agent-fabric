@@ -158,13 +158,16 @@ and after each command):
   `GIT_CONFIG_GLOBAL` names a relay-owned empty file, and `HOME` and
   `XDG_CONFIG_HOME` name a relay-owned empty folder. The operator's checkout
   settings read before the task are passed as `-c` options, so the checks
-  compare files the way the checkout wrote them. `PATH` and the other
-  operating-system essentials are unchanged.
+  compare files the way the checkout wrote them. `PATH` keeps only its
+  absolute entries, here and in the calls before the task: Git starts filter
+  programs (for example Git LFS) through the shell from the worktree root,
+  where an empty or relative entry such as `:` or `.` would find a program the
+  task wrote. The other operating-system essentials are unchanged.
 - Turns hooks off: `core.hooksPath` names a relay-owned empty folder, never a
   path inside the worktree. `core.fsmonitor` and `core.untrackedCache` are off,
   `core.attributesFile` names the empty file, and `core.excludesFile` names the
   operator's global exclude file read before the task.
-- Reads attributes from the starting commit: with Git 2.40 or later the relay
+- Reads attributes from the starting commit: with Git 2.41 or later the relay
   passes `--attr-source=<starting commit>`, so a `.gitattributes` file the task
   wrote or changed cannot assign a filter, diff or merge driver. With an older
   Git, the relay records the starting `.gitattributes` files as checked out and
@@ -210,6 +213,15 @@ and after each command):
   path. Repositories should list the folders that their other tools create in
   their ignore rules, so that a provider or command that runs those tools
   does not fail the task.
+- Checks what Git does not list: `git ls-files --others` skips every entry
+  named `.git`, anything inside a folder it cannot open (with only a warning
+  and exit code 0) and named pipes and sockets. Any standard error output from
+  a write-scope `ls-files` call fails the task. The relay also walks the
+  worktree itself (`lstat` semantics, links not followed), skipping the write
+  paths, submodule folders, the root `.git` pointer and folders that the
+  ignore rules ignore (confirmed with `git check-ignore`; tool cache folders
+  are still walked), and fails the task on a `.git` entry, a folder it cannot
+  read, or a file that is neither a regular file nor a link.
 
 What this does not cover:
 

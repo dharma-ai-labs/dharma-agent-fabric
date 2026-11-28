@@ -113,8 +113,10 @@ global Git configuration (`GIT_CONFIG_NOSYSTEM`, a relay-owned empty
 `GIT_CONFIG_GLOBAL`, and a relay-owned empty `HOME` and `XDG_CONFIG_HOME`)
 apart from the checkout settings and exclude file read before the task; uses a
 relay-owned empty hooks folder and turns off the file-system monitor, the
-untracked cache and the global attributes file; reads attributes from the
-starting commit (`--attr-source`, Git 2.40 or later; an older Git fails the
+untracked cache and the global attributes file; keeps only absolute `PATH`
+entries (also before the task), so a filter Git starts from the worktree root
+cannot resolve to a program the task wrote; reads attributes from the
+starting commit (`--attr-source`, Git 2.41 or later; an older Git fails the
 task closed when a `.gitattributes` file changed or appeared); never looks
 inside submodule folders; uses repository paths pinned before the provider
 ran; turns off external diff and text-conversion drivers; and checks, before
@@ -127,7 +129,13 @@ changed or added must sit inside the write paths, in a `.pytest_cache`,
 not write already ignore. Any other change fails the task closed with
 `relay_git_isolation_failed`. Because Git never looks inside submodule
 folders, the write-scope check also compares each submodule folder outside the
-write paths with what it held right after the checkout.
+write paths with what it held right after the checkout. Because
+`git ls-files --others` skips `.git` entries, folders it cannot open (with
+only a warning) and named pipes and sockets, the write-scope check fails on
+any warning from those listings and walks the worktree outside the write
+paths, submodule folders and ignored folders, refusing a `.git` entry other
+than the root pointer, an unreadable folder, or a file that is neither a
+regular file nor a link.
 
 **Residuals:**
 
