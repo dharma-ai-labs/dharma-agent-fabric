@@ -162,10 +162,13 @@ dharma relay stop
 dharma relay probe
 dharma relay autostart status
 dharma relay autostart disable
+dharma relay sandbox status --json
 dharma status
 ```
 
 Complete bootstrap starts the registered supervisor and configures per-user startup on Windows, Linux with a systemd user session, or macOS with the recipient's graphical login session. Linux Codex bootstrap preserves the selected nondefault `CODEX_HOME` location in its owned startup receipt, without copying credentials or importing arbitrary environment variables. Linux relay recovery uses that registered service instead of starting a competing detached supervisor. `relay start` is a foreground receiver; `relay stop` gracefully stops the current supervisor and receiver without deleting enrolled identity or vault data. The startup entry remains for the next user sign-in until `relay autostart disable` removes it. `status` reports startup registration and the last successful relay poll; `relay probe` independently checks the signed connection. Unavailable user-session startup is an incomplete bootstrap stage. Registration is not native reboot, protected-store recovery or signed skill activation proof; macOS qualification remains required.
+
+`relay sandbox status` is read-only. It runs the same command-sandbox probe the relay runs before every task that names registered commands, once, and prints the answer; it accepts only `--json` and refuses any other option or argument before probing. It reads no enrollment, starts no relay and changes no setting: the probe removes its scratch folder under the relay state directory, and the command removes any folder it had to create for it. With `--json`, stdout carries one `dharma.relay-sandbox-status/v1` value (`schemas/relay-sandbox-status.v1.schema.json`). A usable sandbox reports the probed bubblewrap path, version and `sha256`, the sandbox policy, the host kind (`linux` or `wsl2`) and the passed probe checks, and exits `0`. A refusal reports the typed `reason` (`platform_unsupported`, `bubblewrap_missing`, `bubblewrap_too_old`, `bubblewrap_untrusted`, `user_namespaces_unavailable` or `sandbox_probe_failed`), a `detail` that names failed checks or host settings only, and the `fix` line, and exits `1`. Invalid options exit `2`. The answer is for the operator: it does not admit a task, and the relay probes again before each task.
 
 ## Exit codes
 

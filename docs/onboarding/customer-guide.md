@@ -384,9 +384,24 @@ A refused task ends with one `failed` event with
 | `sandbox_probe_failed` | Run the relay on a supported host; report the named check. |
 | `network_not_denied` | Give the task network authority `deny`. |
 
+To check a host before or after enrollment, run:
+
+```text
+dharma relay sandbox status
+dharma relay sandbox status --json
+```
+
+It runs the same sandbox probe the relay runs and prints either `usable` with
+the bubblewrap path, version and `sha256`, the sandbox policy and the passed
+checks (exit code `0`), or `refused` with the reason from the table above, the
+detail and the fix (exit code `1`). It is read-only: it takes no other option,
+starts no relay, reads no enrollment and changes no setting. `--json` prints one
+JSON value on standard output for scripts.
+
 Already-enrolled devices: after updating, install bubblewrap and restart the
-relay. Change user-namespace settings only if the start line then reports
-`user_namespaces_unavailable`, and then only for bubblewrap.
+relay. Change user-namespace settings only if the start line or
+`dharma relay sandbox status` then reports `user_namespaces_unavailable`, and
+then only for bubblewrap.
 
 Commands inside the sandbox have no network and no Git and must find their
 dependencies already in the worktree. They see only the worktree, `/usr`, the
