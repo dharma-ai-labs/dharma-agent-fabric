@@ -64,6 +64,16 @@ that was already completed and has a stored receipt still returns that receipt.
 The relay also writes one `registered_command_sandbox` line to its log at start,
 with the probe result or the reason and fix line.
 
+Operators can run the same probe without a relay or a task:
+`dharma relay sandbox status [--json]` calls `detectRegisteredCommandSandbox()`
+on the relay state directory once and prints the usable sandbox (bubblewrap
+path, version, `sha256`, policy, host kind and passed checks; exit code `0`) or
+the refusal `reason`, `detail` and `fix` (exit code `1`). It is read-only: it
+takes no option but `--json`, admits no task, writes no receipt and removes any
+folder it had to create for the probe. The JSON form is
+`schemas/relay-sandbox-status.v1.schema.json`. `network_not_denied` belongs to
+one task, not to the host, so the command never reports it.
+
 ### Provider command tools
 
 When a task names registered commands, the provider gets no command tools

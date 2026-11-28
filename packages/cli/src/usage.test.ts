@@ -8,7 +8,8 @@ test('help preserves named-session, signing and transport recovery command surfa
   const help = await run(['--help']);
   assert.equal(help, CLI_USAGE);
   for (const command of ['sessions start', 'sessions status', 'sessions work', 'sessions stop', 'sessions audit',
-    'demo signing-client-proof', 'demo signing-owner-proof', 'demo transport-connect', 'repositories source-resolve']) {
+    'demo signing-client-proof', 'demo signing-owner-proof', 'demo transport-connect', 'repositories source-resolve',
+    'relay sandbox status']) {
     assert.ok(CLI_USAGE.includes(command), `Missing command: ${command}`);
   }
 });

@@ -116,7 +116,13 @@ The Linux CI leg installs bubblewrap and runs validation with `usable` on the
 image's default user-namespace settings. It then sets
 `user.max_user_namespaces=0` and runs the file with `refused`. (On the current
 runner image the AppArmor restriction alone does not stop bubblewrap.)
-`scripts/ci-budget.test.mjs` pins both steps.
+A separate `Command sandbox (ubuntu-22.04)` job repeats the same preparation,
+the file with `usable` and the refusal proof on Ubuntu 22.04, whose bubblewrap
+(0.6) runs without `--disable-userns`. It builds once and runs only these
+steps, and it also runs `dharma relay sandbox status --json`: on the usable host
+it must report `usable` and exit 0, on the restricted host it must exit 1 with
+`user_namespaces_unavailable`, and neither run may leave a Dharma home behind.
+`scripts/ci-budget.test.mjs` pins every one of these steps.
 
 A Linux CI pass is not WSL2 proof. WSL2 hosts, including the Windows interop
 cut, still need a recorded qualification run on a real host.

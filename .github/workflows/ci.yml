@@ -91,3 +91,69 @@ jobs:
         run: |
           npm sbom --workspaces --include-workspace-root --sbom-format cyclonedx > agent-fabric.cdx.json
           node -e "const fs=require('fs'); const bom=JSON.parse(fs.readFileSync('agent-fabric.cdx.json')); if (bom.bomFormat !== 'CycloneDX' || !Array.isArray(bom.components)) process.exit(1)"
+
+  # Ubuntu 22.04 ships bubblewrap 0.6, older than 0.8.0: the sandbox runs there without
+  # --disable-userns and the probe skips the nested-namespace check. This job proves that argument
+  # list on a real host with the same sandbox steps as the ubuntu-latest leg, plus the operator's
+  # read-only `relay sandbox status` on the usable and on the restricted host.
+  sandbox-ubuntu-2204:
+    name: Command sandbox (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.0
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build packages
+        run: npm run build
+
+      - name: Prepare command sandbox
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          /usr/bin/bwrap --version
+          echo "apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+
+      - name: Run real-sandbox tests
+        env:
+          DHARMA_SANDBOX_EXPECT: usable
+        run: node --test packages/task-runner/dist/registeredCommandSandbox.linux.test.js
+
+      # The operator command must report usable, exit 0 and leave no Dharma home behind.
+      - name: Check the operator sandbox status
+        shell: bash
+        run: |
+          home="$RUNNER_TEMP/dharma-home-usable"
+          DHARMA_HOME="$home" node packages/cli/dist/bin.js relay sandbox status --json > "$RUNNER_TEMP/sandbox-usable.json"
+          cat "$RUNNER_TEMP/sandbox-usable.json"
+          node -e "const s = JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8')); if (s.schema !== 'dharma.relay-sandbox-status/v1' || s.usable !== true) process.exit(1)" "$RUNNER_TEMP/sandbox-usable.json"
+          test ! -e "$home"
+
+      # The same refusal proof as the ubuntu-latest leg; the operator command must refuse too, with
+      # exit code 1 and the typed reason, and leave no Dharma home behind.
+      - name: Prove sandbox refusal on a restricted host
+        shell: bash
+        run: |
+          original=$(cat /proc/sys/user/max_user_namespaces)
+          sudo sysctl -w user.max_user_namespaces=0
+          DHARMA_SANDBOX_EXPECT=refused node --test packages/task-runner/dist/registeredCommandSandbox.linux.test.js
+          home="$RUNNER_TEMP/dharma-home-refused"
+          code=0
+          DHARMA_HOME="$home" node packages/cli/dist/bin.js relay sandbox status --json > "$RUNNER_TEMP/sandbox-refused.json" || code=$?
+          cat "$RUNNER_TEMP/sandbox-refused.json"
+          test "$code" = 1
+          node -e "const s = JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8')); if (s.usable !== false || s.reason !== 'user_namespaces_unavailable') process.exit(1)" "$RUNNER_TEMP/sandbox-refused.json"
+          test ! -e "$home"
+          sudo sysctl -w user.max_user_namespaces="$original"
