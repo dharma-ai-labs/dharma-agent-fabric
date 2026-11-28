@@ -411,6 +411,11 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+function isDeepFrozen(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return true;
+  return Object.isFrozen(value) && Object.values(value).every(isDeepFrozen);
+}
+
 /** Copies and freezes the command policy for one task. The relay calls it once, at admission. */
 export function snapshotRegisteredCommandPolicy(
   task: Pick<TaskEnvelope, 'taskId' | 'authority'>,
@@ -426,6 +431,22 @@ export function snapshotRegisteredCommandPolicy(
       .filter((commandId) => typeof commandId === 'string' && Object.hasOwn(registered, commandId))
       .map((commandId) => [commandId, structuredClone(registered[commandId]!)])),
   });
+}
+
+function assertCommandPolicySnapshotForTask(
+  snapshot: RegisteredCommandPolicySnapshot,
+  task: TaskEnvelope,
+  policy: OrganizationPolicy,
+) {
+  if (snapshot.taskId !== task.taskId || snapshot.organizationId !== policy.organizationId
+    || snapshot.policyRevision !== policy.revision || !isDeepFrozen(snapshot)) {
+    throw new Error('Registered command policy snapshot does not belong to this task.');
+  }
+}
+
+function snapshotCommand(snapshot: RegisteredCommandPolicySnapshot, commandId: string): CommandPolicy {
+  if (!Object.hasOwn(snapshot.commands, commandId)) throw new Error(`Command is not registered: ${commandId}`);
+  return resolveRegisteredCommand({ tasks: { allowedCommands: snapshot.commands } } as unknown as OrganizationPolicy, commandId);
 }
 
 export function assertTaskWithinLocalPolicy(task: TaskEnvelope, policy: OrganizationPolicy) {
@@ -1680,7 +1701,11 @@ export async function executeTask(input: {
    * registered commands; such a task is refused without it.
    */
   registeredCommandSandbox?: RegisteredCommandSandbox;
-  /** The command policy the relay read for this task at admission (`snapshotRegisteredCommandPolicy`). */
+  /**
+   * The command policy the relay read for this task at admission
+   * (`snapshotRegisteredCommandPolicy`). Without it, the runner takes the snapshot from `policy`
+   * before anything runs. Either way, commands resolve only from the snapshot.
+   */
   commandPolicy?: RegisteredCommandPolicySnapshot;
 }): Promise<TaskReceipt> {
   verifyTaskEnvelope(input.task, input.serverPublicKey, new Date(), input.serverPublicKeyResolver);
@@ -1700,6 +1725,8 @@ export async function executeTask(input: {
   if (!admission.admitted) throw new RegisteredCommandsRefusedError(admission.reason);
   const commandSandbox = taskNamesRegisteredCommands(input.task) && input.registeredCommandSandbox?.usable
     ? input.registeredCommandSandbox : null;
+  const commandPolicy = input.commandPolicy ?? snapshotRegisteredCommandPolicy(input.task, input.policy);
+  assertCommandPolicySnapshotForTask(commandPolicy, input.task, input.policy);
   if (input.task.execution.isolation !== 'git_worktree') throw new Error('Only Git worktree isolation is supported.');
   if (input.task.authority.git !== 'task_branch') throw new Error('Pilot tasks require task_branch Git authority.');
   assertTaskWithinLocalPolicy(input.task, input.policy);
@@ -1829,11 +1856,11 @@ export async function executeTask(input: {
     const readOnlyPaths = new Set(readOnlyArtifacts);
     const readOnlyFingerprints = await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, { paths: readOnlyPaths });
     const artifactIntegrity = { paths: readOnlyPaths, expected: readOnlyFingerprints };
-    // Every named command must resolve in the policy loaded before the provider. The provider
-    // gets none of them as tools: registered commands run only in the sandboxed acceptance loop.
-    for (const { commandId } of input.task.authority.commands) resolveRegisteredCommand(input.policy, commandId);
+    // Every named command must resolve in the snapshot taken at admission. The provider gets none
+    // of them as tools: registered commands run only in the sandboxed acceptance loop.
+    for (const { commandId } of input.task.authority.commands) snapshotCommand(commandPolicy, commandId);
     for (const { commandId } of input.task.acceptance.commands) {
-      acceptanceCommandEnvironmentPolicy(resolveRegisteredCommand(input.policy, commandId), commandId);
+      acceptanceCommandEnvironmentPolicy(snapshotCommand(commandPolicy, commandId), commandId);
     }
     const formattedTask = formatProviderInstructionsForTask(input.task);
     const artifactContext = formattedTask.artifactMetadataLength
@@ -1911,7 +1938,8 @@ export async function executeTask(input: {
     for (const { commandId } of input.task.acceptance.commands) {
       if (status !== 'completed') break;
       if (input.signal?.aborted) { status = 'cancelled'; break; }
-      const command = resolveRegisteredCommand(input.policy, commandId);
+      // From the admission snapshot, never from the policy file the provider may have rewritten.
+      const command = snapshotCommand(commandPolicy, commandId);
       const cwd = command.workingDirectory
         ? assertPathWithinWorkspace(worktree, command.workingDirectory)
         : worktree;
