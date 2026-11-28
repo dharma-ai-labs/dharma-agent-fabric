@@ -31,7 +31,8 @@ function usable(overrides: Partial<UsableSandbox> = {}): UsableSandbox {
   return {
     usable: true, host: 'linux', bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0',
     bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: SANDBOX_POLICY_VERSION, layout: MERGED_USR,
-    nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [], disableUserns: true, ...overrides,
+    nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [], disableUserns: true,
+    probe: { checks: ['network_denied'], probedAt: '2026-11-28T00:00:00.000Z' }, ...overrides,
   };
 }
 
@@ -326,12 +327,15 @@ test('a passing probe returns a usable sandbox bound to the probed bubblewrap', 
     } })));
   assert.equal(result.usable, true);
   if (!result.usable) return;
-  assert.deepEqual({ ...result, bwrapSha256: result.bwrapSha256.slice(0, 7) }, {
+  assert.deepEqual({ ...result, bwrapSha256: result.bwrapSha256.slice(0, 7), probe: { ...result.probe, probedAt: '' } }, {
     usable: true, host: 'linux', bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0', bwrapSha256: 'sha256:',
     policy: SANDBOX_POLICY_VERSION, layout: MERGED_USR, nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [],
-    disableUserns: true,
+    disableUserns: true, probe: { checks: [...PROBE_CHECKS.base, ...PROBE_CHECKS.disableUserns], probedAt: '' },
   });
   assert.match(result.bwrapSha256, /^sha256:[0-9a-f]{64}$/);
+  assert.ok(Number.isFinite(Date.parse(result.probe.probedAt)), 'the usable sandbox says when its probe ran');
+  assert.deepEqual(JSON.parse(probeInput!.argv.at(-1)!).checks, [...result.probe.checks],
+    'the recorded checks are the ones the probe command was asked to prove');
   assert.ok(calls.includes('execFile:/usr/bin/bwrap --version'));
   assert.ok(probeInput, 'the probe ran through the production sandbox runner');
   assert.equal(probeInput!.argv[0], '/usr/bin/node');

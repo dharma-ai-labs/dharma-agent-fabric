@@ -266,4 +266,36 @@ for (const override of [{ heldKeysetGeneration: 0 }, { heldKeysetGeneration: 1.5
   }
 }
 
+// Task receipt revision 2: every receipt names the command sandbox the task was admitted with.
+const validateTaskReceipt = ajv.getSchema('https://schemas.dharma-ai.io/task-receipt/v2');
+const receiptTaskId = '33333333-3333-4333-8333-333333333333';
+const sandboxedReceipt = {
+  schema: 'dharma.task-receipt/v2', taskId: receiptTaskId, status: 'completed',
+  worktree: '/home/relay/.dharma/relay/worktrees/33333333-3333-4333-8333-333333333333',
+  branch: `dharma/task/${receiptTaskId}`,
+  commandResults: [{ commandId: 'npm.test', exitCode: 0, signal: null, timedOut: false,
+    stdoutSha256: `sha256:${'1'.repeat(64)}`, stderrSha256: `sha256:${'0'.repeat(64)}`, stdout: '', stderr: '' }],
+  startedAt: '2026-11-28T00:00:00.000Z', completedAt: '2026-11-28T00:00:05.000Z',
+  commandSandbox: { state: 'sandboxed', host: 'linux', bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0',
+    bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: 'bwrap-policy/2',
+    probe: { result: 'passed', checks: ['outside_canary_hidden', 'network_denied'], probedAt: '2026-11-27T23:59:59.000Z' } },
+};
+for (const valid of [sandboxedReceipt, { ...sandboxedReceipt, commandSandbox: { state: 'not_used' } },
+  { ...sandboxedReceipt, commandSandbox: { state: 'unavailable' } },
+  { ...sandboxedReceipt, commandSandbox: { ...sandboxedReceipt.commandSandbox, host: 'wsl2', bwrapPath: '/bin/bwrap' } }]) {
+  if (!validateTaskReceipt?.(valid)) {
+    throw new Error(`Task receipt is invalid: ${ajv.errorsText(validateTaskReceipt?.errors)}`);
+  }
+}
+const tuple = sandboxedReceipt.commandSandbox;
+for (const override of [{ schema: undefined }, { commandSandbox: undefined }, { commandSandbox: { ...tuple, bwrapPath: 'bwrap' } },
+  { commandSandbox: { ...tuple, bwrapSha256: 'sha256:abc' } }, { commandSandbox: { ...tuple, host: 'darwin' } },
+  { commandSandbox: { ...tuple, policy: 'custom' } }, { commandSandbox: { ...tuple, probe: { ...tuple.probe, result: 'failed' } } },
+  { commandSandbox: { ...tuple, probe: { ...tuple.probe, checks: [] } } }, { commandSandbox: { ...tuple, layout: {} } },
+  { commandSandbox: { state: 'not_used', bwrapPath: '/usr/bin/bwrap' } }, { deviceSecret: 'never-persist' }]) {
+  if (validateTaskReceipt(JSON.parse(JSON.stringify({ ...sandboxedReceipt, ...override })))) {
+    throw new Error('Task receipt schema accepted a receipt without a valid command sandbox, or an unknown field.');
+  }
+}
+
 process.stdout.write(`${JSON.stringify({ ok: true, schemas: names.length })}\n`);

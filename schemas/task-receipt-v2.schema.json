@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.dharma-ai.io/task-receipt/v2",
+  "title": "Local Task Receipt",
+  "description": "The receipt the local task runner writes for one signed task. Revision 2 adds `schema` and the required `commandSandbox`. Revision 1 receipts carry neither field; readers still accept them and they are not valid against this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "taskId", "status", "worktree", "branch", "commandResults", "startedAt", "completedAt", "commandSandbox"],
+  "properties": {
+    "schema": { "const": "dharma.task-receipt/v2" },
+    "taskId": { "$ref": "#/$defs/taskId" },
+    "status": { "type": "string", "enum": ["completed", "failed", "cancelled"] },
+    "worktree": { "type": "string", "minLength": 1 },
+    "branch": { "type": "string", "pattern": "^dharma/task/[0-9A-Fa-f-]{36}$" },
+    "commandResults": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/commandResult" } },
+    "actionAcknowledgement": { "$ref": "https://schemas.dharma-ai.io/action-decision-acknowledgement/v1" },
+    "externalEffectReceipt": { "$ref": "#/$defs/externalEffectReceipt" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "completedAt": { "type": "string", "format": "date-time" },
+    "commandSandbox": { "$ref": "#/$defs/commandSandbox" }
+  },
+  "$defs": {
+    "taskId": { "type": "string", "pattern": "^[0-9A-Fa-f-]{36}$" },
+    "hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "commandResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commandId", "exitCode", "signal", "timedOut", "stdoutSha256", "stderrSha256", "stdout", "stderr"],
+      "properties": {
+        "commandId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "exitCode": { "type": ["integer", "null"] },
+        "signal": { "type": ["string", "null"] },
+        "timedOut": { "type": "boolean" },
+        "stdoutSha256": { "$ref": "#/$defs/hash" },
+        "stderrSha256": { "$ref": "#/$defs/hash" },
+        "stdout": { "type": "string" },
+        "stderr": { "type": "string" },
+        "failureCategory": {
+          "anyOf": [
+            { "type": "string", "enum": ["quota", "authentication", "model_unavailable", "transport", "timeout", "unknown"] },
+            { "type": "null" }
+          ]
+        },
+        "qualificationReceipt": {
+          "anyOf": [
+            { "$ref": "https://schemas.dharma-ai.io/provider-execution-qualification/v1" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "externalEffectReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "actionDigest", "externalIdempotencyKey", "status", "providerReference", "proofDigest", "observedAt"],
+      "properties": {
+        "schema": { "const": "dharma.external-effect-receipt/v1" },
+        "actionDigest": { "$ref": "#/$defs/hash" },
+        "externalIdempotencyKey": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "status": { "const": "committed" },
+        "providerReference": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "proofDigest": { "$ref": "#/$defs/hash" },
+        "observedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "commandSandbox": {
+      "description": "`sandboxed`: the task names registered commands and was admitted with this probed bubblewrap sandbox, whether or not a command ran before the task ended. `not_used`: the task names no registered command. `unavailable`: a receipt written after a receiver restart for an execution journalled before receipts recorded the sandbox.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "host", "bwrapPath", "bwrapVersion", "bwrapSha256", "policy", "probe"],
+          "properties": {
+            "state": { "const": "sandboxed" },
+            "host": { "type": "string", "enum": ["linux", "wsl2"] },
+            "bwrapPath": { "type": "string", "enum": ["/usr/bin/bwrap", "/bin/bwrap"] },
+            "bwrapVersion": { "type": "string", "pattern": "^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$" },
+            "bwrapSha256": { "$ref": "#/$defs/hash" },
+            "policy": { "type": "string", "pattern": "^bwrap-policy/[1-9][0-9]{0,3}$" },
+            "probe": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["result", "checks", "probedAt"],
+              "properties": {
+                "result": { "const": "passed" },
+                "checks": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 32,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
+                },
+                "probedAt": { "type": "string", "format": "date-time" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": { "state": { "type": "string", "enum": ["not_used", "unavailable"] } }
+        }
+      ]
+    }
+  }
+}
