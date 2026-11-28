@@ -2482,10 +2482,8 @@ test('a .gitignore the task writes cannot hide files outside the write paths fro
     // check-ignore reads `:dist` as the pathspec `dist`, which the starting rules ignore.
     'folder name with pathspec magic': { tracked: { '.gitignore': 'dist\n' },
       files: { ':dist/.gitignore': '*\n', ':dist/payload': 'hidden' }, status: 'failed', folder: ':dist', posixOnly: true },
-    'self-ignoring folder the starting rules ignore': { tracked: { '.gitignore': 'build/
-' },
-      files: { 'build/.gitignore': '*
-', 'build/out.o': 'binary' }, status: 'completed' },
+    'self-ignoring folder the starting rules ignore': { tracked: { '.gitignore': 'build/\n' },
+      files: { 'build/.gitignore': '*\n', 'build/out.o': 'binary' }, status: 'completed' },
     'tool cache in a folder the starting rules ignore': { tracked: { '.gitignore': '.pytest_cache/\n' },
       files: { '.pytest_cache/.gitignore': '*\n', '.pytest_cache/v/lastfailed': '{}' }, status: 'completed' },
     // What pytest, mypy and ruff write when the repository does not list their caches.
