@@ -82,7 +82,40 @@ For every provider:
 - commit and task branch only;
 - no default-branch merge;
 - branch push idempotency;
-- active Skill bundle pinned.
+- active Skill bundle pinned;
+- registered commands run only inside the operating-system sandbox: the
+  bubblewrap argument list and environment are pure functions with snapshot
+  and negative tests; the live probe runs with injected dependencies on every
+  operating system; acceptance-loop tests run on every operating system through
+  a stand-in for bubblewrap that reports its child as bubblewrap does.
+
+### Real-sandbox tests
+
+`packages/task-runner/src/registeredCommandSandbox.linux.test.ts` runs the real
+bubblewrap. It is controlled by `DHARMA_SANDBOX_EXPECT`:
+
+- unset: the file skips (Windows, macOS and local runs);
+- `usable`: the host must be Linux and the probe must be usable, or the file
+  fails. It then proves, with synthetic canaries only: a home canary and a
+  Dharma-home canary are unreadable; a parent-environment sentinel and the test
+  process are invisible; writes to `/`, `/usr`, the workspace and the `.git`
+  pointer fail; a `/tmp` write stays inside the sandbox; a worktree write and
+  `npm run` succeed; a host loopback listener is unreachable and only loopback
+  exists; no inherited sockets or files are open; no capabilities remain;
+  nested user namespaces fail; a detached process stops at the timeout; and
+  the relay's Git still reports a write outside the signed paths;
+- `refused`: the probe must return `user_namespaces_unavailable` with the
+  host's user-namespace setting in its detail, and a task that names registered
+  commands must be refused before the provider, with no command run.
+
+The Linux CI leg installs bubblewrap and runs validation with `usable` on the
+image's default user-namespace settings. It then sets
+`user.max_user_namespaces=0` and runs the file with `refused`. (On the current
+runner image the AppArmor restriction alone does not stop bubblewrap.)
+`scripts/ci-budget.test.mjs` pins both steps.
+
+A Linux CI pass is not WSL2 proof. WSL2 hosts, including the Windows interop
+cut, still need a recorded qualification run on a real host.
 
 ## Skill tests
 

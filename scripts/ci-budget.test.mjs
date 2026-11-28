@@ -43,3 +43,33 @@ test('runtime, dependency identity, event policy and concurrency are unchanged',
   assert.ok(Object.hasOwn(workflow.on, 'pull_request'));
   assert.equal(workflow.concurrency['cancel-in-progress'], true);
 });
+
+// Registered commands run inside an operating-system sandbox. The Linux leg must prove
+// it with the real bubblewrap, and must also prove the refusal on a restricted host. Removing or
+// weakening either proof turns this test red.
+test('the Linux leg prepares the command sandbox, requires it to be usable and proves the refusal', () => {
+  const names = validate.steps.map(item => item.name);
+  const prepare = validate.steps.find(item => item.name === 'Prepare command sandbox');
+  const validation = validate.steps.find(item => item.run === 'npm run check');
+  const refusal = validate.steps.find(item => item.name === 'Prove sandbox refusal on a restricted host');
+  assert.ok(prepare, 'missing step: Prepare command sandbox');
+  assert.ok(refusal, 'missing step: Prove sandbox refusal on a restricted host');
+  assert.ok(names.indexOf(prepare.name) < names.indexOf(validation.name), 'the sandbox is prepared before validation');
+  assert.ok(names.indexOf(refusal.name) > names.indexOf(validation.name), 'the refusal proof runs after validation');
+  for (const step of [prepare, refusal]) {
+    assert.equal(step.if, "runner.os == 'Linux'");
+    assert.equal(step.shell, 'bash');
+    assert.equal(step['continue-on-error'], undefined);
+  }
+  assert.match(prepare.run, /apt-get install -y --no-install-recommends bubblewrap/);
+  assert.match(prepare.run, /\/usr\/bin\/bwrap --version/);
+  // The usable proof runs on the image's default user-namespace settings; it only reports them.
+  assert.match(prepare.run, /apparmor_restrict_unprivileged_userns=\$\(cat /);
+  assert.doesNotMatch(prepare.run, /sysctl/, 'the usable proof does not relax host settings');
+  assert.equal(validation.env?.DHARMA_SANDBOX_EXPECT, "${{ runner.os == 'Linux' && 'usable' || '' }}");
+  assert.equal(validation['continue-on-error'], undefined);
+  assert.match(refusal.run, /sysctl -w user\.max_user_namespaces=0\n/);
+  assert.match(refusal.run, /DHARMA_SANDBOX_EXPECT=refused node --test packages\/task-runner\/dist\/registeredCommandSandbox\.linux\.test\.js/);
+  assert.match(refusal.run, /sysctl -w user\.max_user_namespaces="\$original"\s*$/);
+  assert.doesNotMatch(refusal.run, /\|\|\s*true/);
+});

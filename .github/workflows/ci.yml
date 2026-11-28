@@ -47,8 +47,33 @@ jobs:
           DHARMA_PUBLIC_CONTENT_DENYLIST: ${{ secrets.DHARMA_PUBLIC_CONTENT_DENYLIST }}
         run: npm run public:content:check
 
+      # Registered commands run inside bubblewrap on Linux. The usable proof runs on the image's
+      # default user-namespace settings; this step only installs bubblewrap and reports them.
+      - name: Prepare command sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          /usr/bin/bwrap --version
+          echo "apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+
       - name: Run package validation
+        env:
+          DHARMA_SANDBOX_EXPECT: ${{ runner.os == 'Linux' && 'usable' || '' }}
         run: npm run check
+
+      # The same host with user namespaces turned off must refuse, and no command may run. The
+      # AppArmor restriction alone does not stop bubblewrap on this image (measured in CI), so the
+      # restricted host is made with user.max_user_namespaces=0 and restored afterwards.
+      - name: Prove sandbox refusal on a restricted host
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          original=$(cat /proc/sys/user/max_user_namespaces)
+          sudo sysctl -w user.max_user_namespaces=0
+          DHARMA_SANDBOX_EXPECT=refused node --test packages/task-runner/dist/registeredCommandSandbox.linux.test.js
+          sudo sysctl -w user.max_user_namespaces="$original"
 
       - name: Verify CI budget and coverage
         run: node --test scripts/ci-budget.test.mjs
