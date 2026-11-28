@@ -241,3 +241,51 @@ test('relay stop terminates an orphaned receiver after the supervisor exits', as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// `relay stop --dry-run` used to ignore its flags and SIGTERM the supervisor and receiver.
+test('relay stop --dry-run plans without signalling, and an unsupported option is refused before any signal', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dharma-relay-stop-options-'));
+  const home = join(root, 'home');
+  const relayDir = join(home, 'relay');
+  await mkdir(relayDir, { recursive: true });
+  const supervisor = spawn(process.execPath, ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'], {
+    stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
+  });
+  const receiver = spawn(process.execPath, ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'], {
+    stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
+  });
+  const alive = (child: ChildProcess) => child.exitCode === null && child.signalCode === null;
+  try {
+    assert.ok(supervisor.pid);
+    assert.ok(receiver.pid);
+    await Promise.all([once(supervisor.stdout!, 'data'), once(receiver.stdout!, 'data')]);
+    await writeFile(join(relayDir, 'supervisor.pid'), `${supervisor.pid}\n`);
+    await writeFile(join(relayDir, 'relay.pid'), `${receiver.pid}\n`);
+    const bin = fileURLToPath(new URL('./bin.js', import.meta.url));
+    const env = { ...process.env, DHARMA_HOME: home };
+    const stop = (...options: string[]) => execFileAsync(process.execPath, [bin, 'relay', 'stop', ...options], {
+      env, timeout: 10_000, windowsHide: true,
+    });
+    const plan = await stop('--dry-run');
+    assert.deepEqual(JSON.parse(plan.stdout), {
+      ok: true, planned: true, state: 'stop_planned', supervisor: 'running', relay: 'running', vaultPreserved: true,
+    });
+    for (const option of ['--dryrun', '--force', '--dry-run=false', '--json=yes']) {
+      await assert.rejects(stop(option), (error: Error & { code?: number; stderr?: string }) => {
+        assert.equal(error.code, 2, option);
+        assert.match(String(error.stderr), /relay_stop_options_invalid/, option);
+        return true;
+      });
+    }
+    // A stray SIGTERM would land well within this wait.
+    await new Promise(resolveWait => setTimeout(resolveWait, 500));
+    assert.equal(alive(supervisor), true, 'the supervisor must not be signalled');
+    assert.equal(alive(receiver), true, 'the receiver must not be signalled');
+    const stopped = await stop('--json');
+    assert.deepEqual(JSON.parse(stopped.stdout), { ok: true, stopped: true, vaultPreserved: true });
+  } finally {
+    supervisor.kill('SIGTERM');
+    receiver.kill('SIGTERM');
+    await rm(root, { recursive: true, force: true });
+  }
+});
