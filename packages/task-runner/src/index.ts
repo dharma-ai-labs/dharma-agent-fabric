@@ -18,7 +18,7 @@ import {
   type ProviderId,
   type TaskAction,
 } from '@dharma-ai-labs/agent-fabric-contracts';
-import { assertPathWithinWorkspace, resolveRegisteredCommand, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
+import { assertPathWithinWorkspace, resolveRegisteredCommand, type CommandPolicy, type OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import {
   executeProviderTask,
   reportedProviderExecutionQualification,
@@ -387,6 +387,45 @@ async function verifyRequiredArtifacts(worktree: string, artifacts: string[], as
     }
   }
   return fingerprints;
+}
+
+/**
+ * The registered commands one task may run, copied from the approved policy when the task is
+ * admitted and frozen at every level. The acceptance loop resolves commands only from this
+ * snapshot. The provider runs unsandboxed and can rewrite the approved policy file, so nothing
+ * reads the command policy again after admission.
+ */
+export interface RegisteredCommandPolicySnapshot {
+  readonly taskId: string;
+  readonly organizationId: string;
+  readonly policyRevision: string;
+  /** Only the commands the task names in `authority.commands` that the policy registers. */
+  readonly commands: Readonly<Record<string, Readonly<CommandPolicy>>>;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const item of Object.values(value)) deepFreeze(item);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/** Copies and freezes the command policy for one task. The relay calls it once, at admission. */
+export function snapshotRegisteredCommandPolicy(
+  task: Pick<TaskEnvelope, 'taskId' | 'authority'>,
+  policy: Pick<OrganizationPolicy, 'organizationId' | 'revision' | 'tasks'>,
+): RegisteredCommandPolicySnapshot {
+  const registered = policy.tasks.allowedCommands;
+  const commandIds = [...new Set(task.authority.commands.map(({ commandId }) => commandId))];
+  return deepFreeze({
+    taskId: task.taskId,
+    organizationId: policy.organizationId,
+    policyRevision: policy.revision,
+    commands: Object.fromEntries(commandIds
+      .filter((commandId) => typeof commandId === 'string' && Object.hasOwn(registered, commandId))
+      .map((commandId) => [commandId, structuredClone(registered[commandId]!)])),
+  });
 }
 
 export function assertTaskWithinLocalPolicy(task: TaskEnvelope, policy: OrganizationPolicy) {
@@ -1641,6 +1680,8 @@ export async function executeTask(input: {
    * registered commands; such a task is refused without it.
    */
   registeredCommandSandbox?: RegisteredCommandSandbox;
+  /** The command policy the relay read for this task at admission (`snapshotRegisteredCommandPolicy`). */
+  commandPolicy?: RegisteredCommandPolicySnapshot;
 }): Promise<TaskReceipt> {
   verifyTaskEnvelope(input.task, input.serverPublicKey, new Date(), input.serverPublicKeyResolver);
   const providerQualification = input.providerQualification === undefined ? undefined

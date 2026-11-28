@@ -39,6 +39,7 @@ import {
   detectRegisteredCommandSandbox,
   registeredCommandAdmission,
   registeredCommandSandboxLogLine,
+  snapshotRegisteredCommandPolicy,
   taskNamesRegisteredCommands,
   type RegisteredCommandSandbox,
   type TaskEnvelope,
@@ -7897,6 +7898,10 @@ async function executeOneTask(
     fabric,
   );
   assertTaskWorkspacePolicy({ task, workspace, policy: taskPolicy });
+  // The registered commands this task may run are read here, once, before locks, `started` and
+  // the provider. The runner resolves commands only from this frozen copy. The provider runs
+  // unsandboxed and may rewrite the approved policy file; nothing reads it again for this task.
+  const commandPolicy = snapshotRegisteredCommandPolicy(task, taskPolicy);
   if (await relayProviderUnsafePath(task.target.provider)) {
     await fabric.postTaskEvent(task.taskId, 'failed', { phase: 'preflight', code: PROVIDER_UNSAFE_PATH });
     return { ok: false, taskId: task.taskId, code: PROVIDER_UNSAFE_PATH };
@@ -7956,6 +7961,7 @@ async function executeOneTask(
       requiredSkillFiles,
       ...(serverPublicKeyResolver ? { serverPublicKeyResolver } : {}),
       ...(registeredCommandSandbox ? { registeredCommandSandbox } : {}),
+      commandPolicy,
       receiptStore: new FileTaskReceiptStore(resolve(dharmaHome(), 'relay', 'receipts')),
       ...(task.actionDecision ? {
         actionDecisions: {
