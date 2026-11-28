@@ -270,7 +270,8 @@ test('relay stop --dry-run plans without signalling, and an unsupported option i
     assert.deepEqual(JSON.parse(plan.stdout), {
       ok: true, planned: true, state: 'stop_planned', supervisor: 'running', relay: 'running', vaultPreserved: true,
     });
-    for (const option of ['--dryrun', '--force', '--dry-run=false', '--json=yes']) {
+    // Tokens without a leading `--` (single dash, no dash, or an autocorrected em dash) are positionals and must be refused too.
+    for (const option of ['--dryrun', '--force', '--dry-run=false', '--json=yes', '-dry-run', '-n', 'dry-run', '—dry-run']) {
       await assert.rejects(stop(option), (error: Error & { code?: number; stderr?: string }) => {
         assert.equal(error.code, 2, option);
         assert.match(String(error.stderr), /relay_stop_options_invalid/, option);
