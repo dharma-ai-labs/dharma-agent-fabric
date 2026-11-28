@@ -12,6 +12,7 @@ import {
   assertRelaySandboxStatusOptions,
   formatRelaySandboxStatus,
   readRelaySandboxStatus,
+  relaySandboxStatus,
   relaySandboxStatusExitCode,
 } from './relaySandboxStatus.js';
 
@@ -113,6 +114,16 @@ test('the --json output is one parser-safe value that matches its schema and not
     { bwrapPath: '/usr/bin/bwrap' }]) {
     assert.equal(validate({ ...refused, ...change }), false, JSON.stringify(change));
   }
+});
+
+test('a task-only probe reason is reported as a host probe failure, so the --json output still matches its schema', async () => {
+  const validate = await validator();
+  const status = relaySandboxStatus(refusal('network_not_denied'));
+  assert.equal(validate(status), true, JSON.stringify(validate.errors));
+  assert.deepEqual(status, { schema: RELAY_SANDBOX_STATUS_SCHEMA, usable: false, reason: 'sandbox_probe_failed',
+    detail: 'The probe gave the task-only reason network_not_denied: synthetic detail for network_not_denied',
+    fix: SANDBOX_FIX.sandbox_probe_failed });
+  assert.equal(relaySandboxStatusExitCode(status), 1);
 });
 
 test('the exit code is 1 for anything that is not a usable status', () => {
