@@ -102,9 +102,40 @@ bubblewrap or user namespaces) or when the task's network authority is not
 `deny`. There is no opt-out. A sandbox that fails to start fails the task; the
 command is never re-run on the host. The provider gets no command tools for
 these tasks, so the same commands cannot run unsandboxed during the provider's
-turn. The relay's own Git checks after a command use repository paths pinned
-before the provider ran, check the pointer bytes, and turn off external diff
-and text-conversion drivers.
+turn. The relay's own Git calls for a task, including the write-scope checks
+after the provider and after each command, run nothing the task could have
+written. Only the calls before any task code runs (reading the operator's
+checkout settings and global exclude file, and `git worktree add`) use the
+operator's normal Git configuration, so the task worktree matches the
+operator's checkout. Every later call runs from a relay-owned folder (so a
+`git` program written into the worktree is never found); ignores system and
+global Git configuration (`GIT_CONFIG_NOSYSTEM`, a relay-owned empty
+`GIT_CONFIG_GLOBAL`, and a relay-owned empty `HOME` and `XDG_CONFIG_HOME`)
+apart from the checkout settings and exclude file read before the task; uses a
+relay-owned empty hooks folder and turns off the file-system monitor, the
+untracked cache and the global attributes file; keeps only absolute `PATH`
+entries (also before the task), so a filter Git starts from the worktree root
+cannot resolve to a program the task wrote; reads attributes from the
+starting commit (`--attr-source`, Git 2.41 or later; an older Git fails the
+task closed when a `.gitattributes` file changed or appeared); never looks
+inside submodule folders; uses repository paths pinned before the provider
+ran; turns off external diff and text-conversion drivers; and checks, before
+and after each call, that the `.git` pointer and the Git-directory attributes
+and exclude files are unchanged and that the repository configuration changed
+in no entry other than `branch.*`, `remote.*`, `lfs.<url>.access`,
+`submodule.<name>.url` and `submodule.<name>.active`. A `.gitignore` the task
+changed or added must sit inside the write paths, in a `.pytest_cache`,
+`.mypy_cache` or `.ruff_cache` folder, or in a folder that rules the task did
+not write already ignore. Any other change fails the task closed with
+`relay_git_isolation_failed`. Because Git never looks inside submodule
+folders, the write-scope check also compares each submodule folder outside the
+write paths with what it held right after the checkout. Because
+`git ls-files --others` skips `.git` entries, folders it cannot open (with
+only a warning) and named pipes and sockets, the write-scope check fails on
+any warning from those listings and walks the worktree outside the write
+paths, submodule folders and ignored folders, refusing a `.git` entry other
+than the root pointer, an unreadable folder, or a file that is neither a
+regular file nor a link.
 
 **Residuals:**
 
@@ -114,8 +145,10 @@ and text-conversion drivers.
 - Kernel flaws in namespaces or bubblewrap are out of scope.
 - No seccomp filter yet. On bubblewrap below 0.8.0 (for example Ubuntu 22.04),
   nested user namespaces are not blocked.
-- Git filters an operator configured outside the repository (for example large
-  file storage) still run during the relay's own Git checks.
+- Filter and diff drivers that the operator's configuration defines (for
+  example large file storage) still run for paths that the starting commit's
+  attributes assign to them. That configuration is read before the task.
+- The provider process can still change the Git or relay binaries themselves.
 - Skill smoke checks are operator commands and are outside this boundary.
 - Behaviour on real WSL2 hosts, including the Windows interop cut, is checked
   by the probe on each host but not yet by a recorded qualification.

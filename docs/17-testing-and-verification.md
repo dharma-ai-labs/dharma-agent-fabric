@@ -103,7 +103,9 @@ bubblewrap. It is controlled by `DHARMA_SANDBOX_EXPECT`:
   `npm run` succeed; a host loopback listener is unreachable and only loopback
   exists; no inherited sockets or files are open; no capabilities remain;
   nested user namespaces fail; a detached process stops at the timeout; and
-  the relay's Git still reports a write outside the signed paths;
+  the relay's Git still reports a write outside the signed paths and runs no
+  filter from global configuration, no repository-configured filter that a
+  task-written `.gitattributes` assigns, and no hook the task wrote;
 - `refused`: the probe must return `user_namespaces_unavailable` with the
   host's user-namespace setting in its detail, and a task that names registered
   commands must be refused before the provider, with no command run.

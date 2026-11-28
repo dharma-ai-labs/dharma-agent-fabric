@@ -132,13 +132,109 @@ capabilities remain; no agent sockets are visible; nested user namespaces fail
 cut. A failed check refuses with `sandbox_probe_failed` and names only the
 check, never values.
 
-### Relay Git after a command
+### Relay Git after the provider and after a command
 
-The relay's own Git checks after each sandboxed command use the repository
-paths read from the worktree's `.git` pointer when the worktree was created,
-before the provider ran (`--git-dir` and `--work-tree`). They check that the
-pointer bytes are unchanged (a change fails the task) and run `diff` with
-`--no-ext-diff --no-textconv`. Other relay Git calls are unchanged.
+The relay's own Git calls for a task run nothing that the provider or a command
+could have written.
+
+Before any task code runs, the relay reads the operator's checkout settings
+(`core.autocrlf`, `core.eol`, `core.longpaths`, `filter.lfs.*` and the global
+exclude file, from `core.excludesFile` or the default
+`$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`) and creates the
+worktree with `git worktree add`. These calls use the operator's normal Git
+configuration, so the task worktree matches the operator's own checkout: Git
+LFS files are smudged, line endings follow the operator's settings, and the
+operator's `safe.directory` applies. They still use the relay-owned empty hooks
+folder and no file-system monitor.
+
+Every later call (the task branch and the write-scope checks after the provider
+and after each command):
+
+- Runs from a relay-owned folder (`<relay state>/relay-git/home`) and names the
+  repository with `-C`, so a `git.exe` or `git.com` the task wrote into the
+  worktree is never started (Windows looks for a program in the working folder
+  before `PATH`).
+- Ignores system and global configuration: `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL` names a relay-owned empty file, and `HOME` and
+  `XDG_CONFIG_HOME` name a relay-owned empty folder. The operator's checkout
+  settings read before the task are passed as `-c` options, so the checks
+  compare files the way the checkout wrote them. `PATH` keeps only its
+  absolute entries, here and in the calls before the task: Git starts filter
+  programs (for example Git LFS) through the shell from the worktree root,
+  where an empty or relative entry such as `:` or `.` would find a program the
+  task wrote. The other operating-system essentials are unchanged.
+- Turns hooks off: `core.hooksPath` names a relay-owned empty folder, never a
+  path inside the worktree. `core.fsmonitor` and `core.untrackedCache` are off,
+  `core.attributesFile` names the empty file, and `core.excludesFile` names the
+  operator's global exclude file read before the task.
+- Reads attributes from the starting commit: with Git 2.41 or later the relay
+  passes `--attr-source=<starting commit>`, so a `.gitattributes` file the task
+  wrote or changed cannot assign a filter, diff or merge driver. With an older
+  Git, the relay records the starting `.gitattributes` files as checked out and
+  fails the task closed (`relay_git_isolation_failed`, reason
+  `attributes_changed`) before the next `diff` if any of them changed or a new
+  one appeared.
+- Uses the repository paths read from the worktree's `.git` pointer right after
+  `git worktree add` (`--git-dir` and `--work-tree`). `diff` runs with
+  `--no-ext-diff --no-textconv --ignore-submodules=dirty`, and every call sets
+  `submodule.recurse=false` and `diff.ignoreSubmodules=dirty`, so Git never
+  starts `git status` inside a submodule folder that the task turned into a
+  repository with its own filters. A changed submodule commit is still
+  reported when Git can resolve it.
+- Checks submodule folders in the write-scope check: `git diff` and
+  `git ls-files --others` never look inside a submodule folder, so the relay
+  records what each submodule folder of the starting commit held right after
+  `git worktree add` (normally nothing; files read with `lstat`, links not
+  followed) and fails the task if a submodule folder outside the write paths
+  differs after the provider or a command. A task that has to populate a
+  submodule (`git submodule update --init`) needs that folder in its write
+  paths.
+- Checks, before and after the call, that the `.git` pointer bytes, `commondir`,
+  the Git-directory `info/attributes` and `info/exclude` files, and the
+  relay-owned empty file and hooks folder are unchanged, and that the
+  repository configuration (`config`, `config.worktree`) changed in no entry
+  other than `branch.*`, `remote.*`, `lfs.<url>.access`,
+  `submodule.<name>.url` and `submodule.<name>.active` (what `git push -u`,
+  `git checkout -b`, `git remote add`, Git LFS and `git submodule init` write;
+  relay Git never fetches, pushes or updates submodules). A change fails the
+  task closed with `RelayGitIsolationError`
+  (`relay_git_isolation_failed`, reason `pointer_changed` or
+  `git_files_changed`).
+- Checks `.gitignore` files in the write-scope check: a `.gitignore` the task
+  changed or added (including one that ignores itself) is accepted only when
+  its folder is inside the write paths, when its folder is a `.pytest_cache`,
+  `.mypy_cache` or `.ruff_cache` folder (these tools write a self-ignoring
+  `.gitignore` into the cache folder they create, and its rules reach only
+  that folder), or when rules the task did not write already ignore its
+  folder. Folder names reach `git check-ignore` with a `./` prefix, so a name
+  such as `:dist` is not read as pathspec magic. Otherwise the task fails
+  closed (reason `ignore_rules_changed`; the message names the folder). A task
+  therefore cannot change the root `.gitignore` unless it may write every
+  path. Repositories should list the folders that their other tools create in
+  their ignore rules, so that a provider or command that runs those tools
+  does not fail the task.
+- Checks what Git does not list: `git ls-files --others` skips every entry
+  named `.git`, anything inside a folder it cannot open (with only a warning
+  and exit code 0) and named pipes and sockets. Any standard error output from
+  a write-scope `ls-files` call fails the task. The relay also walks the
+  worktree itself (`lstat` semantics, links not followed), skipping the write
+  paths, submodule folders, the root `.git` pointer and folders that the
+  ignore rules ignore (confirmed with `git check-ignore`; tool cache folders
+  are still walked), and fails the task on a `.git` entry, a folder it cannot
+  read, or a file that is neither a regular file nor a link.
+
+What this does not cover:
+
+- Filter and diff drivers that the operator's configuration defines (for
+  example Git LFS) still run for paths that the starting commit's attributes
+  assign to them. That is operator content, read before the task, not task
+  content.
+- Global and system settings other than the checkout settings above and the
+  global exclude file do not apply to the relay's checks after the task.
+- The provider process runs as the relay user and is not sandboxed; it can
+  change the Git or relay binaries themselves, which these checks do not cover.
+- Files hidden inside a `.pytest_cache`, `.mypy_cache` or `.ruff_cache` folder
+  outside the write paths are accepted.
 
 ### Limits
 
@@ -297,11 +393,12 @@ not the isolation boundary; the operating-system sandbox above is. Inside it,
 `HOME`, `TMPDIR`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` point at the sandbox's
 own empty folders, and the relay user's files and processes are not visible.
 
-Relay-internal Git calls, including the write-scope checks after each command,
-run with the same operating-system essentials and with `core.fsmonitor`
-disabled. A Git configuration change made by the provider or a command
-therefore does not start a monitor hook, and helper programs that Git starts do
-not receive other relay variables.
+Relay-internal Git calls, including the write-scope checks after the provider
+and after each command, run with the same operating-system essentials, except
+that, after the worktree is created, `HOME` and `XDG_CONFIG_HOME` name a
+relay-owned empty folder and system and global Git configuration are turned off
+(see "Relay Git after the provider and after a command"). Helper programs that
+Git starts do not receive other relay variables.
 
 The provider launch environment is unchanged. Skill smoke checks run only from
 `dharma skills sync --smoke-command`, never from the relay itself. They use the

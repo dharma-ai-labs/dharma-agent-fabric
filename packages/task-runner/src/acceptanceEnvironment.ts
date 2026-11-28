@@ -1,3 +1,5 @@
+import { posix, resolve, win32 } from 'node:path';
+
 // Operating-system essentials that registered build, test and lint commands commonly need.
 // HOME, USERPROFILE, APPDATA, LOCALAPPDATA and XDG_CONFIG_HOME are not harmless: they locate
 // per-user tool configuration and credential files. They are passed because npm and Git need
@@ -71,11 +73,70 @@ function operatingSystemEssentials(source: NodeJS.ProcessEnv, platform: NodeJS.P
 }
 
 /**
- * Builds the environment for the relay's own Git calls: operating-system essentials only.
- * Git can start helper programs named in repository configuration, which a command may change.
+ * Keeps only the absolute entries of `PATH`. Git starts filter and other helper programs through
+ * the shell with the repository folder as the working folder, where an empty or relative entry
+ * would find a program that the task wrote into the worktree.
  */
-export function relayGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.Platform): Record<string, string> {
-  return operatingSystemEssentials(source, platform);
+function keepAbsolutePathEntries(environment: Record<string, string>, platform: NodeJS.Platform) {
+  const name = sourceNameLookup(environment, platform)('PATH');
+  if (name === undefined) return;
+  const separator = platform === 'win32' ? ';' : ':';
+  const absolute = platform === 'win32' ? win32.isAbsolute : posix.isAbsolute;
+  // Windows allows a quoted entry, such as "C:\Program Files\Git\cmd".
+  environment[name] = environment[name]!.split(separator)
+    .filter(entry => entry !== '' && absolute(platform === 'win32' ? entry.replace(/^"(.*)"$/, '$1') : entry)).join(separator);
+}
+
+/**
+ * Builds the environment for the relay's own Git calls: operating-system essentials, with the home
+ * and configuration folders replaced by a relay-owned empty folder, the system configuration turned
+ * off, the global configuration replaced by a relay-owned empty file and only the absolute `PATH`
+ * entries kept. Git can start helper programs named in configuration, which a provider or command
+ * may change.
+ */
+export function relayGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.Platform,
+  isolation: { home: string; emptyFile: string }): Record<string, string> {
+  const environment = operatingSystemEssentials(source, platform);
+  const replaced = new Set(['HOME', 'XDG_CONFIG_HOME']);
+  for (const name of Object.keys(environment)) {
+    if (replaced.has(platform === 'win32' ? name.toUpperCase() : name)) delete environment[name];
+  }
+  environment.HOME = isolation.home;
+  environment.XDG_CONFIG_HOME = isolation.home;
+  environment.GIT_CONFIG_NOSYSTEM = '1';
+  environment.GIT_CONFIG_GLOBAL = isolation.emptyFile;
+  keepAbsolutePathEntries(environment, platform);
+  return environment;
+}
+
+/**
+ * Builds the environment for the relay's Git calls before any task code runs (the checkout and the
+ * reads of the operator's checkout settings): operating-system essentials, so Git reads the
+ * operator's system and global configuration as the operator's own checkout does. On Windows it
+ * also passes HOME and XDG_CONFIG_HOME when set, because Git for Windows finds the global
+ * configuration through them before the user profile. `PATH` keeps only its absolute entries.
+ */
+export function operatorGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.Platform): Record<string, string> {
+  const environment = operatingSystemEssentials(source, platform, platform === 'win32' ? ['HOME', 'XDG_CONFIG_HOME'] : []);
+  keepAbsolutePathEntries(environment, platform);
+  return environment;
+}
+
+/**
+ * The global exclude file Git uses in `environment` when `core.excludesFile` is not set:
+ * `$XDG_CONFIG_HOME/git/ignore`, else `<home>/.config/git/ignore`. Git for Windows uses
+ * `USERPROFILE` as the home folder when `HOME` is not set.
+ */
+export function defaultGitExcludesFile(environment: Record<string, string>, platform: NodeJS.Platform): string | undefined {
+  const lookup = sourceNameLookup(environment, platform);
+  const value = (name: string) => {
+    const sourceName = lookup(name);
+    return sourceName === undefined ? undefined : environment[sourceName] || undefined;
+  };
+  const configHome = value('XDG_CONFIG_HOME');
+  if (configHome) return resolve(configHome, 'git', 'ignore');
+  const home = value('HOME') ?? (platform === 'win32' ? value('USERPROFILE') : undefined);
+  return home ? resolve(home, '.config', 'git', 'ignore') : undefined;
 }
 
 export interface RegisteredCommandEnvironmentInput {
