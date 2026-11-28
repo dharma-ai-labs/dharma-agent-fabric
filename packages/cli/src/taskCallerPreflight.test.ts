@@ -343,6 +343,37 @@ test('an admitted task with registered commands reaches the runner with the prob
   assert.deepEqual(f.events.map(event => event.event), ['started']);
 });
 
+// The task receipt names the command sandbox (receipt revision dharma.task-receipt/v2). The relay
+// passes that tuple on unchanged in the outcome it posts and in its own output, and adds nothing
+// for a revision 1 receipt that has none.
+const RECEIPT_SANDBOX = {
+  state: 'sandboxed', host: 'linux', bwrapPath: '/usr/bin/bwrap', bwrapVersion: '0.9.0', bwrapSha256: `sha256:${'a'.repeat(64)}`,
+  policy: 'bwrap-policy/2', probe: { result: 'passed', checks: ['network_denied'], probedAt: '2026-10-20T23:59:59.000Z' },
+};
+
+for (const [name, commandSandbox] of [['the probed sandbox', RECEIPT_SANDBOX], ['no sandbox', { state: 'not_used' }],
+  ['a revision 1 receipt', undefined]] as const) {
+  test(`the task outcome carries the command sandbox from the receipt: ${name}`, async () => {
+    const f = fixture();
+    if (commandSandbox === RECEIPT_SANDBOX) { nameCommands['acceptance commands'](f.task); f.setSandbox(USABLE_SANDBOX); }
+    registeredCommandPorts(f);
+    const payloads: unknown[] = [];
+    f.dependencies.executeTask = async () => ({
+      ...(commandSandbox ? { schema: 'dharma.task-receipt/v2', commandSandbox } : {}),
+      status: 'completed', branch: null, commandResults: [],
+      startedAt: '2026-10-21T00:00:00.000Z', completedAt: '2026-10-21T00:00:01.000Z',
+    });
+    f.dependencies.postTaskOutcome = async (input: { payload: unknown }) => { payloads.push(input.payload); };
+    const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const summary = { status: 'completed', branch: null, response: null, commandResults: [],
+      startedAt: '2026-10-21T00:00:00.000Z', completedAt: '2026-10-21T00:00:01.000Z',
+      ...(commandSandbox ? { commandSandbox } : {}) };
+    assert.deepEqual(JSON.parse(JSON.stringify(payloads)), [summary]);
+    assert.deepEqual(JSON.parse(JSON.stringify(result.receipt)), summary);
+  });
+}
+
 test('a task without registered commands never probes and runs as before', async () => {
   const f = fixture();
   const { executed } = registeredCommandPorts(f);
