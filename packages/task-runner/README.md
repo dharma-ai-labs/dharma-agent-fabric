@@ -169,6 +169,45 @@ capabilities remain; no agent sockets are visible; nested user namespaces fail
 cut. A failed check refuses with `sandbox_probe_failed` and names only the
 check, never values.
 
+### The sandbox in the task receipt
+
+Every receipt `executeTask()` writes is revision 2 (`schema:
+'dharma.task-receipt/v2'`, contract `schemas/task-receipt-v2.schema.json`) and
+names the command sandbox in `commandSandbox`:
+
+```json
+{
+  "state": "sandboxed",
+  "host": "linux",
+  "bwrapPath": "/usr/bin/bwrap",
+  "bwrapVersion": "0.9.0",
+  "bwrapSha256": "sha256:<64 hex>",
+  "policy": "bwrap-policy/2",
+  "probe": { "result": "passed", "checks": ["outside_canary_hidden", "..."], "probedAt": "<ISO time>" }
+}
+```
+
+- `sandboxed`: the task names registered commands and was admitted with this
+  probed sandbox. It is recorded even when the task ended before a command ran;
+  `commandResults` say which commands ran. `checks` are the named probe checks
+  this sandbox passed (`PROBE_CHECKS`), so they differ by bubblewrap version
+  and host kind.
+- `not_used` (`{ "state": "not_used" }`): the task names no registered command.
+  A sandbox the relay passed for such a task is not recorded.
+- `unavailable`: only in a receipt written after a receiver restart, when the
+  interrupted execution's journal entry was written before receipts carried the
+  tuple. Otherwise that receipt reports the tuple the journal recorded for the
+  interrupted execution, not the sandbox probed after the restart.
+
+The runner builds and checks the tuple right after admission, before any
+worktree or process, and stores it in the action execution journal for
+receipt-required tasks. `FileTaskReceiptStore` and the journal reject a
+revision 2 receipt without a valid tuple, a revision 1 receipt that carries
+one, and any other `schema` value. Revision 1 receipts (no `schema`, no
+`commandSandbox`), written before this revision, are still returned on a
+delivery retry. The relay posts `commandSandbox` with the task outcome and
+prints it in its `--json` output.
+
 ### Relay Git after the provider and after a command
 
 The relay's own Git calls for a task run nothing that the provider or a command

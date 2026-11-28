@@ -151,6 +151,19 @@ task. Skill smoke checks start only from the operator's
 installs no skill, and the relay's automatic skill activation passes no smoke
 command.
 
+Every task receipt names the command sandbox the task was admitted with
+(receipt revision `dharma.task-receipt/v2`). For a task that names registered
+commands it records bubblewrap's absolute path (`/usr/bin/bwrap` or
+`/bin/bwrap`), its version and the `sha256` of the binary the probe read, the
+sandbox policy (`bwrap-policy/2`), the host kind (`linux` or `wsl2`) and the
+probe result: `passed`, the named checks the probe proved, and when it ran. The
+tuple is recorded whether or not a command ran before the task ended. A task
+without registered commands records `not_used`. The runner checks the tuple
+before anything runs, writes it into the action execution journal before any
+effect, and the relay posts it with the task outcome. A receipt written after a
+receiver restart reports the sandbox the interrupted execution was admitted
+with, or `unavailable` when its journal entry predates the tuple.
+
 **Residuals:**
 
 - The provider process is a trusted component, not a sandboxed one. The Codex
@@ -173,6 +186,12 @@ command.
   kept on the same host would not help, because the provider runs as the
   same user. Closing this needs the registered commands inside the
   server-signed authorization.
+- The receipt's sandbox tuple is what the relay probed and observed, not a
+  signed attestation of the host. It names the bubblewrap binary and policy
+  the probe checked; it does not prove the kernel enforced more than the
+  probe's named checks. The provider runs as the relay user, so it could
+  change a stored receipt file, and a delivery retry returns the stored
+  receipt.
 - After a completed task with a skill bundle, the relay reads the workspace
   policy file again, after the provider ran, for the content-transmission
   check before it uploads the task's trajectory. That read decides only

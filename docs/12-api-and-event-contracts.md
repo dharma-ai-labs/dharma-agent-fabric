@@ -135,6 +135,32 @@ POST /internal/agent-fabric/v1/tasks/:taskId/artifact-manifests
 POST /internal/agent-fabric/v1/tasks/:taskId/artifact-manifests/:manifestId/complete
 ```
 
+### Task receipts
+
+The local task runner writes one receipt per signed task. The contract is
+`schemas/task-receipt-v2.schema.json` (`$id`
+`https://schemas.dharma-ai.io/task-receipt/v2`, `schema`
+`dharma.task-receipt/v2`).
+
+- Revision 2 adds `schema` and the required `commandSandbox`, the command
+  sandbox the task was admitted with: `{ state: 'sandboxed', host, bwrapPath,
+  bwrapVersion, bwrapSha256, policy, probe: { result: 'passed', checks,
+  probedAt } }` for a task that names registered commands, `{ state:
+  'not_used' }` for a task that names none, and `{ state: 'unavailable' }` only
+  for a receipt written after a receiver restart whose journal entry predates
+  the tuple.
+- Revision 1 receipts carry neither field. Readers still accept them, so a
+  receipt stored before the upgrade is returned on a delivery retry; it is not
+  valid against the revision 2 schema. A revision 1 receipt that carries
+  `commandSandbox`, a revision 2 receipt without a valid tuple, and any other
+  `schema` value are rejected.
+- Writers write revision 2 only.
+
+The relay's task outcome event (`completed`, `failed` or `cancelled`, posted to
+`/agent-fabric/tasks/:taskId/events`) carries the receipt summary. For a
+revision 2 receipt the summary includes `commandSandbox` unchanged; for a
+revision 1 receipt it has no `commandSandbox` field.
+
 ## Error contract
 
 ```json
