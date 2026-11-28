@@ -24,7 +24,7 @@ async function fixture(t: TestContext, provider: 'codex' | 'claude' = 'codex') {
   await mkdir(workspace);
   for (const argv of [['init', '-q'], ['config', 'user.email', 'test@dharma.ai'],
     ['config', 'user.name', 'Refusal Fixture'], ['commit', '--allow-empty', '-qm', 'initial']]) {
-    assert.equal(spawnSync('git', argv, { cwd: workspace }).status, 0);
+    assert.equal(spawnSync('git', argv, { cwd: workspace, windowsHide: true }).status, 0);
   }
   const marker = resolve(root, 'command-ran');
   const policy: OrganizationPolicy = {
@@ -68,7 +68,7 @@ function countSpawns(t: TestContext) {
   const calls: string[] = [];
   const patch = t.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
     calls.push(command);
-    return originalSpawn(command, argv, options);
+    return originalSpawn(command, argv, { ...options, windowsHide: true });
   });
   syncBuiltinESMExports();
   t.after(() => { patch.mock.restore(); syncBuiltinESMExports(); });
