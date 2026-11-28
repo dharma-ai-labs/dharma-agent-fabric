@@ -7980,6 +7980,8 @@ async function executeOneTask(
     response: taskResponsePreview(receipt),
     commandResults: receipt.commandResults.map(({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 }) => ({ commandId, exitCode, signal, timedOut, stdoutSha256, stderrSha256 })),
     startedAt: receipt.startedAt, completedAt: receipt.completedAt,
+    // The sandbox the task was admitted with, as the receipt records it (revision 2 receipts only).
+    ...(receipt.commandSandbox ? { commandSandbox: receipt.commandSandbox } : {}),
   };
   const collectedAt = receipt.completedAt;
   const prepared = receipt.status === 'completed' && task.skillBundle

@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { access, chmod, copyFile, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type AddressInfo } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { signCanonicalObject } from '@dharma-ai-labs/agent-fabric-contracts';
+import { fileURLToPath } from 'node:url';
+import { signCanonicalObject, validateContract } from '@dharma-ai-labs/agent-fabric-contracts';
 import type { OrganizationPolicy } from '@dharma-ai-labs/agent-fabric-policy';
 import {
   detectRegisteredCommandSandbox,
   executeTask,
   FileTaskReceiptStore,
+  PROBE_CHECKS,
   RegisteredCommandsRefusedError,
   type RegisteredCommandSandbox,
   type TaskEnvelope,
@@ -141,6 +143,40 @@ if (!expectation) {
     assert.match(sandbox.bwrapPath, /^\/(usr\/)?bin\/bwrap$/);
     assert.match(sandbox.bwrapSha256, /^sha256:[0-9a-f]{64}$/);
     process.stdout.write(`# sandbox ${JSON.stringify({ ...sandbox, layout: undefined })}\n`);
+  });
+
+  // The task receipt names the sandbox the task ran in. The test reads bubblewrap itself, apart
+  // from the probe, and compares: path, version, sha256, policy, host kind and the probe result.
+  test('the task receipt records the probed bubblewrap, its policy, the host kind and the probe result', async (t) => {
+    const sandbox = await probe(t);
+    const fixture = await repository(t);
+    const { task, publicKey } = signedTask(['receipt.check']);
+    const policy = policyWith({ 'receipt.check': { argv: [process.execPath, '-e',
+      "require('node:fs').writeFileSync('reports/receipt.txt', 'ran')"], timeoutSeconds: 30 } });
+    const receipt = await executeTask({ task, policy, workspace: fixture.workspace, relayStateDirectory: fixture.relayStateDirectory,
+      serverPublicKey: publicKey, receiptStore: new FileTaskReceiptStore(resolve(fixture.root, 'receipts')),
+      registeredCommandSandbox: sandbox, providerExecutor: async () => providerResult });
+    assert.equal(receipt.status, 'completed', JSON.stringify(receipt.commandResults.map(({ commandId, stderr }) => ({ commandId, stderr }))));
+    const stored = JSON.parse(await readFile(resolve(fixture.root, 'receipts', `${task.taskId}.json`), 'utf8')) as Record<string, unknown>;
+    const bwrapPath = await exists('/usr/bin/bwrap') ? '/usr/bin/bwrap' : '/bin/bwrap';
+    const bwrapSha256 = `sha256:${createHash('sha256').update(await readFile(bwrapPath)).digest('hex')}`;
+    const bwrapVersion = /^bubblewrap (\d+\.\d+\.\d+)/m.exec(spawnSync(bwrapPath, ['--version'],
+      { encoding: 'utf8', windowsHide: true }).stdout)?.[1];
+    assert.ok(bwrapVersion, 'bubblewrap reports its version');
+    const host = /microsoft/i.test(await readFile('/proc/sys/kernel/osrelease', 'utf8')) ? 'wsl2' : 'linux';
+    const checks = [...PROBE_CHECKS.base, ...(sandbox.disableUserns ? PROBE_CHECKS.disableUserns : []),
+      ...(host === 'wsl2' ? PROBE_CHECKS.wsl : [])];
+    const tuple = stored.commandSandbox as { probe?: { probedAt?: string } } | undefined;
+    const probedAt = Date.parse(String(tuple?.probe?.probedAt));
+    assert.ok(Number.isFinite(probedAt) && probedAt <= Date.parse(receipt.startedAt), 'the probe ran before the task started');
+    assert.equal(stored.schema, 'dharma.task-receipt/v2');
+    assert.deepEqual(stored.commandSandbox, { state: 'sandboxed', host, bwrapPath, bwrapVersion, bwrapSha256,
+      policy: 'bwrap-policy/2', probe: { result: 'passed', checks, probedAt: tuple?.probe?.probedAt } });
+    assert.deepEqual(JSON.parse(JSON.stringify(receipt)).commandSandbox, stored.commandSandbox);
+    const schemas = fileURLToPath(new URL('../../../schemas/', import.meta.url));
+    const validation = await validateContract(schemas, 'https://schemas.dharma-ai.io/task-receipt/v2', stored);
+    assert.deepEqual(validation.ok ? [] : validation.errors, []);
+    process.stdout.write(`# receipt sandbox ${JSON.stringify(stored.commandSandbox)}\n`);
   });
 
   test('a registered command inside the sandbox cannot reach host secrets, writes, network or processes', async (t) => {

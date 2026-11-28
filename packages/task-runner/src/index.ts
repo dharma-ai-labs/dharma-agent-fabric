@@ -36,16 +36,20 @@ import {
   relayGitEnvironment,
 } from './acceptanceEnvironment.js';
 import {
+  assertValidTaskReceiptCommandSandbox,
   parseSandboxStatus,
   probeRegisteredCommandSandbox,
   registeredCommandAdmission,
   RegisteredCommandSandboxFailedError,
   sandboxCommandEnvironment,
   sandboxCommandLine,
+  TASK_RECEIPT_SCHEMA,
   taskNamesRegisteredCommands,
+  taskReceiptCommandSandbox,
   type ProbeDependencies,
   type RegisteredCommandSandbox,
   type SandboxRefusalReason,
+  type TaskReceiptCommandSandbox,
   type UsableSandbox,
 } from './registeredCommandSandbox.js';
 
@@ -61,7 +65,9 @@ export {
   registeredCommandSandboxLogLine,
   sandboxCommandEnvironment,
   sandboxCommandLine,
+  TASK_RECEIPT_SCHEMA,
   taskNamesRegisteredCommands,
+  taskReceiptCommandSandbox,
   type HostLayout,
   type HostLayoutEntry,
   type NodeMount,
@@ -70,6 +76,7 @@ export {
   type RegisteredCommandSandbox,
   type SandboxedRun,
   type SandboxRefusalReason,
+  type TaskReceiptCommandSandbox,
   type UsableSandbox,
 } from './registeredCommandSandbox.js';
 
@@ -217,6 +224,11 @@ export interface CommandResult {
 }
 
 export interface TaskReceipt {
+  /**
+   * `dharma.task-receipt/v2` (schemas/task-receipt-v2.schema.json) on every receipt this runner
+   * writes. Absent on revision 1 receipts written before, which readers still accept.
+   */
+  schema?: typeof TASK_RECEIPT_SCHEMA;
   taskId: string;
   status: 'completed' | 'failed' | 'cancelled';
   worktree: string;
@@ -226,6 +238,8 @@ export interface TaskReceipt {
   externalEffectReceipt?: ExternalEffectReceipt;
   startedAt: string;
   completedAt: string;
+  /** The command sandbox the task was admitted with. Required in revision 2, absent in revision 1. */
+  commandSandbox?: TaskReceiptCommandSandbox;
 }
 
 export type ProviderTaskExecutor = (input: {
@@ -1210,6 +1224,15 @@ function assertValidTaskReceipt(value: unknown, expectedTaskId?: string): assert
   if (receipt.externalEffectReceipt !== undefined) {
     assertValidExternalEffectReceipt(receipt.externalEffectReceipt);
   }
+  const revision: unknown = receipt.schema;
+  if (revision === undefined) {
+    // Revision 1, written before receipts recorded the command sandbox.
+    if (receipt.commandSandbox !== undefined) throw new Error('Task receipt is invalid.');
+  } else if (revision !== TASK_RECEIPT_SCHEMA) {
+    throw new Error('Task receipt is invalid.');
+  } else {
+    assertValidTaskReceiptCommandSandbox(receipt.commandSandbox);
+  }
 }
 
 export class FileTaskReceiptStore {
@@ -1256,6 +1279,8 @@ export interface ActionExecutionJournalRecord {
   updatedAt: string;
   providerResultDigest?: string;
   receipt?: TaskReceipt;
+  /** The command sandbox the execution was admitted with. Absent in records written before receipts carried it. */
+  commandSandbox?: TaskReceiptCommandSandbox;
 }
 
 export interface ActionExecutionClaim {
@@ -1332,6 +1357,7 @@ export class FileActionExecutionJournal {
       if (record.state === 'receipt_recorded' && !record.receipt) {
         throw new Error('Action execution journal is missing its recorded receipt.');
       }
+      if (record.commandSandbox !== undefined) assertValidTaskReceiptCommandSandbox(record.commandSandbox);
       if (record.receipt) {
         assertValidTaskReceipt(record.receipt, taskId);
         const acknowledgement = record.receipt.actionAcknowledgement;
@@ -1623,7 +1649,8 @@ function requiresActionDecisionReceipt(task: TaskEnvelope): boolean {
   return task.requiredCapabilities?.includes('action_decision_receipts_v1') ?? false;
 }
 
-function interruptedActionReceipt(record: ActionExecutionJournalRecord, now: Date): TaskReceipt {
+function interruptedActionReceipt(record: ActionExecutionJournalRecord, now: Date,
+  current: TaskReceiptCommandSandbox): TaskReceipt {
   const commandResults: CommandResult[] = [{
     commandId: 'runner', exitCode: null, signal: null, timedOut: false,
     stdoutSha256: `sha256:${'0'.repeat(64)}`,
@@ -1631,6 +1658,7 @@ function interruptedActionReceipt(record: ActionExecutionJournalRecord, now: Dat
     stdout: '', stderr: 'External effect outcome is unknown after receiver restart; execution was not repeated.',
   }];
   return {
+    schema: TASK_RECEIPT_SCHEMA,
     taskId: record.taskId, status: 'failed', worktree: record.worktree, branch: record.branch,
     commandResults,
     actionAcknowledgement: buildActionDecisionAcknowledgement({
@@ -1639,6 +1667,9 @@ function interruptedActionReceipt(record: ActionExecutionJournalRecord, now: Dat
       result: { status: 'failed', recovery: 'abandoned_execution_claim', commandResults },
     }, now),
     startedAt: record.preparedAt, completedAt: now.toISOString(),
+    // The sandbox the interrupted execution was admitted with, not one probed after the restart. A
+    // record from before receipts carried it leaves it unknown, unless the task names no commands.
+    commandSandbox: record.commandSandbox ?? (current.state === 'not_used' ? current : { state: 'unavailable' }),
   };
 }
 
@@ -1725,6 +1756,8 @@ export async function executeTask(input: {
   if (!admission.admitted) throw new RegisteredCommandsRefusedError(admission.reason);
   const commandSandbox = taskNamesRegisteredCommands(input.task) && input.registeredCommandSandbox?.usable
     ? input.registeredCommandSandbox : null;
+  // Recorded in the journal and the receipt; checked here, before anything runs.
+  const receiptCommandSandbox = taskReceiptCommandSandbox(input.task, commandSandbox ?? undefined);
   const commandPolicy = input.commandPolicy ?? snapshotRegisteredCommandPolicy(input.task, input.policy);
   assertCommandPolicySnapshotForTask(commandPolicy, input.task, input.policy);
   if (input.task.execution.isolation !== 'git_worktree') throw new Error('Only Git worktree isolation is supported.');
@@ -1769,6 +1802,7 @@ export async function executeTask(input: {
       taskId: input.task.taskId, decisionId: decisionReceipt.decisionId,
       endpointId: input.task.target.endpointId, actionDigest: decisionReceipt.actionDigest,
       externalIdempotencyKey: decisionReceipt.decisionId, worktree, branch,
+      commandSandbox: receiptCommandSandbox,
     });
     journalRecord = prepared.record;
     if (journalRecord.state === 'receipt_recorded') {
@@ -1782,7 +1816,8 @@ export async function executeTask(input: {
         throw new Error('Action execution claim conflicts with the signed decision.');
       }
       if (journal.isClaimOwnerAlive(priorClaim)) throw new Error('Action execution is already in progress.');
-      const recovered = interruptedActionReceipt(journalRecord, input.actionDecisions.now?.() ?? new Date());
+      const recovered = interruptedActionReceipt(journalRecord, input.actionDecisions.now?.() ?? new Date(),
+        receiptCommandSandbox);
       await journal.recordReceipt(recovered);
       await input.receiptStore.put(recovered);
       return recovered;
@@ -1790,7 +1825,8 @@ export async function executeTask(input: {
     if (journalRecord.state === 'replay_authorization_started'
       || journalRecord.state === 'executing'
       || journalRecord.state === 'effect_observed') {
-      const recovered = interruptedActionReceipt(journalRecord, input.actionDecisions.now?.() ?? new Date());
+      const recovered = interruptedActionReceipt(journalRecord, input.actionDecisions.now?.() ?? new Date(),
+        receiptCommandSandbox);
       await journal.recordReceipt(recovered);
       await input.receiptStore.put(recovered);
       return recovered;
@@ -2024,6 +2060,7 @@ export async function executeTask(input: {
     }, input.actionDecisions?.now?.() ?? new Date())
     : undefined;
   const receipt: TaskReceipt = {
+    schema: TASK_RECEIPT_SCHEMA,
     taskId: input.task.taskId,
     status,
     worktree,
@@ -2033,6 +2070,7 @@ export async function executeTask(input: {
     ...(actionAcknowledgement ? { actionAcknowledgement } : {}),
     startedAt,
     completedAt: new Date().toISOString(),
+    commandSandbox: receiptCommandSandbox,
   };
   if (receiptRequired) await journal.recordReceipt(receipt);
   await input.receiptStore.put(receipt);

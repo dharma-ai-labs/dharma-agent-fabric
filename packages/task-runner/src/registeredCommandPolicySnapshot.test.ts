@@ -32,6 +32,7 @@ const STAND_IN_SANDBOX: UsableSandbox = {
   bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: SANDBOX_POLICY_VERSION,
   layout: { bin: 'symlink', sbin: 'symlink', lib: 'symlink', lib32: 'absent', lib64: 'symlink', libx32: 'absent' },
   nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [], disableUserns: true,
+  probe: { checks: ['network_denied'], probedAt: '2026-11-28T00:00:00.000Z' },
 };
 const STAND_IN_SCRIPT = [
   'const fs = require("node:fs"); const { spawn } = require("node:child_process");',

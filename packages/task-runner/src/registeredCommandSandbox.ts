@@ -71,6 +71,11 @@ export interface UsableSandbox {
   nodeMounts: readonly NodeMount[];
   /** True on bubblewrap 0.8.0 or newer. */
   disableUserns: boolean;
+  /**
+   * The live probe that made this sandbox usable: the named policy checks it required, all of
+   * which passed, and when it ran. A sandbox object exists outside the probe only when it passed.
+   */
+  probe: { checks: readonly string[]; probedAt: string };
 }
 
 export interface RefusedSandbox {
@@ -183,6 +188,69 @@ export function registeredCommandAdmission(task: Pick<TaskEnvelope, 'authority' 
   if (!sandbox) return { admitted: false, reason: 'sandbox_probe_failed' };
   if (!sandbox.usable) return { admitted: false, reason: sandbox.reason };
   return { admitted: true };
+}
+
+/** The receipt revision that records the command sandbox. A receipt without `schema` is revision 1. */
+export const TASK_RECEIPT_SCHEMA = 'dharma.task-receipt/v2';
+
+/**
+ * The command sandbox a task receipt records. `sandboxed`: the task names registered commands and
+ * was admitted with this probed sandbox, whether or not a command ran before the task ended.
+ * `not_used`: the task names no registered command, so no sandbox was used. `unavailable`: a
+ * receipt written after a receiver restart for an execution journalled before receipts recorded
+ * the sandbox.
+ */
+export type TaskReceiptCommandSandbox =
+  | {
+    state: 'sandboxed';
+    host: 'linux' | 'wsl2';
+    bwrapPath: string;
+    bwrapVersion: string;
+    bwrapSha256: string;
+    policy: string;
+    probe: { result: 'passed'; checks: string[]; probedAt: string };
+  }
+  | { state: 'not_used' }
+  | { state: 'unavailable' };
+
+/** The receipt tuple for a task admitted with `sandbox`. Pure. */
+export function taskReceiptCommandSandbox(task: Pick<TaskEnvelope, 'authority' | 'acceptance'>,
+  sandbox: RegisteredCommandSandbox | undefined): TaskReceiptCommandSandbox {
+  if (!taskNamesRegisteredCommands(task)) return { state: 'not_used' };
+  if (!sandbox?.usable) throw new Error('Task receipt command sandbox is invalid.');
+  const tuple: TaskReceiptCommandSandbox = { state: 'sandboxed', host: sandbox.host, bwrapPath: sandbox.bwrapPath,
+    bwrapVersion: sandbox.bwrapVersion, bwrapSha256: sandbox.bwrapSha256, policy: sandbox.policy,
+    probe: { result: 'passed', checks: [...sandbox.probe.checks], probedAt: sandbox.probe.probedAt } };
+  assertValidTaskReceiptCommandSandbox(tuple);
+  return tuple;
+}
+
+const SANDBOXED_KEYS = ['bwrapPath', 'bwrapSha256', 'bwrapVersion', 'host', 'policy', 'probe', 'state'].join();
+
+/** Checks a recorded tuple against schemas/task-receipt-v2.schema.json (`$defs.commandSandbox`). */
+export function assertValidTaskReceiptCommandSandbox(value: unknown): asserts value is TaskReceiptCommandSandbox {
+  const invalid = () => new Error('Task receipt command sandbox is invalid.');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
+  const tuple = value as Record<string, unknown>;
+  const keys = Object.keys(tuple).sort().join();
+  if (tuple.state === 'not_used' || tuple.state === 'unavailable') {
+    if (keys !== 'state') throw invalid();
+    return;
+  }
+  if (tuple.state !== 'sandboxed' || keys !== SANDBOXED_KEYS
+    || !['linux', 'wsl2'].includes(String(tuple.host))
+    || !(BWRAP_PATHS as readonly unknown[]).includes(tuple.bwrapPath)
+    || typeof tuple.bwrapVersion !== 'string' || !/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/.test(tuple.bwrapVersion)
+    || typeof tuple.bwrapSha256 !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(tuple.bwrapSha256)
+    || typeof tuple.policy !== 'string' || !/^bwrap-policy\/[1-9][0-9]{0,3}$/.test(tuple.policy)) throw invalid();
+  const probe = tuple.probe;
+  if (!probe || typeof probe !== 'object' || Array.isArray(probe)) throw invalid();
+  const { result, checks, probedAt } = probe as Record<string, unknown>;
+  if (Object.keys(probe).sort().join() !== 'checks,probedAt,result' || result !== 'passed'
+    || !Array.isArray(checks) || checks.length < 1 || checks.length > 32
+    || checks.some(check => typeof check !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(check))
+    || new Set(checks).size !== checks.length
+    || typeof probedAt !== 'string' || !Number.isFinite(Date.parse(probedAt))) throw invalid();
 }
 
 /** One JSON line for the relay start log. */
@@ -390,9 +458,13 @@ export async function probeRegisteredCommandSandbox(deps: ProbeDependencies): Pr
       return refused('sandbox_probe_failed', 'failed checks: node_prefix_supported');
     }
     const nodeMounts = bindNodePrefix ? await nodeInstallationMounts(deps, nodePrefix, node) : [];
+    const disableUserns = atLeast(parsed, DISABLE_USERNS_BWRAP);
+    const checks = Object.freeze([...PROBE_CHECKS.base, ...(disableUserns ? PROBE_CHECKS.disableUserns : []),
+      ...(host === 'wsl2' ? PROBE_CHECKS.wsl : [])]);
+    // Returned only when every one of these checks passes.
     const sandbox: UsableSandbox = { usable: true, host, bwrapPath, bwrapVersion: parsed.join('.'), bwrapSha256,
-      policy: SANDBOX_POLICY_VERSION, layout, nodePrefix, bindNodePrefix, nodeMounts,
-      disableUserns: atLeast(parsed, DISABLE_USERNS_BWRAP) };
+      policy: SANDBOX_POLICY_VERSION, layout, nodePrefix, bindNodePrefix, nodeMounts, disableUserns,
+      probe: { checks, probedAt: new Date().toISOString() } };
     return await runProbe(deps, sandbox, node);
   } catch (error) {
     return refused('sandbox_probe_failed', `probe error ${String((error as NodeJS.ErrnoException)?.code ?? 'unexpected')}`);
@@ -433,8 +505,7 @@ async function runProbe(deps: ProbeDependencies, sandbox: UsableSandbox, node: s
     await writeFile(outsideCanary, 'synthetic canary\n');
     await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', accept); });
     const sentinel = randomUUID();
-    const checks = [...PROBE_CHECKS.base, ...(sandbox.disableUserns ? PROBE_CHECKS.disableUserns : []),
-      ...(sandbox.host === 'wsl2' ? PROBE_CHECKS.wsl : [])];
+    const checks = sandbox.probe.checks;
     const args = { outsideCanary, outsideWrite, home: deps.homedir(), relayPid: deps.relayPid, sentinel, worktree,
       nodePaths: sandbox.bindNodePrefix ? sandbox.nodeMounts.map(mount => mount.path) : [], port: (server.address() as AddressInfo).port, checks };
     const source = { ...process.env, SANDBOX_PROBE_SENTINEL: sentinel };

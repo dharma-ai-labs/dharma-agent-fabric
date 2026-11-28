@@ -84,6 +84,7 @@ const USABLE_SANDBOX = {
   bwrapSha256: `sha256:${'a'.repeat(64)}`, policy: 'bwrap-policy/2',
   layout: { bin: 'symlink', sbin: 'symlink', lib: 'symlink', lib32: 'absent', lib64: 'symlink', libx32: 'absent' } as const,
   nodePrefix: '/usr', bindNodePrefix: false, nodeMounts: [], disableUserns: true,
+  probe: { checks: ['network_denied'], probedAt: '2026-11-28T00:00:00.000Z' },
 };
 
 const assertRefusal = (reason?: string) => (error: unknown) => {
