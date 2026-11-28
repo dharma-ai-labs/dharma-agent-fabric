@@ -30,6 +30,11 @@ import {
 } from './index.js';
 import * as taskRunner from './index.js';
 
+// the runner refuses every task that names registered commands until
+// command isolation exists (see registeredCommandRefusal.test.ts). These tests cover the
+// command path that the isolation work will re-enable, so they stay in place, skipped.
+const REGISTERED_COMMANDS_REFUSED_SKIP = 'The runner refuses registered commands until command isolation exists';
+
 async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string[]) {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-required-artifact-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -247,7 +252,7 @@ test('required artifact review v10: ignored outputs require signed write authori
 
 test('required artifact review v10: existing read-only artifacts remain unchanged through acceptance', async (t) => {
   for (const mutate of [false, true]) {
-    await t.test(mutate ? 'changed by acceptance' : 'unchanged', async (child) => {
+    await t.test(mutate ? 'changed by acceptance' : 'unchanged', { skip: mutate && REGISTERED_COMMANDS_REFUSED_SKIP }, async (child) => {
       const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
       await mkdir(resolve(fixture.workspace, 'reports'));
       await writeFile(resolve(fixture.workspace, 'reports/result.json'), 'private-read-only-sentinel');
@@ -332,7 +337,7 @@ test('required artifacts reject ambiguous or unauthorized references before prov
   }
 });
 
-test('required artifacts check the final state after registered acceptance commands', async (t) => {
+test('required artifacts check the final state after registered acceptance commands', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
   for (const operation of ['create', 'remove'] as const) {
     await t.test(operation, async (child) => {
       const fixture = await requiredArtifactFixture(child, ['reports/result.json']);
@@ -717,7 +722,7 @@ test('required artifact review v8: impossible ancestor file requirements fail be
   }
 });
 
-test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', async () => {
+test('signed task runs only a registered command in a relay-owned worktree and deduplicates delivery', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-task-runner-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
@@ -1078,7 +1083,7 @@ test('provider changes outside signed write paths fail even when untracked or co
   assert.match(committed.commandResults.at(-1)?.stderr || '', /outside the signed task authority/);
 });
 
-test('acceptance commands cannot expand signed write scope or run a later command after a violation', async (t) => {
+test('acceptance commands cannot expand signed write scope or run a later command after a violation', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
   for (const variant of ['untracked', 'tracked', 'committed', 'receipt-required'] as const) {
     await t.test(variant, async (child) => {
       const fixture = await requiredArtifactFixture(child, []);
@@ -1122,7 +1127,7 @@ test('acceptance commands cannot expand signed write scope or run a later comman
   }
 });
 
-test('acceptance commands preserve authorized outputs and read-only tasks', async (t) => {
+test('acceptance commands preserve authorized outputs and read-only tasks', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
   for (const variant of ['authorized', 'read-only'] as const) {
     await t.test(variant, async (child) => {
       const fixture = await requiredArtifactFixture(child, variant === 'authorized' ? ['reports/result.json'] : []);
@@ -1278,7 +1283,7 @@ test('receipt-required task fails closed before provider execution without an em
   assert.equal(executions, 0);
 });
 
-test('receipt-required task executes only a KMS-signed release and acknowledges its effect', async () => {
+test('receipt-required task executes only a KMS-signed release and acknowledges its effect', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-action-release-'));
   const workspace = resolve(root, 'workspace');
   await mkdir(workspace);
@@ -1614,7 +1619,7 @@ function probeCommand(inherit?: string[]) {
   };
 }
 
-test('acceptance commands run with an explicit environment instead of the relay process environment', async (t) => {
+test('acceptance commands run with an explicit environment instead of the relay process environment', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
   const fixture = await requiredArtifactFixture(t, []);
   fixture.policy.tasks.allowedCommands.permitted = probeCommand(['ACCEPTANCE_PERMITTED_INPUT']);
   fixture.policy.tasks.allowedCommands.plain = probeCommand();
@@ -1653,7 +1658,7 @@ test('acceptance commands run with an explicit environment instead of the relay 
   assert.equal(environmentValue(plain, 'ACCEPTANCE_PERMITTED_INPUT'), undefined);
 });
 
-test('relay Git checks after an acceptance command do not run a Git monitor hook the command configured', async (t) => {
+test('relay Git checks after an acceptance command do not run a Git monitor hook the command configured', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
   const fixture = await requiredArtifactFixture(t, []);
   const marker = resolve(fixture.root, 'monitor-hook-ran.json');
   const hook = resolve(fixture.root, 'monitor-hook.cjs');
@@ -1678,7 +1683,7 @@ test('relay Git checks after an acceptance command do not run a Git monitor hook
   assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
 });
 
-test('acceptance command policy cannot inherit runner-owned environment names', async (t) => {
+test('acceptance command policy cannot inherit runner-owned environment names', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async (t) => {
   for (const name of [...RUNNER_OWNED_NAMES, 'dharma_action_digest']) {
     await t.test(name, async (child) => {
       const fixture = await requiredArtifactFixture(child, []);
@@ -1714,7 +1719,7 @@ test('signed tasks cannot carry their own acceptance-command environment', async
   }
 });
 
-test('decision-bound acceptance variables come only from the verified decision receipt', async () => {
+test('decision-bound acceptance variables come only from the verified decision receipt', { skip: REGISTERED_COMMANDS_REFUSED_SKIP }, async () => {
   const root = await mkdtemp(resolve(tmpdir(), 'dharma-acceptance-decision-'));
   try {
     const workspace = resolve(root, 'workspace');
