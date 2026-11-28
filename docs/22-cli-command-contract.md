@@ -158,14 +158,14 @@ No command broadens organization policy locally.
 
 ```text
 dharma relay start --policy .dharma/approved-policy.json
-dharma relay stop
+dharma relay stop [--dry-run]
 dharma relay probe
 dharma relay autostart status
 dharma relay autostart disable
 dharma status
 ```
 
-Complete bootstrap starts the registered supervisor and configures per-user startup on Windows, Linux with a systemd user session, or macOS with the recipient's graphical login session. Linux Codex bootstrap preserves the selected nondefault `CODEX_HOME` location in its owned startup receipt, without copying credentials or importing arbitrary environment variables. Linux relay recovery uses that registered service instead of starting a competing detached supervisor. `relay start` is a foreground receiver; `relay stop` gracefully stops the current supervisor and receiver without deleting enrolled identity or vault data. The startup entry remains for the next user sign-in until `relay autostart disable` removes it. `status` reports startup registration and the last successful relay poll; `relay probe` independently checks the signed connection. Unavailable user-session startup is an incomplete bootstrap stage. Registration is not native reboot, protected-store recovery or signed skill activation proof; macOS qualification remains required.
+Complete bootstrap starts the registered supervisor and configures per-user startup on Windows, Linux with a systemd user session, or macOS with the recipient's graphical login session. Linux Codex bootstrap preserves the selected nondefault `CODEX_HOME` location in its owned startup receipt, without copying credentials or importing arbitrary environment variables. Linux relay recovery uses that registered service instead of starting a competing detached supervisor. `relay start` is a foreground receiver; `relay stop` gracefully stops the current supervisor and receiver without deleting enrolled identity or vault data. `relay stop --dry-run` reports the supervisor and receiver state it would stop and signals neither. `relay stop` accepts only `--dry-run` and `--json`; any other option is refused with `relay_stop_options_invalid` before any process is signalled. The startup entry remains for the next user sign-in until `relay autostart disable` removes it. `status` reports startup registration and the last successful relay poll; `relay probe` independently checks the signed connection. Unavailable user-session startup is an incomplete bootstrap stage. Registration is not native reboot, protected-store recovery or signed skill activation proof; macOS qualification remains required.
 
 ## Exit codes
 

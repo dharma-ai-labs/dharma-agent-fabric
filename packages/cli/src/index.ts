@@ -2719,13 +2719,14 @@ async function qualifyCodexSetupChildRequest(request: Readonly<LocalCodexSetupSe
   } catch {return false;}
 }
 
-async function relayStop(): Promise<Output> {
+async function relayStop(options: { dryRun?: boolean } = {}): Promise<Output> {
   const home = dharmaHome();
   const supervisor = await relaySupervisorProcessState(home);
   const relay = await relayProcessState(home);
   if (supervisor === 'unknown' || relay === 'unknown') {
     throw new Error('Relay process state is unknown; refusing to signal an unverified process.');
   }
+  if (options.dryRun) return { ok: true, planned: true, state: 'stop_planned', supervisor, relay, vaultPreserved: true };
   const signalProcess = async (name: 'supervisor' | 'relay') => {
     const pidPath = resolve(home, 'relay', `${name}.pid`);
     const pid = Number((await readFile(pidPath, 'utf8')).trim());
@@ -10286,7 +10287,13 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
   }
   if (command === 'tasks' && subcommand === 'run-once') return runOneTask(flags);
   if (command === 'relay' && subcommand === 'probe') return probeRelayConnection();
-  if (command === 'relay' && subcommand === 'stop') return relayStop();
+  if (command === 'relay' && subcommand === 'stop') {
+    // Refuse any other option before reading pid files: an ignored --dry-run or typo must never signal the relay.
+    if ([...flags.keys()].some(key => !['dry-run', 'json'].includes(key)) || [...flags.values()].some(value => value !== true)) {
+      throw new Error('relay_stop_options_invalid');
+    }
+    return relayStop({ dryRun: flags.has('dry-run') });
+  }
   if (command === 'relay' && subcommand === 'upgrade') return relayUpgrade(flags);
   if (command === 'relay' && subcommand === 'autostart') {
     if (positional[2] === 'status') return relayAutostartStatus({ home: dharmaHome() });
