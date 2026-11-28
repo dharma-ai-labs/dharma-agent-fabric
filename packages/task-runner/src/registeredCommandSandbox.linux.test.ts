@@ -265,6 +265,88 @@ if (!expectation) {
     assert.equal(receipt.status, 'failed');
     assert.match(receipt.commandResults.at(-1)?.stderr || '', /outside the signed task authority/);
   });
+
+  // Host Git closed: relay Git after a sandboxed command runs no filter, hook or configuration the
+  // command could have influenced. The command writes only inside reports/, which the task may write.
+  // Each case changes the tracked reports/.keep so that relay Git has to look at its content.
+  const WRITE_SCRIPT = oneLine(`
+    const fs = require('node:fs'), path = require('node:path');
+    for (const file of JSON.parse(process.argv[1])) {
+      fs.mkdirSync(path.dirname(file.path), { recursive: true });
+      fs.writeFileSync(file.path, file.content, { mode: file.mode ?? 0o644 });
+    }`);
+  type TaskFile = { path: string; content: string; mode?: number };
+
+  async function runWritingTask(sandbox: RegisteredCommandSandbox, fixture: Awaited<ReturnType<typeof repository>>, files: TaskFile[]) {
+    const { task, publicKey } = signedTask(['write']);
+    const policy = policyWith({ write: { argv: [process.execPath, '-e', WRITE_SCRIPT, JSON.stringify(files)], timeoutSeconds: 30 } });
+    return executeTask({ task, policy, workspace: fixture.workspace, relayStateDirectory: fixture.relayStateDirectory,
+      serverPublicKey: publicKey, receiptStore: new FileTaskReceiptStore(resolve(fixture.root, 'receipts')),
+      registeredCommandSandbox: sandbox, providerExecutor: async () => providerResult });
+  }
+
+  // A clean filter that writes a canary outside the worktree when Git runs it on the host.
+  async function canaryFilter(fixture: Awaited<ReturnType<typeof repository>>, name: string) {
+    const canary = resolve(fixture.root, `filter-${name}-ran`);
+    const script = resolve(fixture.root, `filter-${name}.cjs`);
+    await writeFile(script, `require("node:fs").writeFileSync(${JSON.stringify(canary)}, "ran"); process.stdin.pipe(process.stdout);\n`);
+    return { canary, command: `'${process.execPath}' '${script}'` };
+  }
+
+  function git(cwd: string, argv: string[]) {
+    assert.equal(spawnSync('git', argv, { cwd, windowsHide: true }).status, 0, argv.join(' '));
+  }
+
+  test('relay Git ignores a global Git configuration whose filter a task-written .gitattributes names', async (t) => {
+    const sandbox = await probe(t);
+    const fixture = await repository(t);
+    const filter = await canaryFilter(fixture, 'globalx');
+    // The relay user's global configuration, found through XDG_CONFIG_HOME, which the relay passes to Git.
+    const configHome = resolve(fixture.root, 'xdg');
+    await mkdir(resolve(configHome, 'git'), { recursive: true });
+    await writeFile(resolve(configHome, 'git', 'config'), `[filter "globalx"]\n\tclean = ${filter.command}\n`);
+    const previous = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = configHome;
+    t.after(() => { if (previous === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previous; });
+    const receipt = await runWritingTask(sandbox, fixture, [
+      { path: 'reports/.gitattributes', content: '* filter=globalx\n' },
+      { path: 'reports/.keep', content: 'changed by the command\n' },
+    ]);
+    assert.equal(await exists(filter.canary), false, 'relay Git ran a filter from the global configuration');
+    assert.equal(receipt.status, 'completed', JSON.stringify(receipt.commandResults.map(({ commandId, stderr }) => ({ commandId, stderr }))));
+  });
+
+  test('relay Git does not start a repository-configured filter that a task-written .gitattributes assigns', async (t) => {
+    const sandbox = await probe(t);
+    const fixture = await repository(t);
+    const filter = await canaryFilter(fixture, 'repox');
+    // The operator's repository defines the driver, as Git LFS does; only the task names it.
+    git(fixture.workspace, ['config', 'filter.repox.clean', filter.command]);
+    const receipt = await runWritingTask(sandbox, fixture, [
+      { path: 'reports/.gitattributes', content: '* filter=repox\n' },
+      { path: 'reports/.keep', content: 'changed by the command\n' },
+    ]);
+    assert.equal(await exists(filter.canary), false, 'relay Git ran a filter that the task assigned');
+    assert.equal(receipt.status, 'completed', JSON.stringify(receipt.commandResults.map(({ commandId, stderr }) => ({ commandId, stderr }))));
+  });
+
+  test('relay Git does not run a hook the task wrote into the repository hooks path', async (t) => {
+    const sandbox = await probe(t);
+    const fixture = await repository(t);
+    // A hooks path inside the worktree, as husky configures it.
+    git(fixture.workspace, ['config', 'core.hooksPath', 'reports/hooks']);
+    const canary = resolve(fixture.root, 'hook-ran');
+    const hook = `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(canary)}, "ran");\n`;
+    const receipt = await runWritingTask(sandbox, fixture, [
+      ...['post-index-change', 'post-checkout', 'reference-transaction', 'pre-auto-gc'].map(name =>
+        ({ path: `reports/hooks/${name}`, content: hook, mode: 0o755 })),
+      // Rewriting a tracked file with its own content leaves only stale index stat data, which
+      // `git diff` refreshes by writing the index.
+      { path: 'reports/.keep', content: '' },
+    ]);
+    assert.equal(await exists(canary), false, 'relay Git ran a hook the task wrote');
+    assert.equal(receipt.status, 'completed', JSON.stringify(receipt.commandResults.map(({ commandId, stderr }) => ({ commandId, stderr }))));
+  });
 } else {
   test('a host that restricts user namespaces refuses, and no command runs', async (t) => {
     const fixture = await repository(t);

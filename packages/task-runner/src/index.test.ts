@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mock, test, type TestContext } from 'node:test';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
 import { chmod, link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -221,12 +222,16 @@ test('custom qualification reports cannot bypass receipt redaction or bind a dif
   }
 });
 
-// Relay-internal Git calls start with `-c name=value` configuration overrides.
+// Relay-internal Git calls start with `-c name=value` configuration overrides and `--name=value`
+// global options before the subcommand.
 function gitSubcommand(argv: readonly string[]): string | undefined {
   let index = 0;
-  while (argv[index] === '-c') index += 2;
+  while (argv[index] === '-c' || argv[index]?.startsWith('--')) index += argv[index] === '-c' ? 2 : 1;
   return argv[index];
 }
+
+// Relay Git subcommands that run after `git worktree add` and use the pinned repository paths.
+const PINNED_SUBCOMMANDS = new Set(['switch', 'rev-parse', 'diff', 'ls-files']);
 
 test('required artifact review v10: incomplete Git streams fail closed', async (t) => {
   for (const stream of ['tracked-overflow', 'untracked-overflow', 'unterminated'] as const) {
@@ -2031,10 +2036,10 @@ test('relay Git after a sandboxed command uses the pinned repository paths and n
   const before = spawns.slice(0, sandboxIndex).filter(({ command }) => command === 'git');
   const after = spawns.slice(sandboxIndex + 1).filter(({ command }) => command === 'git');
   assert.ok(before.length > 0 && after.length >= 2);
-  for (const { argv } of before) assert.equal(argv.some(value => value.startsWith('--git-dir=')), false, 'provider-phase Git is unchanged');
   const pointer = await readFile(resolve(worktree, '.git'), 'utf8');
   const gitDir = resolve(worktree, pointer.replace(/^gitdir:\s*/, '').trim());
-  for (const { argv } of after) {
+  // Every call after `git worktree add` uses the pinned paths, including the provider-phase checks.
+  for (const { argv } of [...before, ...after].filter(({ argv }) => PINNED_SUBCOMMANDS.has(gitSubcommand(argv)!))) {
     assert.ok(argv.includes(`--git-dir=${gitDir}`), argv.join(' '));
     assert.ok(argv.includes(`--work-tree=${worktree}`), argv.join(' '));
     if (argv.includes('diff')) assert.ok(argv.includes('--no-ext-diff') && argv.includes('--no-textconv'), argv.join(' '));
@@ -2050,13 +2055,180 @@ test('a changed worktree Git pointer after a sandboxed command fails the task', 
   assert.match(receipt.commandResults.at(-1)?.stderr || '', /Git pointer changed/);
 });
 
-test('tasks without registered commands keep plain relay Git and never start bubblewrap', async (t) => {
+test('tasks without registered commands never start bubblewrap, and relay Git after the provider still uses the pinned paths', async (t) => {
   const fixture = await requiredArtifactFixture(t, []);
   const spawns = recordSpawns(t);
-  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
-  assert.equal(receipt.status, 'completed');
+  let worktree = '';
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => { worktree = workspace; return fixture.providerResult; } });
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
   assert.equal(spawns.some(({ command }) => command === STAND_IN_SANDBOX.bwrapPath), false);
-  assert.equal(spawns.some(({ argv }) => argv.some(value => value.startsWith('--git-dir=') || value === '--no-ext-diff')), false);
+  const checks = spawns.filter(({ command, argv }) => command === 'git' && ['diff', 'ls-files'].includes(gitSubcommand(argv)!));
+  assert.ok(checks.length >= 2);
+  for (const { argv } of checks) {
+    assert.ok(argv.some(value => value.startsWith('--git-dir=')), argv.join(' '));
+    assert.ok(argv.includes(`--work-tree=${worktree}`), argv.join(' '));
+  }
+});
+
+// Slice 3: relay Git after the provider or a sandboxed command runs nothing the task could have
+// influenced. It ignores system and global configuration, uses a relay-owned empty hooks folder,
+// reads attributes from the starting commit, and checks the pinned repository files around each call.
+function configOverride(argv: readonly string[], name: string): string | undefined {
+  for (let index = 0; index < argv.length - 1; index++) {
+    if (argv[index] === '-c' && argv[index + 1]!.startsWith(`${name}=`)) return argv[index + 1]!.slice(name.length + 1);
+  }
+  return undefined;
+}
+
+function within(parent: string, candidate: string | undefined) {
+  return candidate !== undefined && resolve(candidate).toLowerCase().startsWith(resolve(parent).toLowerCase());
+}
+
+async function commitFixtureFiles(workspace: string, files: Record<string, string>) {
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(resolve(workspace, path, '..'), { recursive: true });
+    await writeFile(resolve(workspace, path), content);
+  }
+  assert.equal(spawnSync('git', ['add', '.'], { cwd: workspace, windowsHide: true }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '-qm', 'fixture files'], { cwd: workspace, windowsHide: true }).status, 0);
+}
+
+// A clean filter that the operator's repository configuration defines (as Git LFS does). It writes
+// a canary outside the worktree when Git runs it.
+async function configureCanaryFilter(fixture: { root: string; workspace: string }, name: string) {
+  const canary = resolve(fixture.root, `filter-${name}-ran`);
+  const script = resolve(fixture.root, `filter-${name}.cjs`);
+  await writeFile(script, `require("node:fs").writeFileSync(${JSON.stringify(canary)}, "ran"); process.stdin.pipe(process.stdout);\n`);
+  const shellPath = (path: string) => `'${path.replace(/\\/g, '/')}'`;
+  assert.equal(spawnSync('git', ['config', `filter.${name}.clean`, `${shellPath(process.execPath)} ${shellPath(script)}`],
+    { cwd: fixture.workspace, windowsHide: true }).status, 0);
+  return canary;
+}
+
+test('relay Git ignores system and global configuration and uses relay-owned hooks, attributes and ignore paths', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const version = spawnSync('git', ['version'], { windowsHide: true, encoding: 'utf8' }).stdout.trim();
+  process.stdout.write(`# relay git on ${process.platform}: ${version}\n`);
+  const startingCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: fixture.workspace, windowsHide: true, encoding: 'utf8' }).stdout.trim();
+  const spawns = recordSpawns(t);
+  let worktree = '';
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => { worktree = workspace; return fixture.providerResult; } });
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  const state = fixture.input.relayStateDirectory;
+  const calls = spawns.filter(({ command }) => command === 'git');
+  assert.ok(calls.length >= 5);
+  for (const { argv, options } of calls) {
+    const label = argv.join(' ');
+    const env = options.env ?? {};
+    assert.equal(env.GIT_CONFIG_NOSYSTEM, '1', label);
+    assert.ok(within(state, env.GIT_CONFIG_GLOBAL), `global configuration is relay-owned: ${label}`);
+    assert.equal(await readFile(env.GIT_CONFIG_GLOBAL!, 'utf8'), '', 'the relay-owned global configuration is empty');
+    for (const name of ['HOME', 'XDG_CONFIG_HOME']) {
+      assert.ok(within(state, env[name]), `${name} is relay-owned: ${label}`);
+      assert.notEqual(env[name], process.env[name], name);
+    }
+    const hooks = configOverride(argv, 'core.hooksPath');
+    assert.ok(within(state, hooks) && !within(worktree, hooks), `hooks path is relay-owned: ${label}`);
+    assert.equal(configOverride(argv, 'core.fsmonitor'), 'false', label);
+    assert.equal(configOverride(argv, 'core.untrackedCache'), 'false', label);
+    assert.equal(configOverride(argv, 'core.attributesFile'), env.GIT_CONFIG_GLOBAL, label);
+    assert.equal(configOverride(argv, 'core.excludesFile'), env.GIT_CONFIG_GLOBAL, label);
+  }
+  const checks = calls.filter(({ argv }) => ['diff', 'ls-files'].includes(gitSubcommand(argv)!));
+  assert.ok(checks.length >= 2);
+  for (const { argv } of checks) assert.ok(argv.includes(`--attr-source=${startingCommit}`), argv.join(' '));
+});
+
+test('relay Git checks the worktree Git pointer again after each call', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  let worktree = '';
+  let swapped = false;
+  recordSpawns(t, ({ command, argv }) => {
+    // Stands in for a race: the pointer changes while a relay Git call runs.
+    if (command === 'git' && gitSubcommand(argv) === 'diff' && worktree && !swapped) {
+      swapped = true;
+      writeFileSync(resolve(worktree, '.git'), 'gitdir: ../elsewhere\n');
+    }
+    return undefined;
+  });
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => { worktree = workspace; return fixture.providerResult; } });
+  assert.equal(swapped, true);
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /relay_git_isolation_failed.*Git pointer changed/);
+});
+
+test('a provider that changes repository configuration or Git-directory attributes fails the task closed', async (t) => {
+  const changes: Record<string, (workspace: string, worktree: string) => Promise<void>> = {
+    configuration: async (_workspace, worktree) => {
+      assert.equal(spawnSync('git', ['config', 'core.pager', 'cat'], { cwd: worktree, windowsHide: true }).status, 0);
+    },
+    'info/attributes': async (workspace) => {
+      await mkdir(resolve(workspace, '.git', 'info'), { recursive: true });
+      await writeFile(resolve(workspace, '.git', 'info', 'attributes'), '* filter=x\n');
+    },
+    'info/exclude': async (workspace) => {
+      await mkdir(resolve(workspace, '.git', 'info'), { recursive: true });
+      await writeFile(resolve(workspace, '.git', 'info', 'exclude'), '*\n');
+    },
+  };
+  for (const [name, change] of Object.entries(changes)) {
+    await t.test(name, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => { await change(fixture.workspace, workspace); return fixture.providerResult; } });
+      assert.equal(receipt.status, 'failed');
+      assert.match(receipt.commandResults.at(-1)?.stderr || '', /relay_git_isolation_failed/);
+    });
+  }
+});
+
+test('relay Git reads attributes from the starting commit, so a task-written .gitattributes starts no filter', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  await commitFixtureFiles(fixture.workspace, { 'reports/tracked.txt': 'original\n' });
+  const canary = await configureCanaryFilter(fixture, 'x');
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      await writeFile(resolve(workspace, 'reports', '.gitattributes'), '* filter=x\n');
+      await writeFile(resolve(workspace, 'reports', 'tracked.txt'), 'changed by the task\n');
+      return fixture.providerResult;
+    } });
+  assert.equal(await readFile(canary, 'utf8').catch(() => undefined), undefined, 'relay Git ran the filter');
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+});
+
+test('a Git without attribute-source support refuses a task-written .gitattributes and keeps other tasks working', async (t) => {
+  for (const writesAttributes of [true, false]) {
+    await t.test(writesAttributes ? 'attributes written' : 'attributes unchanged', async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      await commitFixtureFiles(fixture.workspace, { 'reports/tracked.txt': 'original\n' });
+      const canary = await configureCanaryFilter(fixture, 'x');
+      let versionChecks = 0;
+      const spawns = recordSpawns(child, ({ command, argv, options }) => {
+        if (command !== 'git' || gitSubcommand(argv) !== 'version') return undefined;
+        versionChecks++;
+        return hostSpawn(process.execPath, ['-e', 'process.stdout.write("git version 2.39.5\\n")'],
+          { ...(options as childProcess.SpawnOptions), windowsHide: true });
+      });
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          if (writesAttributes) await writeFile(resolve(workspace, 'reports', '.gitattributes'), '* filter=x\n');
+          await writeFile(resolve(workspace, 'reports', 'tracked.txt'), 'changed by the task\n');
+          return fixture.providerResult;
+        } });
+      assert.ok(versionChecks >= 1, 'the relay checks the Git version');
+      assert.equal(spawns.some(({ argv }) => argv.some(value => value.startsWith('--attr-source='))), false);
+      assert.equal(await readFile(canary, 'utf8').catch(() => undefined), undefined, 'relay Git ran the filter');
+      if (writesAttributes) {
+        assert.equal(receipt.status, 'failed');
+        assert.match(receipt.commandResults.at(-1)?.stderr || '', /relay_git_isolation_failed.*\.gitattributes/);
+      } else {
+        assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+      }
+    });
+  }
 });
 
 test('commands run from the policy loaded before the provider; the workspace policy file is not read again', async (t) => {
