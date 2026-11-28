@@ -128,6 +128,7 @@ test('the command is read-only: the folders it had to create for the probe are r
   const root = await stateRoot(t);
   // A fresh host: no Dharma home yet. The probe creates its scratch folder under the relay state
   // directory, as the relay's probe does, and removes only its own subfolder.
+  await mkdir(resolve(root, 'fresh'));
   const freshRelay = resolve(root, 'fresh', '.dharma', 'relay');
   await readRelaySandboxStatus({ relayStateDirectory: freshRelay, probe: async ({ relayStateDirectory }) => {
     const scratch = resolve(relayStateDirectory, 'sandbox-probe', 'probe-run');

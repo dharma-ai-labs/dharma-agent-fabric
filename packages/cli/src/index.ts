@@ -46,6 +46,12 @@ import {
   type TaskReceipt,
 } from '@dharma-ai-labs/agent-fabric-task-runner';
 import { CLI_USAGE } from './usage.js';
+import {
+  assertRelaySandboxStatusOptions,
+  formatRelaySandboxStatus,
+  readRelaySandboxStatus,
+  relaySandboxStatusExitCode,
+} from './relaySandboxStatus.js';
 import { claudeSignInPreflight } from './claudeSignInPreflight.js';
 import { runAssignedCaptureCommand, type AssignedCaptureCommandContext } from './assignedCapture.js';
 export type { AssignedCaptureCommandContext } from './assignedCapture.js';
@@ -292,6 +298,9 @@ export function formatCommandOutput(value:unknown):string{
 
 export function commandExitCode(argv: string[], value: Output): number {
   const { positional, flags } = parseCliOptions(argv);
+  // A refused command sandbox is an answer, not an error: exit 1 with the typed reason printed.
+  if (positional[0] === 'relay' && positional[1] === 'sandbox' && positional[2] === 'status'
+    && !flags.has('help') && !flags.has('version')) return relaySandboxStatusExitCode(value);
   if(positional[0]==='relay'&&positional[1]==='upgrade'
     &&(flags.has('stage-signing-maintenance')||flags.has('finish-signing-maintenance'))){
     if(!value||typeof value!=='object'||Array.isArray(value))return 2;
@@ -9951,6 +9960,14 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
   }
   if (flags.has('help') || command === 'help') return USAGE;
   if (flags.has('version') || command === 'version') return { version: VERSION };
+  if (command === 'relay' && subcommand === 'sandbox') {
+    if (positional[2] !== 'status') throw new Error('Use dharma relay sandbox status [--json].');
+    // Read-only: the relay's own probe, once, on the relay state directory; no enrollment is read.
+    assertRelaySandboxStatusOptions(positional, flags, repeated);
+    const status = await readRelaySandboxStatus({ relayStateDirectory: resolve(dharmaHome(), 'relay'),
+      probe: detectRegisteredCommandSandbox });
+    return flags.has('json') ? status : formatRelaySandboxStatus(status);
+  }
   if(command==='signing-recovery'){
     if(positional.length!==1||[...repeated.values()].some(values=>values.length!==1)
       ||[...flags.keys()].some(key=>!['name','workspace-id','operation-id','apply','json'].includes(key))
