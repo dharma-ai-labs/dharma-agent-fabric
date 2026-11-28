@@ -141,7 +141,7 @@ The relay reads the registered commands a task names from
 `<workspace>/.dharma/approved-policy.json` once, at admission, before the
 provider starts, and hands the task runner a copy frozen at every level. Every
 command lookup for that task, before and after the provider, reads only this
-copy; nothing reads the policy file again for it. So the provider, which runs
+copy; no command lookup reads the policy file again. So the provider, which runs
 unsandboxed, cannot change the commands of the task it runs in by rewriting
 the policy file or the workspace launchers in `.dharma/bin`. A registered
 command cannot reach either: the sandbox does not show the workspace. A
@@ -173,6 +173,10 @@ command.
   kept on the same host would not help, because the provider runs as the
   same user. Closing this needs the registered commands inside the
   server-signed authorization.
+- After a completed task with a skill bundle, the relay reads the workspace
+  policy file again, after the provider ran, for the content-transmission
+  check before it uploads the task's trajectory. That read decides only
+  whether evidence is uploaded; it never supplies a command or its argv.
 - Behaviour on real WSL2 hosts, including the Windows interop cut, is checked
   by the probe on each host but not yet by a recorded qualification.
 - Tasks with registered commands and a network grant are refused; there is no

@@ -70,20 +70,21 @@ When a task names registered commands, the provider gets no command tools
 (`allowedCommandArgv` is empty). For Claude tasks this means no `Bash(...)`
 tools: the commands run only in the sandboxed acceptance loop after the
 provider stops. Every named command must still resolve in the policy the relay
-loaded before the provider started; the workspace policy file is not read again.
+loaded before the provider started; no command lookup reads the workspace policy
+file again.
 
 ### Command policy snapshot
 
-The relay reads `<workspace>/.dharma/approved-policy.json` once per task, at
-admission, before the skill activation lock, `started` and the provider. It
-then calls `snapshotRegisteredCommandPolicy(task, policy)`: a copy of the
-policy entries for the commands the task names in `authority.commands`, with
-the task ID, organization ID and policy revision, frozen at every level. It
+For command lookups, the relay reads `<workspace>/.dharma/approved-policy.json`
+once per task, at admission, before the skill activation lock, `started` and the
+provider. It then calls `snapshotRegisteredCommandPolicy(task, policy)`: a copy
+of the policy entries for the commands the task names in `authority.commands`,
+with the task ID, organization ID and policy revision, frozen at every level. It
 passes the copy to `executeTask({ commandPolicy })`. The runner checks that the
-copy belongs to this task (task ID, organization, revision) and is frozen, or
-it fails before any worktree or process starts. Every command lookup, before
-and after the provider, reads only this copy. A caller that passes no copy
-gets one taken from `policy` before anything runs.
+copy belongs to this task (task ID, organization, revision) and is frozen, or it
+fails before any worktree or process starts. Every command lookup, before and
+after the provider, reads only this copy. A caller that passes no copy gets one
+taken from `policy` before anything runs.
 
 The provider runs unsandboxed as the relay user, so it can rewrite the policy
 file or the workspace launchers (`.dharma/bin/dharma`, `.dharma/bin/dharma.cmd`)
@@ -290,6 +291,10 @@ What this does not cover:
 - The registered commands in the approved policy file are not server-signed or
   pinned; a later task reads the file as it is then (see "Command policy
   snapshot").
+- After a completed task with a skill bundle, the relay reads the workspace
+  policy file again, after the provider ran, for the content-transmission check
+  before it uploads the task's trajectory. That read decides only whether
+  evidence is uploaded; it never supplies a command or its argv.
 
 ## Receipt-required tasks
 

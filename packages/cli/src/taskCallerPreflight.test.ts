@@ -408,7 +408,7 @@ test('the relay reads the command policy once at admission and hands the runner 
   assert.ok(f.calls.indexOf('policy-refresh') < f.calls.indexOf('event:started'));
   assert.deepEqual(f.calls.slice(f.calls.indexOf('execute-task')),
     ['execute-task', 'interval-clear:2', 'outcome', 'activation-lock-release', 'interval-clear:1'],
-    'nothing reads the policy after the runner returns');
+    'without a skill bundle, nothing reads the policy after the runner returns');
 });
 
 // No alternate route: a skill smoke check runs a registered command on the host, outside the
