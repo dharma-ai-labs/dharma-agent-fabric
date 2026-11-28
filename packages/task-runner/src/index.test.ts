@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test, type TestContext } from 'node:test';
+import { mock, test, type TestContext } from 'node:test';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { chmod, link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -47,7 +47,7 @@ const STAND_IN_SCRIPT = [
   'const fs = require("node:fs"); const { spawn } = require("node:child_process");',
   'const [cwd, command, ...args] = process.argv.slice(1);',
   'fs.writeSync(3, JSON.stringify({ "child-pid": process.pid }) + "\\n");',
-  'const child = spawn(command, args, { cwd, stdio: ["ignore", "inherit", "inherit"] });',
+  'const child = spawn(command, args, { cwd, stdio: ["ignore", "inherit", "inherit"], windowsHide: true });',
   'child.on("error", () => process.exit(127));',
   'child.on("exit", (code, signal) => {',
   '  const exitCode = code ?? 128 + (require("node:os").constants.signals[signal] ?? 0);',
@@ -56,12 +56,12 @@ const STAND_IN_SCRIPT = [
 ].join('\n');
 const hostSpawn = childProcess.spawn;
 function standInSpawn(command: string, argv: readonly string[], options: object) {
-  if (command !== STAND_IN_SANDBOX.bwrapPath) return hostSpawn(command, argv, options);
+  if (command !== STAND_IN_SANDBOX.bwrapPath) return hostSpawn(command, argv, { ...options, windowsHide: true });
   const separator = argv.indexOf('--');
   const cwd = argv[argv.indexOf('--chdir') + 1]!;
-  return hostSpawn(process.execPath, ['-e', STAND_IN_SCRIPT, cwd, ...argv.slice(separator + 1)], options);
+  return hostSpawn(process.execPath, ['-e', STAND_IN_SCRIPT, cwd, ...argv.slice(separator + 1)], { ...options, windowsHide: true });
 }
-Object.assign(childProcess, { spawn: standInSpawn });
+mock.method(childProcess, 'spawn', standInSpawn);
 syncBuiltinESMExports();
 
 async function requiredArtifactFixture(t: TestContext, requiredArtifacts: string[]) {
@@ -1937,7 +1937,7 @@ function recordSpawns(t: TestContext, replace?: (record: SpawnRecord) => ReturnT
   const patch = t.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
     const record: SpawnRecord = { command, argv: [...argv], options: options as SpawnRecord['options'] };
     records.push(record);
-    const child = replace?.(record) ?? current(command, argv, options);
+    const child = replace?.(record) ?? current(command, argv, { ...options, windowsHide: true });
     if (child.pid !== undefined) record.pid = child.pid;
     return child;
   });
@@ -1994,7 +1994,7 @@ test('a sandbox that never reports its child fails the task once and never runs 
   fixture.policy.tasks.allowedCommands.verify = { argv: [process.execPath, '-e',
     `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`], timeoutSeconds: 10 };
   const spawns = recordSpawns(t, ({ command, options }) => command === STAND_IN_SANDBOX.bwrapPath
-    ? hostSpawn(process.execPath, ['-e', 'process.stderr.write("bwrap: setting up uid map: Permission denied\\n"); process.exit(1)'], options as childProcess.SpawnOptions)
+    ? hostSpawn(process.execPath, ['-e', 'process.stderr.write("bwrap: setting up uid map: Permission denied\\n"); process.exit(1)'], { ...(options as childProcess.SpawnOptions), windowsHide: true })
     : undefined);
   const receipt = await executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult });
   assert.equal(receipt.status, 'failed');

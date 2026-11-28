@@ -253,13 +253,13 @@ checks.capabilities_dropped = /\nCapEff:\s*0+\n/.test(fs.readFileSync('/proc/sel
 checks.sockets_hidden = !exists('/run') && !exists('/var') && !process.env.SSH_AUTH_SOCK
   && !process.env.DBUS_SESSION_BUS_ADDRESS && !process.env.XDG_RUNTIME_DIR;
 if (a.checks.includes('nested_userns_denied')) {
-  const result = cp.spawnSync('/usr/bin/unshare', ['--user', 'true'], { stdio: 'ignore' });
+  const result = cp.spawnSync('/usr/bin/unshare', ['--user', 'true'], { stdio: 'ignore', windowsHide: true });
   checks.nested_userns_denied = !result.error && result.status !== 0;
 }
 if (a.checks.includes('wsl_interop_cut')) {
   const program = path.join(a.worktree, '.dharma-probe.exe');
   let ran = false;
-  try { fs.writeFileSync(program, Buffer.from('MZ')); fs.chmodSync(program, 0o755); ran = cp.spawnSync(program, [], { stdio: 'ignore' }).status === 0; } catch {}
+  try { fs.writeFileSync(program, Buffer.from('MZ')); fs.chmodSync(program, 0o755); ran = cp.spawnSync(program, [], { stdio: 'ignore', windowsHide: true }).status === 0; } catch {}
   try { fs.unlinkSync(program); } catch {}
   checks.wsl_interop_cut = !ran && !exists('/init') && !exists('/mnt') && !exists('/run/WSL') && !process.env.WSL_INTEROP;
 }

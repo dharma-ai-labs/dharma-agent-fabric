@@ -42,7 +42,7 @@ async function repository(t: TestContext) {
     scripts: { probe: 'node -e "require(\'node:fs\').writeFileSync(\'reports/npm.txt\', \'npm ran\')"' } }));
   for (const argv of [['init', '-q'], ['config', 'user.email', 'test@dharma.ai'], ['config', 'user.name', 'Sandbox Fixture'],
     ['add', '.'], ['commit', '-qm', 'initial']]) {
-    assert.equal(spawnSync('git', argv, { cwd: workspace }).status, 0, argv.join(' '));
+    assert.equal(spawnSync('git', argv, { cwd: workspace, windowsHide: true }).status, 0, argv.join(' '));
   }
   const relayStateDirectory = resolve(root, 'state');
   await mkdir(relayStateDirectory, { recursive: true });
@@ -111,7 +111,7 @@ const checks = {
   loopback_only: fs.readFileSync('/proc/net/dev', 'utf8').split('\\n').slice(2).map(line => line.split(':')[0].trim()).filter(Boolean).join(',') === 'lo',
   descriptors_closed: fds.length === 0,
   capabilities_dropped: /CapEff:\\s*0+\\n/.test(fs.readFileSync('/proc/self/status', 'utf8')),
-  nested_userns_denied: !a.disableUserns || cp.spawnSync('/usr/bin/unshare', ['--user', 'true']).status !== 0,
+  nested_userns_denied: !a.disableUserns || cp.spawnSync('/usr/bin/unshare', ['--user', 'true'], { windowsHide: true }).status !== 0,
   home_is_sandbox_home: process.env.HOME === '/dharma-sandbox/home' && fs.readdirSync(process.env.HOME).length === 0,
 };
 const socket = net.connect(a.port, '127.0.0.1');
@@ -240,7 +240,7 @@ if (!expectation) {
     const script = `
       const { spawn } = require('node:child_process');
       spawn(process.execPath, ['-e', "setInterval(() => require('node:fs').appendFileSync('reports/tick.txt', 'x'), 100)"],
-        { detached: true, stdio: 'ignore' }).unref();
+        { detached: true, stdio: 'ignore', windowsHide: true }).unref();
       setInterval(() => {}, 1000);`;
     const policy = policyWith({ spin: { argv: [process.execPath, '-e', oneLine(script)], timeoutSeconds: 2 } });
     const receipt = await executeTask({ task, policy, workspace: fixture.workspace, relayStateDirectory: fixture.relayStateDirectory,
