@@ -1,3 +1,5 @@
+import { resolve } from 'node:path';
+
 // Operating-system essentials that registered build, test and lint commands commonly need.
 // HOME, USERPROFILE, APPDATA, LOCALAPPDATA and XDG_CONFIG_HOME are not harmless: they locate
 // per-user tool configuration and credential files. They are passed because npm and Git need
@@ -88,6 +90,32 @@ export function relayGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.
   environment.GIT_CONFIG_NOSYSTEM = '1';
   environment.GIT_CONFIG_GLOBAL = isolation.emptyFile;
   return environment;
+}
+
+/**
+ * Builds the environment for the relay's Git calls before any task code runs (the checkout and the
+ * reads of the operator's checkout settings): operating-system essentials, so Git reads the
+ * operator's system and global configuration as the operator's own checkout does.
+ */
+export function operatorGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.Platform): Record<string, string> {
+  return operatingSystemEssentials(source, platform);
+}
+
+/**
+ * The global exclude file Git uses in `environment` when `core.excludesFile` is not set:
+ * `$XDG_CONFIG_HOME/git/ignore`, else `<home>/.config/git/ignore`. Git for Windows uses
+ * `USERPROFILE` as the home folder when `HOME` is not set.
+ */
+export function defaultGitExcludesFile(environment: Record<string, string>, platform: NodeJS.Platform): string | undefined {
+  const lookup = sourceNameLookup(environment, platform);
+  const value = (name: string) => {
+    const sourceName = lookup(name);
+    return sourceName === undefined ? undefined : environment[sourceName] || undefined;
+  };
+  const configHome = value('XDG_CONFIG_HOME');
+  if (configHome) return resolve(configHome, 'git', 'ignore');
+  const home = value('HOME') ?? (platform === 'win32' ? value('USERPROFILE') : undefined);
+  return home ? resolve(home, '.config', 'git', 'ignore') : undefined;
 }
 
 export interface RegisteredCommandEnvironmentInput {
