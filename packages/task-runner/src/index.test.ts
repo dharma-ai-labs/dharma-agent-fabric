@@ -4,7 +4,7 @@ import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 import { chmod, copyFile, link, mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import childProcess, { spawnSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import {
@@ -232,12 +232,13 @@ function gitSubcommand(argv: readonly string[]): string | undefined {
   return argv[index];
 }
 
-// Read once: whether the host Git reads attributes from a commit (`--attr-source`, Git 2.40 or later).
+// Read once: whether the host Git reads attributes from a commit (the global `--attr-source`
+// option, Git 2.41 or later; Git 2.40 has only `check-attr --source`).
 const HOST_GIT_READS_ATTRIBUTE_SOURCE = (() => {
   const match = /^git version (\d+)\.(\d+)/.exec(spawnSync('git', ['version'], { windowsHide: true, encoding: 'utf8' }).stdout);
   const major = Number(match?.[1] ?? 0);
   const minor = Number(match?.[2] ?? 0);
-  return major > 2 || (major === 2 && minor >= 40);
+  return major > 2 || (major === 2 && minor >= 41);
 })();
 
 // Relay Git subcommands that run after `git worktree add` and use the pinned repository paths.
@@ -2244,10 +2245,11 @@ test('relay Git reads attributes from the starting commit, so a task-written .gi
 
 test('a Git without attribute-source support refuses a task-written .gitattributes and keeps other tasks working', async (t) => {
   // The starting commit has a tracked root .gitattributes, which the relay records and compares.
+  // Git 2.41.0 added the global `--attr-source` option; Git 2.40 has only `check-attr --source`.
   const cases = { 'attributes written': 'new', 'attributes unchanged': 'none', 'tracked attributes changed': 'tracked' } as const;
-  for (const [name, change] of Object.entries(cases)) {
+  for (const version of ['2.39.5', '2.40.1']) for (const [name, change] of Object.entries(cases)) {
     const writesAttributes = change !== 'none';
-    await t.test(name, async (child) => {
+    await t.test(`${version}: ${name}`, async (child) => {
       const fixture = await requiredArtifactFixture(child, []);
       await commitFixtureFiles(fixture.workspace, { 'reports/tracked.txt': 'original\n', '.gitattributes': '*.txt text\n' });
       const canary = await configureCanaryFilter(fixture, 'x');
@@ -2255,7 +2257,7 @@ test('a Git without attribute-source support refuses a task-written .gitattribut
       const spawns = recordSpawns(child, ({ command, argv, options }) => {
         if (command !== 'git' || gitSubcommand(argv) !== 'version') return undefined;
         versionChecks++;
-        return hostSpawn(process.execPath, ['-e', 'process.stdout.write("git version 2.39.5\\n")'],
+        return hostSpawn(process.execPath, ['-e', `process.stdout.write("git version ${version}\\n")`],
           { ...(options as childProcess.SpawnOptions), windowsHide: true });
       });
       const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
@@ -2512,6 +2514,121 @@ test('a .gitignore the task writes cannot hide files outside the write paths fro
         assert.match(receipt.commandResults.at(-1)?.stderr || '', /relay_git_isolation_failed.*\.gitignore/);
         assert.ok((receipt.commandResults.at(-1)?.stderr || '').includes(`Folder: ${JSON.stringify(folder)}`),
           receipt.commandResults.at(-1)?.stderr);
+      }
+    });
+  }
+});
+
+test('a Git 2.41 host reads attributes from the starting commit', { skip: !HOST_GIT_READS_ATTRIBUTE_SOURCE }, async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  await commitFixtureFiles(fixture.workspace, { 'reports/tracked.txt': 'original\n' });
+  const canary = await configureCanaryFilter(fixture, 'x');
+  const startingCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: fixture.workspace, windowsHide: true, encoding: 'utf8' }).stdout.trim();
+  const spawns = recordSpawns(t, ({ command, argv, options }) => {
+    if (command !== 'git' || gitSubcommand(argv) !== 'version') return undefined;
+    return hostSpawn(process.execPath, ['-e', 'process.stdout.write("git version 2.41.0\\n")'],
+      { ...(options as childProcess.SpawnOptions), windowsHide: true });
+  });
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      await writeFile(resolve(workspace, 'reports', '.gitattributes'), '* filter=x\n');
+      await writeFile(resolve(workspace, 'reports', 'tracked.txt'), 'changed by the task\n');
+      return fixture.providerResult;
+    } });
+  assert.equal(await readFile(canary, 'utf8').catch(() => undefined), undefined, 'relay Git ran the filter');
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  const diffs = spawns.filter(({ command, argv }) => command === 'git' && gitSubcommand(argv) === 'diff');
+  assert.ok(diffs.length >= 1);
+  for (const { argv } of diffs) assert.ok(argv.includes(`--attr-source=${startingCommit}`), argv.join(' '));
+});
+
+// Git starts filter programs through the shell from the worktree root. An empty or relative PATH
+// entry would find a program the task wrote there, outside the sandbox, as the relay user.
+const PATH_SEPARATOR = process.platform === 'win32' ? ';' : ':';
+
+test('relay Git keeps only the absolute entries of the relay PATH', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const spawns = recordSpawns(t);
+  const original = environmentValue(process.env, 'PATH') ?? '';
+  const receipt = await withParentEnvironment({ PATH: ['', '.', 'bin', original, ''].join(PATH_SEPARATOR) },
+    () => executeTask({ ...fixture.input, task: fixture.signed(), providerExecutor: async () => fixture.providerResult }));
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  const calls = spawns.filter(({ command }) => command === 'git');
+  assert.ok(calls.length >= 5);
+  for (const { argv, options } of calls) {
+    const path = environmentValue(options.env ?? {}, 'PATH') ?? '';
+    assert.ok(path.length > 0, argv.join(' '));
+    for (const entry of path.split(PATH_SEPARATOR)) {
+      assert.ok(entry !== '' && isAbsolute(entry.replace(/^"(.*)"$/, '$1')), `PATH entry ${JSON.stringify(entry)}: ${argv.join(' ')}`);
+    }
+  }
+});
+
+test('a filter that relay Git starts never runs a program the task wrote, whatever the relay PATH',
+  { skip: process.platform === 'win32' ? 'POSIX shell lookup' : false }, async (t) => {
+    const fixture = await requiredArtifactFixture(t, []);
+    await commitFixtureFiles(fixture.workspace, { '.gitattributes': '*.bin filter=lfs\n', 'reports/data.bin': 'original\n' });
+    // The operator's Git LFS settings, which relay Git passes on; the program name is not installed.
+    const operator = await operatorGitHome(fixture.root, '[filter "lfs"]\n\tclean = dharma-planted-filter clean %f\n');
+    const canary = resolve(fixture.root, 'planted-filter-ran');
+    await withParentEnvironment({ ...operator, PATH: `reports${PATH_SEPARATOR}${process.env.PATH ?? ''}` },
+      () => executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          await writeFile(resolve(workspace, 'reports', 'dharma-planted-filter'), `#!/bin/sh\necho ran > '${canary}'\ncat\n`,
+            { mode: 0o755 });
+          await writeFile(resolve(workspace, 'reports', 'data.bin'), 'changed by the task\n');
+          return fixture.providerResult;
+        } }));
+    assert.equal(await readFile(canary, 'utf8').catch(() => undefined), undefined, 'relay Git ran a program the task wrote');
+  });
+
+test('the write-scope check refuses what Git does not list: nested .git entries, unreadable folders and special files', async (t) => {
+  const asRoot = process.getuid?.() === 0;
+  const cases: Record<string, { tracked?: Record<string, string>; files?: Record<string, string>;
+    special?: 'unreadable' | 'fifo'; status: 'completed' | 'failed'; posixOnly?: boolean }> = {
+    // Git skips every entry named .git, so a tracked folder outside the write paths can become a
+    // nested repository with task-written configuration.
+    'nested .git folder in a tracked folder outside the write paths': { tracked: { 'lib/index.js': 'x\n' },
+      files: { 'lib/.git/config': '[core]\n\tfsmonitor = planted\n' }, status: 'failed' },
+    'Git pointer file in a new folder outside the write paths': { files: { 'docs/.git': 'gitdir: /nonexistent\n' }, status: 'failed' },
+    // Git warns that it could not open the folder and still exits 0.
+    'unreadable folder outside the write paths': { files: { 'docs/x/payload': 'hidden' }, special: 'unreadable', status: 'failed',
+      posixOnly: true },
+    'named pipe outside the write paths': { special: 'fifo', status: 'failed', posixOnly: true },
+    '.git folder inside the write paths': { files: { 'reports/vendor/.git/config': '[core]\n' }, status: 'completed' },
+    '.git folder in a folder the starting rules ignore': { tracked: { '.gitignore': 'node_modules/\n' },
+      files: { 'node_modules/pkg/.git/HEAD': 'ref: refs/heads/main\n', 'node_modules/pkg/index.js': '' }, status: 'completed' },
+  };
+  for (const [name, { tracked, files, special, status, posixOnly }] of Object.entries(cases)) {
+    const skip = posixOnly && process.platform === 'win32' ? 'POSIX file modes and named pipes'
+      : special === 'unreadable' && asRoot ? 'root can read every folder' : false;
+    await t.test(name, { skip }, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      if (tracked) await commitFixtureFiles(fixture.workspace, tracked);
+      let locked = '';
+      try {
+        const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+          providerExecutor: async ({ workspace }) => {
+            for (const [path, content] of Object.entries(files ?? {})) {
+              await mkdir(resolve(workspace, path, '..'), { recursive: true });
+              await writeFile(resolve(workspace, path), content);
+            }
+            if (special === 'unreadable') {
+              locked = resolve(workspace, 'docs', 'x');
+              await chmod(locked, 0o000);
+            }
+            if (special === 'fifo') {
+              await mkdir(resolve(workspace, 'docs'), { recursive: true });
+              assert.equal(spawnSync('mkfifo', [resolve(workspace, 'docs', 'pipe')], { windowsHide: true }).status, 0);
+            }
+            return fixture.providerResult;
+          } });
+        assert.equal(receipt.status, status, receipt.commandResults.at(-1)?.stderr);
+        if (status === 'failed') {
+          assert.match(receipt.commandResults.at(-1)?.stderr || '', /outside the signed task authority|Write-scope check failed/);
+        }
+      } finally {
+        if (locked) await chmod(locked, 0o755);
       }
     });
   }
