@@ -553,8 +553,8 @@ const RELAY_GIT_ISOLATION_MESSAGES: Record<RelayGitIsolationReason, string> = {
 export class RelayGitIsolationError extends Error {
   readonly code = RELAY_GIT_ISOLATION_FAILED;
 
-  constructor(readonly reason: RelayGitIsolationReason) {
-    super(`${RELAY_GIT_ISOLATION_FAILED}: ${RELAY_GIT_ISOLATION_MESSAGES[reason]}`);
+  constructor(readonly reason: RelayGitIsolationReason, detail?: string) {
+    super(`${RELAY_GIT_ISOLATION_FAILED}: ${RELAY_GIT_ISOLATION_MESSAGES[reason]}${detail ? ` ${detail}` : ''}`);
     this.name = 'RelayGitIsolationError';
   }
 }
@@ -634,6 +634,8 @@ interface PinnedRepository {
    * SHA-256 of the checked-out bytes (or null when not a regular file), checked before each diff.
    */
   startingAttributes?: Map<string, { id: string; sha256: string | null }>;
+  /** The submodule folders of the starting commit and a digest of what each held right after the checkout. */
+  gitlinks?: Map<string, string>;
 }
 
 async function readOptionalFile(path: string): Promise<Buffer | null> {
@@ -662,9 +664,9 @@ async function pinRepository(worktree: string, isolation: RelayGitIsolation): Pr
 }
 
 // Entries that ordinary Git use writes to the shared repository configuration while a task runs
-// (`git push -u`, `git checkout -b x origin/x`, `git remote add`, Git LFS). Relay Git never fetches
-// or pushes, so none of them starts a program in its calls.
-const IGNORED_CONFIGURATION = /^(branch|remote)\.|^lfs\..*\.access$/;
+// (`git push -u`, `git checkout -b x origin/x`, `git remote add`, Git LFS, `git submodule init`).
+// Relay Git never fetches, pushes or updates submodules, so none of them starts a program in its calls.
+const IGNORED_CONFIGURATION = /^(branch|remote)\.|^lfs\..*\.access$|^submodule\..+\.(url|active)$/;
 
 /** The entries of a Git configuration file that relay Git could act on, or null if Git cannot parse it. */
 async function relevantConfiguration(bytes: Buffer, isolation: RelayGitIsolation): Promise<string | null> {
@@ -714,8 +716,9 @@ async function assertRepositoryPinned(pinned: PinnedRepository): Promise<void> {
 // pointer and pinned files before and after each call, never looks inside submodule folders, and
 // turns off external diff and text-conversion drivers.
 async function relayGit(repository: string, argv: string[], isolation: RelayGitIsolation,
-  options: { requireCompleteOutput?: boolean; pinned?: PinnedRepository; operator?: boolean; input?: string } = {}) {
-  const { pinned, requireCompleteOutput, operator, input } = options;
+  options: { requireCompleteOutput?: boolean; pinned?: PinnedRepository; operator?: boolean; input?: string;
+    maximumOutputBytes?: number } = {}) {
+  const { pinned, requireCompleteOutput, operator, input, maximumOutputBytes } = options;
   let globalOptions: string[] = [];
   if (pinned) {
     await assertRepositoryPinned(pinned);
@@ -743,6 +746,7 @@ async function relayGit(repository: string, argv: string[], isolation: RelayGitI
       : relayGitEnvironment(process.env, process.platform, isolation),
     ...(requireCompleteOutput ? { requireCompleteOutput } : {}),
     ...(input === undefined ? {} : { input }),
+    ...(maximumOutputBytes === undefined ? {} : { maximumOutputBytes }),
   });
   if (pinned) await assertRepositoryPinned(pinned);
   return result;
@@ -824,16 +828,56 @@ async function assertAttributesUnchanged(pinned: PinnedRepository): Promise<void
   }
 }
 
+// A digest of everything at `path` in the worktree, read with lstat (links are not followed).
+async function worktreeTreeDigest(worktree: string, path: string): Promise<string> {
+  const entries: string[] = [];
+  const visit = async (relativePath: string): Promise<void> => {
+    const file = resolve(worktree, relativePath);
+    const stats = await lstat(file).catch(() => null);
+    if (!stats) entries.push(`missing\0${relativePath}`);
+    else if (stats.isDirectory()) {
+      entries.push(`folder\0${relativePath}`);
+      for (const name of (await readdir(file)).sort()) await visit(`${relativePath}/${name}`);
+    } else if (stats.isFile()) entries.push(`file\0${relativePath}\0${await worktreeFileDigest(worktree, relativePath)}`);
+    else if (stats.isSymbolicLink()) entries.push(`link\0${relativePath}\0${await readlink(file)}`);
+    else entries.push(`other\0${relativePath}`);
+  };
+  await visit(path);
+  return createHash('sha256').update(entries.join('\0')).digest('hex');
+}
+
+const GITLINK_ENTRY = /^160000 commit [0-9a-f]+\t(.+)$/s;
+
+/**
+ * Neither `git diff` nor `git ls-files --others` looks inside a submodule folder, so the relay
+ * records what each submodule folder of the starting commit held right after the checkout
+ * (normally nothing) and the write-scope check compares it.
+ */
+async function pinGitlinks(pinned: PinnedRepository, startingCommit: string): Promise<void> {
+  // The whole tree listing can be larger than the usual output limit.
+  const result = await relayGit(pinned.worktree, ['ls-tree', '-r', '-z', '--full-tree', startingCommit], pinned.isolation,
+    { requireCompleteOutput: true, pinned, maximumOutputBytes: 256 * 1024 * 1024 });
+  if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
+  pinned.gitlinks = new Map();
+  for (const entry of gitPathList(result.stdout)) {
+    const path = GITLINK_ENTRY.exec(entry)?.[1];
+    if (path !== undefined) pinned.gitlinks.set(path, await worktreeTreeDigest(pinned.worktree, path));
+  }
+}
+
 function folderWithinPolicy(folder: string, writePaths: string[]): boolean {
   return folder ? pathWithinPolicy(folder, writePaths)
     : writePaths.some(pattern => normalizePolicyPath(pattern).replace(/\/\*\*$/, '') === '.');
 }
 
+// Tool caches that write a self-ignoring `.gitignore` (`*`) into the folder they create.
+const TOOL_CACHE_FOLDERS = new Set(['.pytest_cache', '.mypy_cache', '.ruff_cache']);
+
 /**
  * The write-scope check lists untracked files with the repository's ignore rules, which the task
  * can change. A `.gitignore` file the task changed or added is accepted only when everything it
- * could hide is inside the write paths, or when its folder is already ignored by rules the task did
- * not write (for example a tool cache such as `.pytest_cache/` that the repository ignores).
+ * could hide is inside the write paths, when its folder is a known tool cache (its rules reach only
+ * that folder), or when its folder is already ignored by rules the task did not write.
  * `ls-files --others` without exclude rules also lists ignored and self-ignoring files, and
  * `check-ignore -v` names the file whose rule decided.
  */
@@ -844,21 +888,25 @@ async function assertIgnoreRulesTrusted(worktree: string, trackedChanges: string
     pinned.isolation, pinned));
   const changed = new Set([...trackedChanges.filter(isIgnoreFile), ...untracked]);
   const folders = [...new Set([...changed].map(path => path.slice(0, -'.gitignore'.length).replace(/\/$/, '')))]
-    .filter(folder => !folderWithinPolicy(folder, writePaths));
+    .filter(folder => !folderWithinPolicy(folder, writePaths) && !TOOL_CACHE_FOLDERS.has(folder.slice(folder.lastIndexOf('/') + 1)));
+  const refuse = (folder: string) =>
+    new RelayGitIsolationError('ignore_rules_changed', `Folder: ${JSON.stringify(folder || '.').slice(0, 200)}.`);
   if (folders.length === 0) return;
-  if (folders.includes('')) throw new RelayGitIsolationError('ignore_rules_changed');
-  // `-z` output needs the paths on standard input.
+  if (folders.includes('')) throw refuse('');
+  // `-z` output needs the paths on standard input. Git still reads each line as a pathspec, so the
+  // `./` prefix keeps a folder name such as `:dist` from being read as pathspec magic for `dist`.
   const result = await relayGit(worktree, ['check-ignore', '-v', '-z', '--stdin'], pinned.isolation,
-    { requireCompleteOutput: true, pinned, input: folders.map(folder => `${folder}\0`).join('') });
+    { requireCompleteOutput: true, pinned, input: folders.map(folder => `./${folder}\0`).join('') });
   if (result.exitCode !== 0 && result.exitCode !== 1) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
   // Each match is four fields: source file, line number, pattern, path.
   const fields = result.stdout.split('\0');
   const ignored = new Set<string>();
   for (let index = 0; index + 3 < fields.length; index += 4) {
     const [source, , pattern, path] = fields.slice(index, index + 4) as [string, string, string, string];
-    if (!pattern.startsWith('!') && !changed.has(source)) ignored.add(path);
+    if (!pattern.startsWith('!') && !changed.has(source)) ignored.add(path.replace(/^\.\//, ''));
   }
-  if (folders.some(folder => !ignored.has(folder))) throw new RelayGitIsolationError('ignore_rules_changed');
+  const unignored = folders.find(folder => !ignored.has(folder));
+  if (unignored !== undefined) throw refuse(unignored);
 }
 
 async function assertTaskWriteScope(worktree: string, startingCommit: string, writePaths: string[],
@@ -872,6 +920,12 @@ async function assertTaskWriteScope(worktree: string, startingCommit: string, wr
   const changedPaths = [...trackedPaths, ...gitPathList(untrackedChanges)];
   if (changedPaths.some(path => !pathWithinPolicy(path, writePaths))) {
     throw new Error(`${actor} changed a path outside the signed task authority.`);
+  }
+  for (const [path, digest] of pinned.gitlinks ?? []) {
+    if (folderWithinPolicy(path, writePaths)) continue;
+    if (await worktreeTreeDigest(worktree, path) !== digest) {
+      throw new Error(`${actor} changed a path outside the signed task authority.`);
+    }
   }
   await assertIgnoreRulesTrusted(worktree, trackedPaths, writePaths, pinned);
 }
@@ -1661,6 +1715,7 @@ export async function executeTask(input: {
       await git(worktree, ['switch', '-c', branch], gitIsolation, { pinned: pinnedRepository });
       const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'], gitIsolation, pinnedRepository)).trim();
       await pinAttributes(pinnedRepository, startingCommit);
+      await pinGitlinks(pinnedRepository, startingCommit);
     const assertArtifactCurrent = () => {
       if (input.signal?.aborted) throw new Error('required_artifact_interrupted');
       if (remainingTaskMs() <= 0) throw new Error('required_artifact_expired');

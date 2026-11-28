@@ -177,23 +177,39 @@ and after each command):
   `submodule.recurse=false` and `diff.ignoreSubmodules=dirty`, so Git never
   starts `git status` inside a submodule folder that the task turned into a
   repository with its own filters. A changed submodule commit is still
-  reported.
+  reported when Git can resolve it.
+- Checks submodule folders in the write-scope check: `git diff` and
+  `git ls-files --others` never look inside a submodule folder, so the relay
+  records what each submodule folder of the starting commit held right after
+  `git worktree add` (normally nothing; files read with `lstat`, links not
+  followed) and fails the task if a submodule folder outside the write paths
+  differs after the provider or a command. A task that has to populate a
+  submodule (`git submodule update --init`) needs that folder in its write
+  paths.
 - Checks, before and after the call, that the `.git` pointer bytes, `commondir`,
   the Git-directory `info/attributes` and `info/exclude` files, and the
   relay-owned empty file and hooks folder are unchanged, and that the
   repository configuration (`config`, `config.worktree`) changed in no entry
-  other than `branch.*`, `remote.*` and `lfs.<url>.access` (what `git push -u`,
-  `git checkout -b`, `git remote add` and Git LFS write; relay Git never fetches
-  or pushes). A change fails the task closed with `RelayGitIsolationError`
+  other than `branch.*`, `remote.*`, `lfs.<url>.access`,
+  `submodule.<name>.url` and `submodule.<name>.active` (what `git push -u`,
+  `git checkout -b`, `git remote add`, Git LFS and `git submodule init` write;
+  relay Git never fetches, pushes or updates submodules). A change fails the
+  task closed with `RelayGitIsolationError`
   (`relay_git_isolation_failed`, reason `pointer_changed` or
   `git_files_changed`).
 - Checks `.gitignore` files in the write-scope check: a `.gitignore` the task
   changed or added (including one that ignores itself) is accepted only when
-  its folder is inside the write paths, or when rules the task did not write
-  already ignore its folder (for example a `.pytest_cache/` that the
-  repository ignores). Otherwise the task fails closed (reason
-  `ignore_rules_changed`). A task therefore cannot change the root `.gitignore`
-  unless it may write every path.
+  its folder is inside the write paths, when its folder is a `.pytest_cache`,
+  `.mypy_cache` or `.ruff_cache` folder (these tools write a self-ignoring
+  `.gitignore` into the cache folder they create, and its rules reach only
+  that folder), or when rules the task did not write already ignore its
+  folder. Folder names reach `git check-ignore` with a `./` prefix, so a name
+  such as `:dist` is not read as pathspec magic. Otherwise the task fails
+  closed (reason `ignore_rules_changed`; the message names the folder). A task
+  therefore cannot change the root `.gitignore` unless it may write every
+  path. Repositories should list the folders that their other tools create in
+  their ignore rules, so that a provider or command that runs those tools
+  does not fail the task.
 
 What this does not cover:
 
@@ -205,6 +221,8 @@ What this does not cover:
   global exclude file do not apply to the relay's checks after the task.
 - The provider process runs as the relay user and is not sandboxed; it can
   change the Git or relay binaries themselves, which these checks do not cover.
+- Files hidden inside a `.pytest_cache`, `.mypy_cache` or `.ruff_cache` folder
+  outside the write paths are accepted.
 
 ### Limits
 

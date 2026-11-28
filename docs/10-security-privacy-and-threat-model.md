@@ -120,10 +120,14 @@ inside submodule folders; uses repository paths pinned before the provider
 ran; turns off external diff and text-conversion drivers; and checks, before
 and after each call, that the `.git` pointer and the Git-directory attributes
 and exclude files are unchanged and that the repository configuration changed
-in no entry other than `branch.*`, `remote.*` and `lfs.<url>.access`. A
-`.gitignore` the task changed or added must sit inside the write paths or in a
-folder that rules the task did not write already ignore. Any other change
-fails the task closed with `relay_git_isolation_failed`.
+in no entry other than `branch.*`, `remote.*`, `lfs.<url>.access`,
+`submodule.<name>.url` and `submodule.<name>.active`. A `.gitignore` the task
+changed or added must sit inside the write paths, in a `.pytest_cache`,
+`.mypy_cache` or `.ruff_cache` folder, or in a folder that rules the task did
+not write already ignore. Any other change fails the task closed with
+`relay_git_isolation_failed`. Because Git never looks inside submodule
+folders, the write-scope check also compares each submodule folder outside the
+write paths with what it held right after the checkout.
 
 **Residuals:**
 
