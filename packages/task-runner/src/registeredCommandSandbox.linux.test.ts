@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { access, chmod, copyFile, cp, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, copyFile, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type AddressInfo } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -177,6 +177,61 @@ if (!expectation) {
     assert.equal(await exists(`/tmp/sandbox-it-${nonce}`), false, 'the sandbox /tmp is not the host /tmp');
     assert.equal(await exists(resolve(fixture.workspace, `sandbox-it-${nonce}`)), false);
     assert.equal(await readFile(resolve(worktree, 'reports', 'inside.txt'), 'utf8'), 'x', 'the worktree write reached the host');
+  });
+
+  // The operator's approved policy and workspace launchers sit next to the repository, outside the
+  // task worktree. The sandbox does not show them, so a command can neither read nor change them.
+  const POLICY_WRITE_SCRIPT = oneLine(`
+    const fs = require('node:fs'), path = require('node:path');
+    const a = JSON.parse(process.argv[1]);
+    const attempt = action => { try { action(); return true; } catch { return false; } };
+    process.stdout.write(JSON.stringify({
+      policy_visible: fs.existsSync(a.policy),
+      launchers_visible: fs.existsSync(a.bin),
+      policy_written: attempt(() => fs.writeFileSync(a.policy, 'rewritten')),
+      policy_appended: attempt(() => fs.appendFileSync(a.policy, 'rewritten')),
+      policy_removed: attempt(() => fs.rmSync(a.policy)),
+      policy_replaced: attempt(() => fs.renameSync(a.policy + '.new', a.policy)),
+      launcher_written: attempt(() => fs.writeFileSync(a.shell, 'rewritten')),
+      launcher_mode_changed: attempt(() => fs.chmodSync(a.shell, 0o777)),
+      windows_launcher_written: attempt(() => fs.writeFileSync(a.windows, 'rewritten')),
+      launcher_added: attempt(() => fs.writeFileSync(path.join(a.bin, 'added'), 'x')),
+      launchers_moved: attempt(() => fs.renameSync(a.bin, a.bin + '-moved')),
+    }));`);
+
+  test('a registered command cannot write the approved policy or the workspace launchers', async (t) => {
+    const sandbox = await probe(t);
+    const fixture = await repository(t);
+    const dharma = resolve(fixture.workspace, '.dharma');
+    const bin = resolve(dharma, 'bin');
+    await mkdir(bin, { recursive: true });
+    const files = {
+      policy: resolve(dharma, 'approved-policy.json'),
+      shell: resolve(bin, 'dharma'),
+      windows: resolve(bin, 'dharma.cmd'),
+    };
+    await writeFile(files.policy, '{"synthetic":"approved policy"}\n', { mode: 0o600 });
+    await writeFile(files.shell, '#!/bin/sh\necho synthetic launcher\n', { mode: 0o700 });
+    await writeFile(files.windows, '@echo synthetic launcher\r\n', { mode: 0o600 });
+    const before = await Promise.all(Object.values(files).map(async path => [await readFile(path), (await stat(path)).mode]));
+    const { task, publicKey } = signedTask(['policy.write']);
+    const policy = policyWith({ 'policy.write': { argv: [process.execPath, '-e', POLICY_WRITE_SCRIPT,
+      JSON.stringify({ ...files, bin })], timeoutSeconds: 30 } });
+    const receipt = await executeTask({ task, policy, workspace: fixture.workspace, relayStateDirectory: fixture.relayStateDirectory,
+      serverPublicKey: publicKey, receiptStore: new FileTaskReceiptStore(resolve(fixture.root, 'receipts')),
+      registeredCommandSandbox: sandbox, providerExecutor: async () => providerResult });
+    const result = receipt.commandResults.find(({ commandId }) => commandId === 'policy.write');
+    assert.ok(result, JSON.stringify(receipt.commandResults.map(({ commandId, stderr }) => ({ commandId, stderr }))));
+    assert.equal(result.exitCode, 0, result.stderr);
+    const attempts = JSON.parse(result.stdout) as Record<string, boolean>;
+    assert.equal(Object.keys(attempts).length, 11);
+    assert.deepEqual(Object.entries(attempts).filter(([, happened]) => happened).map(([name]) => name), []);
+    assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+    assert.deepEqual(await Promise.all(Object.values(files).map(async path => [await readFile(path), (await stat(path)).mode])), before,
+      'the approved policy and the launchers are unchanged on the host');
+    assert.deepEqual((await readdir(bin)).sort(), ['dharma', 'dharma.cmd']);
+    assert.deepEqual((await readdir(dharma)).sort(), ['approved-policy.json', 'bin']);
+    assert.equal(await exists(`${bin}-moved`), false);
   });
 
   test('npm run works inside the sandbox with the relay Node', async (t) => {

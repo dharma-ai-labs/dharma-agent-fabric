@@ -70,7 +70,44 @@ When a task names registered commands, the provider gets no command tools
 (`allowedCommandArgv` is empty). For Claude tasks this means no `Bash(...)`
 tools: the commands run only in the sandboxed acceptance loop after the
 provider stops. Every named command must still resolve in the policy the relay
-loaded before the provider started; the workspace policy file is not read again.
+loaded before the provider started; no command lookup reads the workspace policy
+file again.
+
+### Command policy snapshot
+
+For command lookups, the relay reads `<workspace>/.dharma/approved-policy.json`
+once per task, at admission, before the skill activation lock, `started` and the
+provider. It then calls `snapshotRegisteredCommandPolicy(task, policy)`: a copy
+of the policy entries for the commands the task names in `authority.commands`,
+with the task ID, organization ID and policy revision, frozen at every level. It
+passes the copy to `executeTask({ commandPolicy })`. The runner checks that the
+copy belongs to this task (task ID, organization, revision) and is frozen, or it
+fails before any worktree or process starts. Every command lookup, before and
+after the provider, reads only this copy. A caller that passes no copy gets one
+taken from `policy` before anything runs.
+
+The provider runs unsandboxed as the relay user, so it can rewrite the policy
+file or the workspace launchers (`.dharma/bin/dharma`, `.dharma/bin/dharma.cmd`)
+while it runs. That changes nothing for the task it runs in: its commands come
+from the copy taken at admission. A registered command cannot change them at
+all: the sandbox does not show the workspace, only the task worktree.
+
+What this does not cover: the registered commands in the policy file are local
+operator configuration, not part of the server-signed workspace authorization,
+and nothing pins them. The next task reads the file as it is then. A pin kept on
+this host would not help, because the provider runs as the same user and could
+rewrite the pin as well. Closing this needs the registered commands inside the
+server-signed authorization.
+
+### Other routes to a registered command
+
+- `remediation_smoke` tasks are tasks like any other. They pass the same
+  admission and their commands run in the same sandbox.
+- Skill smoke checks start only from the operator's
+  `dharma skills sync --smoke-command <id>`. No task field names one, the task
+  path installs no skill, and the relay's automatic skill activation passes no
+  smoke command. A smoke check runs in the installed bundle's folder, on the
+  host, outside the sandbox.
 
 ### The sandbox
 
@@ -249,7 +286,15 @@ What this does not cover:
 - No seccomp filter yet. On bubblewrap below 0.8.0, nested user namespaces are
   not blocked.
 - Skill smoke checks (`dharma skills sync --smoke-command`) are an operator
-  command, outside this sandbox.
+  command, outside this sandbox. No task starts one (see "Other routes to a
+  registered command").
+- The registered commands in the approved policy file are not server-signed or
+  pinned; a later task reads the file as it is then (see "Command policy
+  snapshot").
+- After a completed task with a skill bundle, the relay reads the workspace
+  policy file again, after the provider ran, for the content-transmission check
+  before it uploads the task's trajectory. That read decides only whether
+  evidence is uploaded; it never supplies a command or its argv.
 
 ## Receipt-required tasks
 

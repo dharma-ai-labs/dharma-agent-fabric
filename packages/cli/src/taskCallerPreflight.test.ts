@@ -69,7 +69,8 @@ function fixture() {
   };
   const workspace = { workspaceId: task.workspaceId, organizationId: task.organizationId,
     path: resolve('/fixture/task-caller/workspace'), repositoryAgentId: 'agent_fixture' };
-  const policy = { organizationId: task.organizationId, serverAuthorization: { workspaceId: task.workspaceId } };
+  const policy = { organizationId: task.organizationId, revision: '7', serverAuthorization: { workspaceId: task.workspaceId },
+    tasks: { allowedCommands: {} as Record<string, { argv: string[]; timeoutSeconds: number }> } };
   let registered = true;
   let refreshFailure: Error | null = null;
   let activeSkill: { bundleId: string; bundleHash: string } | null = null;
@@ -97,6 +98,8 @@ function fixture() {
     REGISTERED_COMMANDS_REFUSED: taskRunner.REGISTERED_COMMANDS_REFUSED,
     taskNamesRegisteredCommands: taskRunner.taskNamesRegisteredCommands,
     registeredCommandAdmission: taskRunner.registeredCommandAdmission,
+    // The real snapshot of the commands a task may run, taken once at admission.
+    snapshotRegisteredCommandPolicy: Reflect.get(taskRunner, 'snapshotRegisteredCommandPolicy'),
     // The live probe is a port here; task-runner tests cover its real behaviour.
     detectRegisteredCommandSandbox: async (options: { relayStateDirectory: string }) => {
       assert.equal(options.relayStateDirectory, resolve('/fixture/home', 'relay'));
@@ -361,4 +364,90 @@ test('in-memory removal of the device guard is detected by the rejection asserti
   assert.equal(f.calls.filter(call => call === 'execute-task').length, 1,
     'the negative control must reach execution, not fail because a dependency is absent');
   assert.equal(f.intervalIds.size, 0);
+});
+
+function isDeepFrozen(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return true;
+  return Object.isFrozen(value) && Object.values(value).every(isDeepFrozen);
+}
+
+// The commands a task may run are read once, at admission, before locks, `started` and the
+// provider. The runner gets that frozen snapshot. The provider runs unsandboxed and can rewrite
+// the approved policy file; that changes nothing for this task, and the relay does not read the
+// policy again after the runner returns.
+test('the relay reads the command policy once at admission and hands the runner a frozen snapshot', async () => {
+  const f = fixture();
+  (f.task.authority.commands as { commandId: string }[]).push({ commandId: 'npm.test' });
+  (f.task.acceptance.commands as { commandId: string }[]).push({ commandId: 'npm.test' });
+  f.policy.tasks.allowedCommands['npm.test'] = { argv: ['npm', 'test'], timeoutSeconds: 60 };
+  f.policy.tasks.allowedCommands['npm.publish'] = { argv: ['npm', 'publish'], timeoutSeconds: 60 };
+  f.setSandbox(USABLE_SANDBOX);
+  registeredCommandPorts(f);
+  const handed: Array<{ commandPolicy?: { commands: Record<string, { argv: string[] }> }; policy: unknown }> = [];
+  f.dependencies.executeTask = async (input: { commandPolicy?: { commands: Record<string, { argv: string[] }> }; policy: unknown }) => {
+    f.calls.push('execute-task');
+    handed.push(input);
+    // The unsandboxed provider rewrites the approved policy while the task runs.
+    f.policy.tasks.allowedCommands['npm.test'] = { argv: ['sh', '-c', 'rewritten'], timeoutSeconds: 60 };
+    return { status: 'completed', branch: null, commandResults: [],
+      startedAt: '2026-10-21T00:00:00.000Z', completedAt: '2026-10-21T00:00:01.000Z' };
+  };
+  const result = await (await taskCaller(f.dependencies))(f.fabric, 30);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(handed.length, 1);
+  const snapshot = handed[0]!.commandPolicy;
+  assert.ok(snapshot, 'the runner receives the admission snapshot');
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), {
+    taskId: f.task.taskId, organizationId: f.task.organizationId, policyRevision: '7',
+    commands: { 'npm.test': { argv: ['npm', 'test'], timeoutSeconds: 60 } },
+  }, 'only the commands the task names, as approved at admission');
+  assert.ok(isDeepFrozen(snapshot), 'every level of the snapshot is frozen');
+  assert.deepEqual(snapshot.commands['npm.test']!.argv, ['npm', 'test'], 'the rewrite during the task does not reach it');
+  assert.equal(handed[0]!.policy, f.policy, 'the runner checks the same policy read at admission');
+  assert.equal(f.calls.filter(call => call === 'policy-refresh').length, 1, 'the policy is read once');
+  assert.ok(f.calls.indexOf('policy-refresh') < f.calls.indexOf('event:started'));
+  assert.deepEqual(f.calls.slice(f.calls.indexOf('execute-task')),
+    ['execute-task', 'interval-clear:2', 'outcome', 'activation-lock-release', 'interval-clear:1'],
+    'without a skill bundle, nothing reads the policy after the runner returns');
+});
+
+// No alternate route: a skill smoke check runs a registered command on the host, outside the
+// sandbox. Only the operator's `dharma skills sync --smoke-command` starts one. The relay
+// activates skills without a smoke command, and the task path installs no skill.
+test('no task reaches a skill smoke check', async () => {
+  const callers: Array<{ file: string; callee: string; caller: string; call: string }> = [];
+  for (const file of ['index.ts', 'demoPackage.ts']) {
+    const text = await readFile(fileURLToPath(new URL(`../src/${file}`, import.meta.url)), 'utf8');
+    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const visit = (node: ts.Node, enclosing: string) => {
+      const name = ts.isFunctionDeclaration(node) && node.name ? node.name.text : enclosing;
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && ['activatePreparedSkillUpdate', 'installSkillBundle', 'executeOneTask'].includes(node.expression.text)) {
+        callers.push({ file, callee: node.expression.text, caller: name, call: node.getText(source) });
+      }
+      if (ts.isFunctionDeclaration(node) && node.name?.text === 'executeOneTask') {
+        assert.doesNotMatch(node.getText(source), /installSkillBundle|activatePreparedSkillUpdate|smoke/i,
+          'the task path installs no skill and starts no smoke check');
+      }
+      if (ts.isFunctionDeclaration(node) && node.name?.text === 'activatePreparedSkillUpdate') {
+        assert.match(node.getText(source),
+          /const smokeCommandId = typeof flags\.get\('smoke-command'\) === 'string' \? String\(flags\.get\('smoke-command'\)\) : undefined;/,
+          'a smoke command comes only from the --smoke-command flag');
+      }
+      ts.forEachChild(node, child => visit(child, name));
+    };
+    visit(source, '');
+  }
+  const skillCalls = callers.filter(({ callee }) => callee !== 'executeOneTask');
+  assert.deepEqual(skillCalls.map(({ file, callee, caller }) => `${file}:${caller}->${callee}`).sort(), [
+    'demoPackage.ts:installActiveDemoPackage->installSkillBundle',
+    'index.ts:activatePreparedSkillUpdate->installSkillBundle',
+    'index.ts:relayWorkspaceLoop->activatePreparedSkillUpdate',
+    'index.ts:skillSync->activatePreparedSkillUpdate',
+  ].sort());
+  assert.match(skillCalls.find(({ caller }) => caller === 'relayWorkspaceLoop')!.call, /flags: new Map\(\)/,
+    'the relay activates skills with no flags, so with no smoke command');
+  assert.doesNotMatch(skillCalls.find(({ file }) => file === 'demoPackage.ts')!.call, /smoke/i);
+  assert.ok(callers.some(({ callee, caller }) => callee === 'executeOneTask' && caller === 'relayWorkspaceLoop'),
+    'the relay runs tasks through executeOneTask');
 });

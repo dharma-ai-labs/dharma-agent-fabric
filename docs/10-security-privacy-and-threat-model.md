@@ -137,6 +137,20 @@ paths, submodule folders and ignored folders, refusing a `.git` entry other
 than the root pointer, an unreadable folder, or a file that is neither a
 regular file nor a link.
 
+The relay reads the registered commands a task names from
+`<workspace>/.dharma/approved-policy.json` once, at admission, before the
+provider starts, and hands the task runner a copy frozen at every level. Every
+command lookup for that task, before and after the provider, reads only this
+copy; no command lookup reads the policy file again. So the provider, which runs
+unsandboxed, cannot change the commands of the task it runs in by rewriting
+the policy file or the workspace launchers in `.dharma/bin`. A registered
+command cannot reach either: the sandbox does not show the workspace. A
+`remediation_smoke` task passes the same admission and sandbox as any other
+task. Skill smoke checks start only from the operator's
+`dharma skills sync --smoke-command`: no task field names one, the task path
+installs no skill, and the relay's automatic skill activation passes no smoke
+command.
+
 **Residuals:**
 
 - The provider process is a trusted component, not a sandboxed one. The Codex
@@ -150,6 +164,19 @@ regular file nor a link.
   attributes assign to them. That configuration is read before the task.
 - The provider process can still change the Git or relay binaries themselves.
 - Skill smoke checks are operator commands and are outside this boundary.
+  They run on the host in the installed bundle's folder, and no task starts
+  one.
+- The registered commands in the approved policy file are local operator
+  configuration: they are not in the server-signed workspace authorization
+  and nothing pins them. A provider that rewrites the file cannot change the
+  task it runs in, but the next task reads the file as it is then. A pin
+  kept on the same host would not help, because the provider runs as the
+  same user. Closing this needs the registered commands inside the
+  server-signed authorization.
+- After a completed task with a skill bundle, the relay reads the workspace
+  policy file again, after the provider ran, for the content-transmission
+  check before it uploads the task's trajectory. That read decides only
+  whether evidence is uploaded; it never supplies a command or its argv.
 - Behaviour on real WSL2 hosts, including the Windows interop cut, is checked
   by the probe on each host but not yet by a recorded qualification.
 - Tasks with registered commands and a network grant are refused; there is no
