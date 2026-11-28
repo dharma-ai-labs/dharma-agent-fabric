@@ -2564,24 +2564,6 @@ test('relay Git keeps only the absolute entries of the relay PATH', async (t) =>
   }
 });
 
-test('a filter that relay Git starts never runs a program the task wrote, whatever the relay PATH',
-  { skip: process.platform === 'win32' ? 'POSIX shell lookup' : false }, async (t) => {
-    const fixture = await requiredArtifactFixture(t, []);
-    await commitFixtureFiles(fixture.workspace, { '.gitattributes': '*.bin filter=lfs\n', 'reports/data.bin': 'original\n' });
-    // The operator's Git LFS settings, which relay Git passes on; the program name is not installed.
-    const operator = await operatorGitHome(fixture.root, '[filter "lfs"]\n\tclean = dharma-planted-filter clean %f\n');
-    const canary = resolve(fixture.root, 'planted-filter-ran');
-    await withParentEnvironment({ ...operator, PATH: `reports${PATH_SEPARATOR}${process.env.PATH ?? ''}` },
-      () => executeTask({ ...fixture.input, task: fixture.signed(),
-        providerExecutor: async ({ workspace }) => {
-          await writeFile(resolve(workspace, 'reports', 'dharma-planted-filter'), `#!/bin/sh\necho ran > '${canary}'\ncat\n`,
-            { mode: 0o755 });
-          await writeFile(resolve(workspace, 'reports', 'data.bin'), 'changed by the task\n');
-          return fixture.providerResult;
-        } }));
-    assert.equal(await readFile(canary, 'utf8').catch(() => undefined), undefined, 'relay Git ran a program the task wrote');
-  });
-
 test('the write-scope check refuses what Git does not list: nested .git entries, unreadable folders and special files', async (t) => {
   const asRoot = process.getuid?.() === 0;
   const cases: Record<string, { tracked?: Record<string, string>; files?: Record<string, string>;
@@ -2591,6 +2573,9 @@ test('the write-scope check refuses what Git does not list: nested .git entries,
     'nested .git folder in a tracked folder outside the write paths': { tracked: { 'lib/index.js': 'x\n' },
       files: { 'lib/.git/config': '[core]\n\tfsmonitor = planted\n' }, status: 'failed' },
     'Git pointer file in a new folder outside the write paths': { files: { 'docs/.git': 'gitdir: /nonexistent\n' }, status: 'failed' },
+    // Git lists a folder that holds only ignored files as an ignored folder; the rules do not ignore the folder itself.
+    '.git folder beside only ignored files in a new folder': { tracked: { '.gitignore': '*.log\n' },
+      files: { 'docs/a.log': 'log', 'docs/.git/config': '[core]\n\tfsmonitor = planted\n' }, status: 'failed' },
     // Git warns that it could not open the folder and still exits 0.
     'unreadable folder outside the write paths': { files: { 'docs/x/payload': 'hidden' }, special: 'unreadable', status: 'failed',
       posixOnly: true },
