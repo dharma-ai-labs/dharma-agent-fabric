@@ -102,9 +102,19 @@ bubblewrap or user namespaces) or when the task's network authority is not
 `deny`. There is no opt-out. A sandbox that fails to start fails the task; the
 command is never re-run on the host. The provider gets no command tools for
 these tasks, so the same commands cannot run unsandboxed during the provider's
-turn. The relay's own Git checks after a command use repository paths pinned
-before the provider ran, check the pointer bytes, and turn off external diff
-and text-conversion drivers.
+turn. The relay's own Git calls for a task, including the write-scope checks
+after the provider and after each command, run nothing the task could have
+written: they ignore system and global Git configuration (`GIT_CONFIG_NOSYSTEM`,
+a relay-owned empty `GIT_CONFIG_GLOBAL`, and a relay-owned empty `HOME` and
+`XDG_CONFIG_HOME`); use a relay-owned empty hooks folder and turn off the
+file-system monitor, the untracked cache and the global attributes and exclude
+files; read attributes from the starting commit (`--attr-source`, Git 2.40 or
+later; an older Git fails the task closed when a `.gitattributes` file changed
+or appeared); use repository paths pinned before the provider ran; turn off
+external diff and text-conversion drivers; and check, before and after each
+call, that the `.git` pointer, the repository configuration and the
+Git-directory attributes and exclude files are unchanged. Any change fails the
+task closed with `relay_git_isolation_failed`.
 
 **Residuals:**
 
@@ -114,8 +124,14 @@ and text-conversion drivers.
 - Kernel flaws in namespaces or bubblewrap are out of scope.
 - No seccomp filter yet. On bubblewrap below 0.8.0 (for example Ubuntu 22.04),
   nested user namespaces are not blocked.
-- Git filters an operator configured outside the repository (for example large
-  file storage) still run during the relay's own Git checks.
+- Filter and diff drivers that the operator's repository configuration defines
+  (for example large file storage installed for the repository) still run for
+  paths that the starting commit's attributes assign to them. Drivers from
+  global or system configuration no longer run, so files stored with large
+  file storage appear as pointer files in task worktrees.
+- A `.gitignore` file the task writes can still hide new untracked files from
+  the write-scope check; it cannot make relay Git start a program.
+- The provider process can still change the Git or relay binaries themselves.
 - Skill smoke checks are operator commands and are outside this boundary.
 - Behaviour on real WSL2 hosts, including the Windows interop cut, is checked
   by the probe on each host but not yet by a recorded qualification.

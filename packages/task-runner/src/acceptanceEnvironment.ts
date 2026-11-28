@@ -71,11 +71,23 @@ function operatingSystemEssentials(source: NodeJS.ProcessEnv, platform: NodeJS.P
 }
 
 /**
- * Builds the environment for the relay's own Git calls: operating-system essentials only.
- * Git can start helper programs named in repository configuration, which a command may change.
+ * Builds the environment for the relay's own Git calls: operating-system essentials, with the home
+ * and configuration folders replaced by a relay-owned empty folder, the system configuration turned
+ * off and the global configuration replaced by a relay-owned empty file. Git can start helper
+ * programs named in configuration, which a provider or command may change.
  */
-export function relayGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.Platform): Record<string, string> {
-  return operatingSystemEssentials(source, platform);
+export function relayGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.Platform,
+  isolation: { home: string; emptyFile: string }): Record<string, string> {
+  const environment = operatingSystemEssentials(source, platform);
+  const replaced = new Set(['HOME', 'XDG_CONFIG_HOME']);
+  for (const name of Object.keys(environment)) {
+    if (replaced.has(platform === 'win32' ? name.toUpperCase() : name)) delete environment[name];
+  }
+  environment.HOME = isolation.home;
+  environment.XDG_CONFIG_HOME = isolation.home;
+  environment.GIT_CONFIG_NOSYSTEM = '1';
+  environment.GIT_CONFIG_GLOBAL = isolation.emptyFile;
+  return environment;
 }
 
 export interface RegisteredCommandEnvironmentInput {

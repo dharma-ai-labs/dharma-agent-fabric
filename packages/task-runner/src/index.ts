@@ -525,56 +525,204 @@ async function runProcess(command: string, argv: string[], options: {
   });
 }
 
-/**
- * Repository paths read right after `git worktree add`, before the provider or any command ran.
- * Relay Git after a sandboxed command uses these instead of the worktree's `.git` pointer file.
- */
-interface PinnedRepository { worktree: string; gitDir: string; pointer: Buffer }
+/** Refusal code for relay Git that found a task-influenced repository file. */
+export const RELAY_GIT_ISOLATION_FAILED = 'relay_git_isolation_failed';
 
-async function pinRepository(worktree: string): Promise<PinnedRepository> {
+export type RelayGitIsolationReason = 'pointer_changed' | 'git_files_changed' | 'attributes_changed';
+
+const RELAY_GIT_ISOLATION_MESSAGES: Record<RelayGitIsolationReason, string> = {
+  pointer_changed: 'Task worktree Git pointer changed during the task.',
+  git_files_changed: 'The repository configuration, the Git-directory attributes or exclude file, or a relay Git file changed during the task.',
+  attributes_changed: 'The task changed a .gitattributes file, and this Git cannot read attributes from the starting commit (Git 2.40 or later can).',
+};
+
+/**
+ * Relay Git after the provider or a registered command found a repository file that the task
+ * could have changed and that would make Git run a program or read task-written settings.
+ * The task fails closed; `reason` says which check failed.
+ */
+export class RelayGitIsolationError extends Error {
+  readonly code = RELAY_GIT_ISOLATION_FAILED;
+
+  constructor(readonly reason: RelayGitIsolationReason) {
+    super(`${RELAY_GIT_ISOLATION_FAILED}: ${RELAY_GIT_ISOLATION_MESSAGES[reason]}`);
+    this.name = 'RelayGitIsolationError';
+  }
+}
+
+/**
+ * Relay-owned paths under the relay state folder that replace the user's Git locations: an empty
+ * home and configuration folder, an empty hooks folder and an empty file that stands for the
+ * global configuration, the global attributes file and the global exclude file.
+ */
+interface RelayGitIsolation { home: string; hooks: string; emptyFile: string }
+
+async function prepareRelayGitIsolation(relayStateDirectory: string): Promise<RelayGitIsolation> {
+  const root = resolve(relayStateDirectory, 'relay-git');
+  const isolation = { home: resolve(root, 'home'), hooks: resolve(root, 'hooks'), emptyFile: resolve(root, 'empty') };
+  await mkdir(isolation.home, { recursive: true, mode: 0o700 });
+  await mkdir(isolation.hooks, { recursive: true, mode: 0o700 });
+  await writeFile(isolation.emptyFile, '', { mode: 0o600 });
+  return isolation;
+}
+
+/**
+ * Repository state read right after `git worktree add`, before the provider or any command ran.
+ * Relay Git uses the pinned paths instead of the worktree's `.git` pointer file, and checks the
+ * pointer and the pinned files before and after each call.
+ */
+interface PinnedRepository {
+  worktree: string;
+  gitDir: string;
+  pointer: Buffer;
+  isolation: RelayGitIsolation;
+  /** Files whose bytes must not change: repository configuration, Git-directory attributes and excludes. */
+  files: Array<{ path: string; bytes: Buffer | null }>;
+  /** The starting commit, when this Git reads attributes from it with `--attr-source` (Git 2.40 or later). */
+  attributeSource?: string;
+  /** Otherwise, the `.gitattributes` files of the starting commit and their blob ids, checked before each diff. */
+  startingAttributes?: Map<string, string>;
+}
+
+async function readOptionalFile(path: string): Promise<Buffer | null> {
+  try {
+    return await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ENOTDIR') return null;
+    throw error;
+  }
+}
+
+async function pinRepository(worktree: string, isolation: RelayGitIsolation): Promise<PinnedRepository> {
   const pointer = await readFile(resolve(worktree, '.git'));
   const match = /^gitdir: (.+?)\r?\n?$/.exec(pointer.toString('utf8'));
   if (!match) throw new Error('Task worktree Git pointer is not a gitdir file.');
-  return { worktree, gitDir: resolve(worktree, match[1]!), pointer };
+  const gitDir = resolve(worktree, match[1]!);
+  const commonDirPointer = await readOptionalFile(resolve(gitDir, 'commondir'));
+  const commonDir = commonDirPointer ? resolve(gitDir, commonDirPointer.toString('utf8').trim()) : gitDir;
+  const paths = [...new Set([
+    resolve(gitDir, 'commondir'), resolve(gitDir, 'config.worktree'), resolve(commonDir, 'config'),
+    resolve(commonDir, 'config.worktree'), resolve(commonDir, 'info', 'attributes'), resolve(commonDir, 'info', 'exclude'),
+    isolation.emptyFile,
+  ])];
+  const files = await Promise.all(paths.map(async path => ({ path, bytes: await readOptionalFile(path) })));
+  return { worktree, gitDir, pointer, isolation, files };
 }
 
-// Relay-internal Git runs with operating-system essentials only and with the file-system monitor
-// hook disabled, because a provider or acceptance command can change the repository configuration.
-// After a sandboxed command it also uses the pinned repository paths, checks that the pointer file
-// is unchanged, and turns off external diff and text-conversion drivers.
-async function relayGit(repository: string, argv: string[], requireCompleteOutput?: boolean, pinned?: PinnedRepository) {
-  if (pinned) {
-    const current = await readFile(resolve(pinned.worktree, '.git')).catch(() => Buffer.alloc(0));
-    if (!current.equals(pinned.pointer)) throw new Error('Task worktree Git pointer changed during a registered command.');
-    const [subcommand, ...rest] = argv;
-    argv = [`--git-dir=${pinned.gitDir}`, `--work-tree=${pinned.worktree}`, subcommand!,
-      ...(subcommand === 'diff' ? ['--no-ext-diff', '--no-textconv'] : []), ...rest];
+async function assertRepositoryPinned(pinned: PinnedRepository): Promise<void> {
+  const current = await readFile(resolve(pinned.worktree, '.git')).catch(() => Buffer.alloc(0));
+  if (!current.equals(pinned.pointer)) throw new RelayGitIsolationError('pointer_changed');
+  for (const { path, bytes } of pinned.files) {
+    const now = await readOptionalFile(path);
+    if (now === null ? bytes !== null : bytes === null || !now.equals(bytes)) throw new RelayGitIsolationError('git_files_changed');
   }
-  return runProcess('git', ['-c', 'core.fsmonitor=false', ...argv], {
+  if ((await readdir(pinned.isolation.hooks)).length > 0) throw new RelayGitIsolationError('git_files_changed');
+}
+
+// Relay Git never reads the system or global configuration, uses a relay-owned empty hooks folder,
+// and turns off the file-system monitor, the untracked cache and the global attributes and exclude
+// files, because a provider or registered command can change any of them. After `git worktree add`
+// it also uses the pinned repository paths, reads attributes from the starting commit, checks the
+// pointer and pinned files before and after each call, and turns off external diff and
+// text-conversion drivers.
+async function relayGit(repository: string, argv: string[], isolation: RelayGitIsolation,
+  options: { requireCompleteOutput?: boolean; pinned?: PinnedRepository } = {}) {
+  const { pinned, requireCompleteOutput } = options;
+  let globalOptions: string[] = [];
+  if (pinned) {
+    await assertRepositoryPinned(pinned);
+    const [subcommand, ...rest] = argv;
+    if (subcommand === 'diff' && pinned.startingAttributes) await assertAttributesUnchanged(pinned);
+    globalOptions = [...(pinned.attributeSource ? [`--attr-source=${pinned.attributeSource}`] : []),
+      `--git-dir=${pinned.gitDir}`, `--work-tree=${pinned.worktree}`];
+    argv = [subcommand!, ...(subcommand === 'diff' ? ['--no-ext-diff', '--no-textconv'] : []), ...rest];
+  }
+  const result = await runProcess('git', [
+    '-c', `core.hooksPath=${isolation.hooks}`, '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
+    '-c', `core.attributesFile=${isolation.emptyFile}`, '-c', `core.excludesFile=${isolation.emptyFile}`,
+    ...globalOptions, ...argv,
+  ], {
     cwd: repository,
     timeoutMs: 30_000,
-    childEnvironment: relayGitEnvironment(process.env, process.platform),
+    childEnvironment: relayGitEnvironment(process.env, process.platform, isolation),
     ...(requireCompleteOutput ? { requireCompleteOutput } : {}),
   });
+  if (pinned) await assertRepositoryPinned(pinned);
+  return result;
 }
 
-async function git(repository: string, argv: string[]): Promise<void> {
-  const result = await relayGit(repository, argv);
+async function git(repository: string, argv: string[], isolation: RelayGitIsolation, pinned?: PinnedRepository): Promise<void> {
+  const result = await relayGit(repository, argv, isolation, pinned ? { pinned } : {});
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
 }
 
-async function gitOutput(repository: string, argv: string[], pinned?: PinnedRepository) {
-  const result = await relayGit(repository, argv, true, pinned);
+async function gitOutput(repository: string, argv: string[], isolation: RelayGitIsolation, pinned?: PinnedRepository) {
+  const result = await relayGit(repository, argv, isolation, { requireCompleteOutput: true, ...(pinned ? { pinned } : {}) });
   if (result.exitCode !== 0) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
   return result.stdout;
 }
 
+const ATTRIBUTES_PATHSPEC = ':(glob)**/.gitattributes';
+
+function stagedAttributes(output: string): Map<string, string> {
+  if (output && !output.endsWith('\0')) throw new Error('Git path output was incomplete.');
+  const entries = new Map<string, string>();
+  for (const line of output.split('\0').filter(Boolean)) {
+    const match = /^\d+ ([0-9a-f]+) \d+\t(.+)$/s.exec(line);
+    if (!match) throw new Error('Git path output was incomplete.');
+    entries.set(match[2]!, match[1]!);
+  }
+  return entries;
+}
+
+/**
+ * Pins how relay Git reads attributes after the task. Git 2.40 or later reads them from the
+ * starting commit (`--attr-source`), so task-written `.gitattributes` files are never consulted.
+ * An older Git cannot, so the relay records the starting `.gitattributes` files and refuses the
+ * task if any of them changed or a new one appeared.
+ */
+async function pinAttributes(pinned: PinnedRepository, startingCommit: string): Promise<void> {
+  const version = /^git version (\d+)\.(\d+)/.exec(await gitOutput(pinned.worktree, ['version'], pinned.isolation));
+  const major = Number(version?.[1] ?? 0);
+  const minor = Number(version?.[2] ?? 0);
+  if (major > 2 || (major === 2 && minor >= 40)) {
+    pinned.attributeSource = startingCommit;
+    return;
+  }
+  // Right after the worktree is created, its index is the starting commit.
+  pinned.startingAttributes = stagedAttributes(await gitOutput(pinned.worktree,
+    ['ls-files', '-z', '-s', '--', ATTRIBUTES_PATHSPEC], pinned.isolation, pinned));
+}
+
+// Neither `ls-files` call reads attributes or file content, so neither can start a filter.
+// `--others` without exclude rules also lists ignored files.
+async function assertAttributesUnchanged(pinned: PinnedRepository): Promise<void> {
+  const expected = pinned.startingAttributes!;
+  const untracked = await gitOutput(pinned.worktree, ['ls-files', '-z', '--others', '--', ATTRIBUTES_PATHSPEC],
+    pinned.isolation, pinned);
+  const staged = stagedAttributes(await gitOutput(pinned.worktree, ['ls-files', '-z', '-s', '--', ATTRIBUTES_PATHSPEC],
+    pinned.isolation, pinned));
+  if (untracked || staged.size !== expected.size || [...staged].some(([path, id]) => expected.get(path) !== id)) {
+    throw new RelayGitIsolationError('attributes_changed');
+  }
+  for (const [path, id] of expected) {
+    const file = resolve(pinned.worktree, path);
+    const stats = await lstat(file).catch(() => null);
+    if (!stats?.isFile()) throw new RelayGitIsolationError('attributes_changed');
+    const bytes = await readFile(file);
+    const blobId = createHash(id.length === 64 ? 'sha256' : 'sha1')
+      .update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+    if (blobId !== id) throw new RelayGitIsolationError('attributes_changed');
+  }
+}
+
 async function assertTaskWriteScope(worktree: string, startingCommit: string, writePaths: string[],
-  actor: 'Provider' | 'Acceptance command', pinned?: PinnedRepository): Promise<void> {
+  actor: 'Provider' | 'Acceptance command', pinned: PinnedRepository): Promise<void> {
   const trackedChanges = await gitOutput(worktree, [
     'diff', '--name-only', '-z', '--diff-filter=ACDMRTUXB', startingCommit, '--',
-  ], pinned);
-  const untrackedChanges = await gitOutput(worktree, ['ls-files', '-z', '--others', '--exclude-standard'], pinned);
+  ], pinned.isolation, pinned);
+  const untrackedChanges = await gitOutput(worktree, ['ls-files', '-z', '--others', '--exclude-standard'],
+    pinned.isolation, pinned);
   if ((trackedChanges && !trackedChanges.endsWith('\0')) || (untrackedChanges && !untrackedChanges.endsWith('\0'))) {
     throw new Error('Git path output was incomplete.');
   }
@@ -1363,10 +1511,12 @@ export async function executeTask(input: {
     try {
       await mkdir(worktreeRoot, { recursive: true, mode: 0o700 });
       await rm(worktree, { recursive: true, force: true });
-      await git(input.workspace, ['worktree', 'add', '--detach', worktree, 'HEAD']);
-      const pinnedRepository = commandSandbox ? await pinRepository(worktree) : undefined;
-      await git(worktree, ['switch', '-c', branch]);
-      const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'])).trim();
+      const gitIsolation = await prepareRelayGitIsolation(input.relayStateDirectory);
+      await git(input.workspace, ['worktree', 'add', '--detach', worktree, 'HEAD'], gitIsolation);
+      const pinnedRepository = await pinRepository(worktree, gitIsolation);
+      await git(worktree, ['switch', '-c', branch], gitIsolation, pinnedRepository);
+      const startingCommit = (await gitOutput(worktree, ['rev-parse', 'HEAD'], gitIsolation, pinnedRepository)).trim();
+      await pinAttributes(pinnedRepository, startingCommit);
     const assertArtifactCurrent = () => {
       if (input.signal?.aborted) throw new Error('required_artifact_interrupted');
       if (remainingTaskMs() <= 0) throw new Error('required_artifact_expired');
@@ -1453,7 +1603,7 @@ export async function executeTask(input: {
     commandResults.push(providerCommandResult);
     if (providerResult.exitCode !== 0 || providerResult.timedOut) status = input.signal?.aborted ? 'cancelled' : 'failed';
     await verifyRequiredArtifacts(worktree, readOnlyArtifacts, assertArtifactCurrent, artifactIntegrity);
-    await assertTaskWriteScope(worktree, startingCommit, input.task.authority.writePaths, 'Provider');
+    await assertTaskWriteScope(worktree, startingCommit, input.task.authority.writePaths, 'Provider', pinnedRepository);
     for (const { commandId } of input.task.acceptance.commands) {
       if (status !== 'completed') break;
       if (input.signal?.aborted) { status = 'cancelled'; break; }

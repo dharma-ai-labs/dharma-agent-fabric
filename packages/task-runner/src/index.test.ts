@@ -1722,7 +1722,10 @@ test('relay Git checks after an acceptance command do not run a Git monitor hook
   assert.equal(receipt.commandResults[1]?.exitCode, 0, receipt.commandResults[1]?.stderr);
   const hookOutput = await readFile(marker, 'utf8').catch(() => undefined);
   assert.equal(hookOutput, undefined, 'relay Git ran the monitor hook');
-  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  // The stand-in runs the command on the host, so it can change the repository configuration;
+  // relay Git then fails the task closed instead of reading it.
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /relay_git_isolation_failed/);
 });
 
 test('acceptance command policy cannot inherit runner-owned environment names', async (t) => {

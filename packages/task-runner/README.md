@@ -132,13 +132,53 @@ capabilities remain; no agent sockets are visible; nested user namespaces fail
 cut. A failed check refuses with `sandbox_probe_failed` and names only the
 check, never values.
 
-### Relay Git after a command
+### Relay Git after the provider and after a command
 
-The relay's own Git checks after each sandboxed command use the repository
-paths read from the worktree's `.git` pointer when the worktree was created,
-before the provider ran (`--git-dir` and `--work-tree`). They check that the
-pointer bytes are unchanged (a change fails the task) and run `diff` with
-`--no-ext-diff --no-textconv`. Other relay Git calls are unchanged.
+Every Git call the relay itself makes for a task (creating the worktree and
+the task branch, and the write-scope checks after the provider and after each
+command) runs nothing that the provider or a command could have written:
+
+- System and global configuration are ignored: `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL` names a relay-owned empty file, and `HOME` and
+  `XDG_CONFIG_HOME` name a relay-owned empty folder under the relay state
+  folder (`relay-git/`). `PATH` and the other operating-system essentials are
+  unchanged.
+- Hooks are off: `core.hooksPath` names a relay-owned empty folder, never a
+  path inside the worktree. `core.fsmonitor` and `core.untrackedCache` are off,
+  and `core.attributesFile` and `core.excludesFile` name the empty file.
+- Attributes come from the starting commit: with Git 2.40 or later the relay
+  passes `--attr-source=<starting commit>`, so a `.gitattributes` file the task
+  wrote or changed cannot assign a filter, diff or merge driver. With an older
+  Git, the relay records the starting `.gitattributes` files and fails the task
+  closed (`relay_git_isolation_failed`, reason `attributes_changed`) before the
+  next `diff` if any of them changed or a new one appeared.
+- After `git worktree add`, every call uses the repository paths read from the
+  worktree's `.git` pointer at that moment (`--git-dir` and `--work-tree`),
+  and `diff` runs with `--no-ext-diff --no-textconv`.
+- Before and after each of those calls the relay checks that the `.git`
+  pointer bytes, the repository configuration (`config`, `config.worktree`,
+  `commondir`), the Git-directory `info/attributes` and `info/exclude` files,
+  and the relay-owned empty file and hooks folder are unchanged. A change fails
+  the task closed with `RelayGitIsolationError` (`relay_git_isolation_failed`,
+  reason `pointer_changed` or `git_files_changed`).
+
+What this does not cover:
+
+- Filter and diff drivers that the operator's repository configuration defines
+  (for example Git LFS installed for the repository) still run for paths that
+  the starting commit's attributes assign to them. That is operator content,
+  not task content.
+- Because global and system configuration are ignored, task worktrees no
+  longer get settings from them: a globally installed Git LFS filter,
+  `core.autocrlf` and `core.longpaths` from Git for Windows' system
+  configuration, and `safe.directory`. Large files tracked with LFS appear as
+  pointer files in the task worktree.
+- A `.gitignore` file the task writes can still hide new untracked files from
+  the write-scope check. It cannot make relay Git start a program.
+- A change to the enrolled repository's configuration while a task runs (for
+  example `git push -u` in the main checkout) fails that task closed.
+- The provider process runs as the relay user and is not sandboxed; it can
+  change the Git or relay binaries themselves, which these checks do not cover.
 
 ### Limits
 
@@ -297,11 +337,12 @@ not the isolation boundary; the operating-system sandbox above is. Inside it,
 `HOME`, `TMPDIR`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` point at the sandbox's
 own empty folders, and the relay user's files and processes are not visible.
 
-Relay-internal Git calls, including the write-scope checks after each command,
-run with the same operating-system essentials and with `core.fsmonitor`
-disabled. A Git configuration change made by the provider or a command
-therefore does not start a monitor hook, and helper programs that Git starts do
-not receive other relay variables.
+Relay-internal Git calls, including the write-scope checks after the provider
+and after each command, run with the same operating-system essentials, except
+that `HOME` and `XDG_CONFIG_HOME` name a relay-owned empty folder and system and
+global Git configuration are turned off (see "Relay Git after the provider and
+after a command"). Helper programs that Git starts do not receive other relay
+variables.
 
 The provider launch environment is unchanged. Skill smoke checks run only from
 `dharma skills sync --smoke-command`, never from the relay itself. They use the
