@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mock, test, type TestContext } from 'node:test';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
 import { chmod, link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -2152,7 +2152,8 @@ test('relay Git checks the worktree Git pointer again after each call', async (t
     // Stands in for a race: the pointer changes while a relay Git call runs.
     if (command === 'git' && gitSubcommand(argv) === 'diff' && worktree && !swapped) {
       swapped = true;
-      writeFileSync(resolve(worktree, '.git'), 'gitdir: ../elsewhere\n');
+      // Git marks the pointer hidden on Windows, where only an append can open it for writing.
+      appendFileSync(resolve(worktree, '.git'), '\n');
     }
     return undefined;
   });
