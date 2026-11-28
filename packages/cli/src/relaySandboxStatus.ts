@@ -1,6 +1,6 @@
 import { lstat, rmdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import type { RegisteredCommandSandbox, SandboxRefusalReason } from '@dharma-ai-labs/agent-fabric-task-runner';
+import { SANDBOX_FIX, type RegisteredCommandSandbox, type SandboxRefusalReason } from '@dharma-ai-labs/agent-fabric-task-runner';
 
 // `dharma relay sandbox status [--json]`: the operator's read-only view of the relay's command
 // sandbox. It runs the same live probe the relay runs before every task that names registered
@@ -15,6 +15,11 @@ const USABLE_HEADLINE = 'Command sandbox: usable';
 /** The refusal reasons a host probe gives. `network_not_denied` belongs to one task, not to the host. */
 export const HOST_SANDBOX_REFUSAL_REASONS = Object.freeze(['platform_unsupported', 'bubblewrap_missing', 'bubblewrap_too_old',
   'bubblewrap_untrusted', 'user_namespaces_unavailable', 'sandbox_probe_failed'] as const satisfies readonly SandboxRefusalReason[]);
+export type HostSandboxRefusalReason = (typeof HOST_SANDBOX_REFUSAL_REASONS)[number];
+
+function isHostSandboxRefusalReason(reason: SandboxRefusalReason): reason is HostSandboxRefusalReason {
+  return (HOST_SANDBOX_REFUSAL_REASONS as readonly SandboxRefusalReason[]).includes(reason);
+}
 
 export type RelaySandboxStatus =
   | {
@@ -27,7 +32,7 @@ export type RelaySandboxStatus =
     policy: string;
     probe: { result: 'passed'; checks: string[]; probedAt: string };
   }
-  | { schema: typeof RELAY_SANDBOX_STATUS_SCHEMA; usable: false; reason: SandboxRefusalReason; detail: string; fix: string };
+  | { schema: typeof RELAY_SANDBOX_STATUS_SCHEMA; usable: false; reason: HostSandboxRefusalReason; detail: string; fix: string };
 
 /** Refuses every option but a bare --json, and any argument after `status`, before the probe runs. */
 export function assertRelaySandboxStatusOptions(positional: string[], flags: Map<string, string | boolean>,
@@ -41,11 +46,16 @@ export function assertRelaySandboxStatusOptions(positional: string[], flags: Map
 /**
  * The printed status for one probe answer. Pure. The usable form carries the fields a task receipt
  * records for its sandbox; the Node installation paths, which can sit under the user's home, are not
- * printed.
+ * printed. A refusal carries a host reason only: a task-only reason from the probe is printed as
+ * `sandbox_probe_failed`, with that reason in the detail.
  */
 export function relaySandboxStatus(sandbox: RegisteredCommandSandbox): RelaySandboxStatus {
   if (!sandbox.usable) {
-    return { schema: RELAY_SANDBOX_STATUS_SCHEMA, usable: false, reason: sandbox.reason, detail: sandbox.detail, fix: sandbox.fix };
+    if (isHostSandboxRefusalReason(sandbox.reason)) {
+      return { schema: RELAY_SANDBOX_STATUS_SCHEMA, usable: false, reason: sandbox.reason, detail: sandbox.detail, fix: sandbox.fix };
+    }
+    return { schema: RELAY_SANDBOX_STATUS_SCHEMA, usable: false, reason: 'sandbox_probe_failed',
+      detail: `The probe gave the task-only reason ${sandbox.reason}: ${sandbox.detail}`, fix: SANDBOX_FIX.sandbox_probe_failed };
   }
   return { schema: RELAY_SANDBOX_STATUS_SCHEMA, usable: true, host: sandbox.host, bwrapPath: sandbox.bwrapPath,
     bwrapVersion: sandbox.bwrapVersion, bwrapSha256: sandbox.bwrapSha256, policy: sandbox.policy,
