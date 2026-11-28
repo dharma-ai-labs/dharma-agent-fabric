@@ -241,7 +241,7 @@ const HOST_GIT_READS_ATTRIBUTE_SOURCE = (() => {
 })();
 
 // Relay Git subcommands that run after `git worktree add` and use the pinned repository paths.
-const PINNED_SUBCOMMANDS = new Set(['switch', 'rev-parse', 'diff', 'ls-files']);
+const PINNED_SUBCOMMANDS = new Set(['switch', 'rev-parse', 'diff', 'ls-files', 'ls-tree']);
 
 test('required artifact review v10: incomplete Git streams fail closed', async (t) => {
   for (const stream of ['tracked-overflow', 'untracked-overflow', 'unterminated'] as const) {
@@ -254,7 +254,9 @@ test('required artifact review v10: incomplete Git streams fail closed', async (
       await writeFile(outputPath, body);
       let intercepted = 0;
       const patch = child.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
-        if (command === 'git' && gitSubcommand(argv) === (stream === 'untracked-overflow' ? 'ls-files' : 'diff')) {
+        const subcommand = gitSubcommand(argv);
+        if (command === 'git' && (stream === 'untracked-overflow'
+          ? subcommand === 'ls-files' && argv.includes('--exclude-standard') : subcommand === 'diff')) {
           intercepted++;
           return originalSpawn(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]));', outputPath], { ...options, windowsHide: true });
         }
@@ -2310,7 +2312,7 @@ test('relay Git runs from a relay-owned folder, so a git program the task wrote 
   }
 });
 
-test('relay Git does not look inside a submodule folder that the task turned into a repository', async (t) => {
+test('relay Git does not look inside a submodule folder that the task turned into a repository, and the write-scope check refuses it', async (t) => {
   const fixture = await requiredArtifactFixture(t, []);
   const run = (cwd: string, argv: string[]) =>
     assert.equal(spawnSync('git', argv, { cwd, windowsHide: true }).status, 0, argv.join(' '));
@@ -2340,13 +2342,65 @@ test('relay Git does not look inside a submodule folder that the task turned int
       return fixture.providerResult;
     } });
   assert.equal(await readFile(canary, 'utf8').catch(() => undefined), undefined, 'relay Git ran a filter inside the submodule folder');
-  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  // The submodule folder is outside the write paths, and the task wrote into it.
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.commandResults.at(-1)?.stderr || '', /outside the signed task authority/);
   const diffs = spawns.filter(({ command, argv }) => command === 'git' && gitSubcommand(argv) === 'diff');
   assert.ok(diffs.length >= 1);
   for (const { argv } of diffs) {
     assert.ok(argv.includes('--ignore-submodules=dirty'), argv.join(' '));
     assert.equal(configOverride(argv, 'submodule.recurse'), 'false', argv.join(' '));
   }
+});
+
+test('files the task writes inside a submodule folder outside the write paths fail the write-scope check', async (t) => {
+  // Neither `git diff` nor `git ls-files --others` looks inside a folder recorded as a submodule.
+  const cases: Record<string, { gitlink: string; files: Record<string, string>; status: 'completed' | 'failed' }> = {
+    'empty submodule folder': { gitlink: 'vendor/lib', files: { 'vendor/lib/deep/evil.sh': 'payload\n' }, status: 'failed' },
+    'Git pointer to nowhere': { gitlink: 'vendor/lib',
+      files: { 'vendor/lib/.git': 'gitdir: /nonexistent\n', 'vendor/lib/deep/evil.sh': 'payload\n' }, status: 'failed' },
+    'submodule inside the write paths': { gitlink: 'reports/lib', files: { 'reports/lib/out.txt': 'result\n' }, status: 'completed' },
+    'submodule left alone': { gitlink: 'vendor/lib', files: { 'reports/out.txt': 'result\n' }, status: 'completed' },
+  };
+  for (const [name, { gitlink, files, status }] of Object.entries(cases)) {
+    await t.test(name, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const run = (argv: string[]) =>
+        assert.equal(spawnSync('git', argv, { cwd: fixture.workspace, windowsHide: true }).status, 0, argv.join(' '));
+      const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: fixture.workspace, windowsHide: true, encoding: 'utf8' }).stdout.trim();
+      run(['update-index', '--add', '--cacheinfo', `160000,${head},${gitlink}`]);
+      run(['commit', '-qm', 'submodule']);
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          for (const [path, content] of Object.entries(files)) {
+            await mkdir(resolve(workspace, path, '..'), { recursive: true });
+            await writeFile(resolve(workspace, path), content);
+          }
+          return fixture.providerResult;
+        } });
+      assert.equal(receipt.status, status, receipt.commandResults.at(-1)?.stderr);
+      if (status === 'failed') assert.match(receipt.commandResults.at(-1)?.stderr || '', /outside the signed task authority/);
+    });
+  }
+});
+
+test('git submodule init in the enrolled repository during a task does not fail it', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const run = (argv: string[]) =>
+    assert.equal(spawnSync('git', argv, { cwd: fixture.workspace, windowsHide: true }).status, 0, argv.join(' '));
+  await commitFixtureFiles(fixture.workspace, { '.gitmodules': '[submodule "lib"]\n\tpath = vendor/lib\n\turl = https://example.invalid/lib.git\n' });
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: fixture.workspace, windowsHide: true, encoding: 'utf8' }).stdout.trim();
+  run(['update-index', '--add', '--cacheinfo', `160000,${head},vendor/lib`]);
+  run(['commit', '-qm', 'submodule']);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async () => {
+      // Writes submodule.lib.url and submodule.lib.active to the shared repository configuration.
+      run(['submodule', 'init']);
+      const url = spawnSync('git', ['config', 'submodule.lib.url'], { cwd: fixture.workspace, windowsHide: true, encoding: 'utf8' });
+      assert.equal(url.stdout.trim(), 'https://example.invalid/lib.git');
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
 });
 
 test('the checkout before the task uses the operator Git configuration, and later relay Git uses the same checkout settings', async (t) => {
@@ -2421,15 +2475,26 @@ test('ordinary writes to the enrolled repository configuration during a task do 
 });
 
 test('a .gitignore the task writes cannot hide files outside the write paths from the write-scope check', async (t) => {
-  const cases: Record<string, { tracked?: Record<string, string>; files: Record<string, string>; status: 'completed' | 'failed' }> = {
-    'self-ignoring folder': { files: { 'docs/.gitignore': '*\n', 'docs/secret.txt': 'hidden' }, status: 'failed' },
-    'root ignore file': { files: { '.gitignore': '*\n', 'notes.txt': 'hidden' }, status: 'failed' },
+  const cases: Record<string, { tracked?: Record<string, string>; files: Record<string, string>; status: 'completed' | 'failed';
+    folder?: string; posixOnly?: boolean }> = {
+    'self-ignoring folder': { files: { 'docs/.gitignore': '*\n', 'docs/secret.txt': 'hidden' }, status: 'failed', folder: 'docs' },
+    'root ignore file': { files: { '.gitignore': '*\n', 'notes.txt': 'hidden' }, status: 'failed', folder: '.' },
+    // check-ignore reads `:dist` as the pathspec `dist`, which the starting rules ignore.
+    'folder name with pathspec magic': { tracked: { '.gitignore': 'dist\n' },
+      files: { ':dist/.gitignore': '*\n', ':dist/payload': 'hidden' }, status: 'failed', folder: ':dist', posixOnly: true },
     'tool cache in a folder the starting rules ignore': { tracked: { '.gitignore': '.pytest_cache/\n' },
       files: { '.pytest_cache/.gitignore': '*\n', '.pytest_cache/v/lastfailed': '{}' }, status: 'completed' },
+    // What pytest, mypy and ruff write when the repository does not list their caches.
+    'tool cache in a folder the starting rules do not ignore': {
+      files: { '.pytest_cache/.gitignore': '# Created by pytest automatically.\n*\n', '.pytest_cache/v/cache/lastfailed': '{}',
+        'src/.mypy_cache/.gitignore': '# Automatically created by mypy\n*\n', 'src/.mypy_cache/3.12/x.json': '{}',
+        '.ruff_cache/.gitignore': '# Automatically created by ruff.\n*\n', '.ruff_cache/0.8.0/1': 'x' },
+      status: 'completed' },
     'inside the write paths': { files: { 'reports/.gitignore': '*\n', 'reports/out.txt': 'result' }, status: 'completed' },
   };
-  for (const [name, { tracked, files, status }] of Object.entries(cases)) {
-    await t.test(name, async (child) => {
+  for (const [name, { tracked, files, status, folder, posixOnly }] of Object.entries(cases)) {
+    const skip = posixOnly && process.platform === 'win32' ? 'Windows file names cannot contain ":"' : false;
+    await t.test(name, { skip }, async (child) => {
       const fixture = await requiredArtifactFixture(child, []);
       if (tracked) await commitFixtureFiles(fixture.workspace, tracked);
       const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
@@ -2441,7 +2506,11 @@ test('a .gitignore the task writes cannot hide files outside the write paths fro
           return fixture.providerResult;
         } });
       assert.equal(receipt.status, status, receipt.commandResults.at(-1)?.stderr);
-      if (status === 'failed') assert.match(receipt.commandResults.at(-1)?.stderr || '', /relay_git_isolation_failed.*\.gitignore/);
+      if (status === 'failed') {
+        assert.match(receipt.commandResults.at(-1)?.stderr || '', /relay_git_isolation_failed.*\.gitignore/);
+        assert.ok((receipt.commandResults.at(-1)?.stderr || '').includes(`Folder: ${JSON.stringify(folder)}`),
+          receipt.commandResults.at(-1)?.stderr);
+      }
     });
   }
 });
