@@ -133,10 +133,9 @@ function recordReads(t: TestContext) {
 }
 
 function snapshotFunction() {
-  const snapshot = Reflect.get(taskRunner, 'snapshotRegisteredCommandPolicy') as
-    ((task: TaskEnvelope, policy: OrganizationPolicy) => Record<string, unknown>) | undefined;
+  const snapshot: unknown = Reflect.get(taskRunner, 'snapshotRegisteredCommandPolicy');
   assert.equal(typeof snapshot, 'function', 'task-runner exports snapshotRegisteredCommandPolicy');
-  return snapshot!;
+  return snapshot as typeof taskRunner.snapshotRegisteredCommandPolicy;
 }
 
 function isDeepFrozen(value: unknown): boolean {
@@ -180,8 +179,7 @@ test('the admission snapshot is frozen, holds only the commands the task names a
   assert.ok(isDeepFrozen(snapshot), 'every level of the snapshot is frozen');
   // A change to the loaded policy after admission does not reach the snapshot or the command.
   f.policy.tasks.allowedCommands.check!.argv[2] = writeReport('rewritten');
-  assert.deepEqual((snapshot.commands as Record<string, { argv: string[] }>).check!.argv,
-    [process.execPath, '-e', writeReport('approved')]);
+  assert.deepEqual(snapshot.commands.check!.argv, [process.execPath, '-e', writeReport('approved')]);
   const receipt = await executeTask({ ...f.input, task, registeredCommandSandbox: STAND_IN_SANDBOX,
     ...{ commandPolicy: snapshot }, providerExecutor: async () => providerResult });
   assert.equal(receipt.status, 'completed', JSON.stringify(receipt.commandResults.map(({ commandId, stderr }) => ({ commandId, stderr }))));
@@ -194,7 +192,7 @@ test('a snapshot taken for another task or left unfrozen is refused before any p
   const task = f.signed('external_request', ['check']);
   const other = f.signed('external_request', ['check']);
   const snapshot = snapshotFunction();
-  const unfrozen = JSON.parse(JSON.stringify(snapshot(task, f.policy))) as Record<string, unknown>;
+  const unfrozen = JSON.parse(JSON.stringify(snapshot(task, f.policy))) as ReturnType<typeof snapshot>;
   for (const commandPolicy of [snapshot(other, f.policy), unfrozen]) {
     spawned.length = 0;
     let providerCalls = 0;
