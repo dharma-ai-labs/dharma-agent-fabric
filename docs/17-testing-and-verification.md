@@ -99,7 +99,9 @@ bubblewrap. It is controlled by `DHARMA_SANDBOX_EXPECT`:
   fails. It then proves, with synthetic canaries only: a home canary and a
   Dharma-home canary are unreadable; a parent-environment sentinel and the test
   process are invisible; writes to `/`, `/usr`, the workspace and the `.git`
-  pointer fail; a `/tmp` write stays inside the sandbox; a worktree write and
+  pointer fail; the approved policy file and the workspace launchers in
+  `.dharma/bin` are invisible and unchanged after a command tries to write,
+  append, remove, replace or move them; a `/tmp` write stays inside the sandbox; a worktree write and
   `npm run` succeed; a host loopback listener is unreachable and only loopback
   exists; no inherited sockets or files are open; no capabilities remain;
   nested user namespaces fail; a detached process stops at the timeout; and
