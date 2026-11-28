@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mock, test, type TestContext } from 'node:test';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
-import { chmod, link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, link, mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import childProcess, { spawnSync } from 'node:child_process';
@@ -222,13 +222,23 @@ test('custom qualification reports cannot bypass receipt redaction or bind a dif
   }
 });
 
-// Relay-internal Git calls start with `-c name=value` configuration overrides and `--name=value`
-// global options before the subcommand.
+// Relay-internal Git calls start with `-C <folder>`, `-c name=value` configuration overrides and
+// `--name=value` global options before the subcommand.
 function gitSubcommand(argv: readonly string[]): string | undefined {
   let index = 0;
-  while (argv[index] === '-c' || argv[index]?.startsWith('--')) index += argv[index] === '-c' ? 2 : 1;
+  while (argv[index] === '-c' || argv[index] === '-C' || argv[index]?.startsWith('--')) {
+    index += argv[index] === '-c' || argv[index] === '-C' ? 2 : 1;
+  }
   return argv[index];
 }
+
+// Read once: whether the host Git reads attributes from a commit (`--attr-source`, Git 2.40 or later).
+const HOST_GIT_READS_ATTRIBUTE_SOURCE = (() => {
+  const match = /^git version (\d+)\.(\d+)/.exec(spawnSync('git', ['version'], { windowsHide: true, encoding: 'utf8' }).stdout);
+  const major = Number(match?.[1] ?? 0);
+  const minor = Number(match?.[2] ?? 0);
+  return major > 2 || (major === 2 && minor >= 40);
+})();
 
 // Relay Git subcommands that run after `git worktree add` and use the pinned repository paths.
 const PINNED_SUBCOMMANDS = new Set(['switch', 'rev-parse', 'diff', 'ls-files']);
@@ -508,7 +518,7 @@ test('task cancellation without artifacts is checked again after final Git inspe
   let inspections = 0;
   const patch = t.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
     const child = originalSpawn(command, argv, { ...options, windowsHide: true });
-    if (command === 'git' && gitSubcommand(argv) === 'ls-files') {
+    if (command === 'git' && gitSubcommand(argv) === 'ls-files' && argv.includes('--exclude-standard')) {
       inspections++;
       child.once('close', () => controller.abort(new Error('private-cancellation-sentinel')));
     }
@@ -2077,11 +2087,13 @@ test('tasks without registered commands never start bubblewrap, and relay Git af
 // Slice 3: relay Git after the provider or a sandboxed command runs nothing the task could have
 // influenced. It ignores system and global configuration, uses a relay-owned empty hooks folder,
 // reads attributes from the starting commit, and checks the pinned repository files around each call.
+// The value Git uses for `name`: the last `-c name=value` wins.
 function configOverride(argv: readonly string[], name: string): string | undefined {
+  let value: string | undefined;
   for (let index = 0; index < argv.length - 1; index++) {
-    if (argv[index] === '-c' && argv[index + 1]!.startsWith(`${name}=`)) return argv[index + 1]!.slice(name.length + 1);
+    if (argv[index] === '-c' && argv[index + 1]!.startsWith(`${name}=`)) value = argv[index + 1]!.slice(name.length + 1);
   }
-  return undefined;
+  return value;
 }
 
 function within(parent: string, candidate: string | undefined) {
@@ -2121,8 +2133,23 @@ test('relay Git ignores system and global configuration and uses relay-owned hoo
   assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
   const state = fixture.input.relayStateDirectory;
   const calls = spawns.filter(({ command }) => command === 'git');
-  assert.ok(calls.length >= 5);
-  for (const { argv, options } of calls) {
+  // The checkout before the task and the reads of the operator's checkout settings use the
+  // operator's Git configuration, so the task worktree matches the operator's checkout. No task
+  // code has run yet; they still use the relay-owned hooks folder and no file-system monitor.
+  const operatorCalls = calls.filter(({ argv }) => ['worktree', 'config'].includes(gitSubcommand(argv)!));
+  assert.ok(operatorCalls.some(({ argv }) => gitSubcommand(argv) === 'worktree'));
+  for (const { argv, options } of operatorCalls) {
+    const label = argv.join(' ');
+    const env = options.env ?? {};
+    assert.equal(env.GIT_CONFIG_NOSYSTEM, undefined, label);
+    assert.equal(env.GIT_CONFIG_GLOBAL, undefined, label);
+    const hooks = configOverride(argv, 'core.hooksPath');
+    assert.ok(within(state, hooks) && !within(worktree, hooks), `hooks path is relay-owned: ${label}`);
+    assert.equal(configOverride(argv, 'core.fsmonitor'), 'false', label);
+  }
+  const isolated = calls.filter(call => !operatorCalls.includes(call));
+  assert.ok(isolated.length >= 4);
+  for (const { argv, options } of isolated) {
     const label = argv.join(' ');
     const env = options.env ?? {};
     assert.equal(env.GIT_CONFIG_NOSYSTEM, '1', label);
@@ -2137,11 +2164,15 @@ test('relay Git ignores system and global configuration and uses relay-owned hoo
     assert.equal(configOverride(argv, 'core.fsmonitor'), 'false', label);
     assert.equal(configOverride(argv, 'core.untrackedCache'), 'false', label);
     assert.equal(configOverride(argv, 'core.attributesFile'), env.GIT_CONFIG_GLOBAL, label);
-    assert.equal(configOverride(argv, 'core.excludesFile'), env.GIT_CONFIG_GLOBAL, label);
+    // The operator's global exclude file, resolved before the task; never a worktree path.
+    const excludes = configOverride(argv, 'core.excludesFile');
+    assert.ok(excludes !== undefined && !within(worktree, excludes), `exclude file is not in the worktree: ${label}`);
   }
-  const checks = calls.filter(({ argv }) => ['diff', 'ls-files'].includes(gitSubcommand(argv)!));
+  const checks = isolated.filter(({ argv }) => ['diff', 'ls-files'].includes(gitSubcommand(argv)!));
   assert.ok(checks.length >= 2);
-  for (const { argv } of checks) assert.ok(argv.includes(`--attr-source=${startingCommit}`), argv.join(' '));
+  for (const { argv } of checks) {
+    assert.equal(argv.includes(`--attr-source=${startingCommit}`), HOST_GIT_READS_ATTRIBUTE_SOURCE, argv.join(' '));
+  }
 });
 
 test('relay Git checks the worktree Git pointer again after each call', async (t) => {
@@ -2200,14 +2231,23 @@ test('relay Git reads attributes from the starting commit, so a task-written .gi
       return fixture.providerResult;
     } });
   assert.equal(await readFile(canary, 'utf8').catch(() => undefined), undefined, 'relay Git ran the filter');
-  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  if (HOST_GIT_READS_ATTRIBUTE_SOURCE) {
+    assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  } else {
+    // An older host Git cannot read attributes from the starting commit, so the relay refuses the task.
+    assert.equal(receipt.status, 'failed');
+    assert.match(receipt.commandResults.at(-1)?.stderr || '', /relay_git_isolation_failed.*\.gitattributes/);
+  }
 });
 
 test('a Git without attribute-source support refuses a task-written .gitattributes and keeps other tasks working', async (t) => {
-  for (const writesAttributes of [true, false]) {
-    await t.test(writesAttributes ? 'attributes written' : 'attributes unchanged', async (child) => {
+  // The starting commit has a tracked root .gitattributes, which the relay records and compares.
+  const cases = { 'attributes written': 'new', 'attributes unchanged': 'none', 'tracked attributes changed': 'tracked' } as const;
+  for (const [name, change] of Object.entries(cases)) {
+    const writesAttributes = change !== 'none';
+    await t.test(name, async (child) => {
       const fixture = await requiredArtifactFixture(child, []);
-      await commitFixtureFiles(fixture.workspace, { 'reports/tracked.txt': 'original\n' });
+      await commitFixtureFiles(fixture.workspace, { 'reports/tracked.txt': 'original\n', '.gitattributes': '*.txt text\n' });
       const canary = await configureCanaryFilter(fixture, 'x');
       let versionChecks = 0;
       const spawns = recordSpawns(child, ({ command, argv, options }) => {
@@ -2218,7 +2258,8 @@ test('a Git without attribute-source support refuses a task-written .gitattribut
       });
       const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
         providerExecutor: async ({ workspace }) => {
-          if (writesAttributes) await writeFile(resolve(workspace, 'reports', '.gitattributes'), '* filter=x\n');
+          if (change === 'new') await writeFile(resolve(workspace, 'reports', '.gitattributes'), '* filter=x\n');
+          if (change === 'tracked') appendFileSync(resolve(workspace, '.gitattributes'), '* filter=x\n');
           await writeFile(resolve(workspace, 'reports', 'tracked.txt'), 'changed by the task\n');
           return fixture.providerResult;
         } });
@@ -2231,6 +2272,176 @@ test('a Git without attribute-source support refuses a task-written .gitattribut
       } else {
         assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
       }
+    });
+  }
+});
+
+// The operator's own Git configuration, found through HOME (USERPROFILE on Windows) and
+// XDG_CONFIG_HOME, which the relay passes to the checkout before the task.
+async function operatorGitHome(root: string, gitconfig: string, files: Record<string, string> = {}) {
+  const home = resolve(root, 'operator-home');
+  await mkdir(resolve(home, '.config', 'git'), { recursive: true });
+  await writeFile(resolve(home, '.gitconfig'), gitconfig);
+  for (const [path, content] of Object.entries(files)) await writeFile(resolve(home, path), content);
+  return { HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: resolve(home, '.config') };
+}
+
+const portablePath = (path: string) => path.replace(/\\/g, '/');
+
+test('relay Git runs from a relay-owned folder, so a git program the task wrote into the worktree never runs', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const spawns = recordSpawns(t);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      // Windows looks up a bare program name in the working folder before PATH.
+      if (process.platform === 'win32') await copyFile(process.execPath, resolve(workspace, 'git.exe'));
+      return fixture.providerResult;
+    } });
+  const calls = spawns.filter(({ command }) => command === 'git');
+  assert.ok(calls.length >= 5);
+  const relayGitFolder = resolve(fixture.input.relayStateDirectory, 'relay-git');
+  for (const { argv, options } of calls) assert.ok(within(relayGitFolder, options.cwd), `${options.cwd}: ${argv.join(' ')}`);
+  if (process.platform === 'win32') {
+    // Real Git ran and reported the planted program as a write outside the signed write paths.
+    assert.equal(receipt.status, 'failed');
+    assert.match(receipt.commandResults.at(-1)?.stderr || '', /outside the signed task authority/);
+  } else {
+    assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  }
+});
+
+test('relay Git does not look inside a submodule folder that the task turned into a repository', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const run = (cwd: string, argv: string[]) =>
+    assert.equal(spawnSync('git', argv, { cwd, windowsHide: true }).status, 0, argv.join(' '));
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: fixture.workspace, windowsHide: true, encoding: 'utf8' }).stdout.trim();
+  // The starting commit has a submodule; `git worktree add` leaves its folder empty.
+  run(fixture.workspace, ['update-index', '--add', '--cacheinfo', `160000,${head},sub`]);
+  run(fixture.workspace, ['commit', '-qm', 'submodule']);
+  const spawns = recordSpawns(t);
+  let canary = '';
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      // The task makes the folder a repository with an unborn HEAD, a filter driver assigned to
+      // every path, and an index entry whose content Git has to read again.
+      const sub = resolve(workspace, 'sub');
+      await mkdir(sub, { recursive: true });
+      run(sub, ['init', '-q']);
+      await writeFile(resolve(sub, 'a'), 'payload\n');
+      run(sub, ['add', 'a']);
+      canary = await configureCanaryFilter({ root: fixture.root, workspace: sub }, 'sub');
+      await mkdir(resolve(sub, '.git', 'info'), { recursive: true });
+      await writeFile(resolve(sub, '.git', 'info', 'attributes'), '* filter=sub\n');
+      // Lets the starting commit that --attr-source names resolve inside the task-written repository.
+      await mkdir(resolve(sub, '.git', 'objects', 'info'), { recursive: true });
+      await writeFile(resolve(sub, '.git', 'objects', 'info', 'alternates'), `${portablePath(resolve(fixture.workspace, '.git', 'objects'))}\n`);
+      const old = new Date('2001-01-01T00:00:00Z');
+      await utimes(resolve(sub, 'a'), old, old);
+      return fixture.providerResult;
+    } });
+  assert.equal(await readFile(canary, 'utf8').catch(() => undefined), undefined, 'relay Git ran a filter inside the submodule folder');
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  const diffs = spawns.filter(({ command, argv }) => command === 'git' && gitSubcommand(argv) === 'diff');
+  assert.ok(diffs.length >= 1);
+  for (const { argv } of diffs) {
+    assert.ok(argv.includes('--ignore-submodules=dirty'), argv.join(' '));
+    assert.equal(configOverride(argv, 'submodule.recurse'), 'false', argv.join(' '));
+  }
+});
+
+test('the checkout before the task uses the operator Git configuration, and later relay Git uses the same checkout settings', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  await commitFixtureFiles(fixture.workspace, { '.gitattributes': '*.txt text\n', 'reports/notes.txt': 'line\n' });
+  const operator = await operatorGitHome(fixture.root, '[core]\n\tautocrlf = false\n\teol = crlf\n');
+  const spawns = recordSpawns(t);
+  let checkedOut = '';
+  const receipt = await withParentEnvironment(operator, () => executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async ({ workspace }) => {
+      checkedOut = await readFile(resolve(workspace, 'reports', 'notes.txt'), 'utf8');
+      return fixture.providerResult;
+    } }));
+  assert.equal(checkedOut, 'line\r\n', 'the task worktree uses the operator line endings');
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+  const diffs = spawns.filter(({ command, argv }) => command === 'git' && gitSubcommand(argv) === 'diff');
+  assert.ok(diffs.length >= 1);
+  for (const { argv } of diffs) {
+    assert.equal(configOverride(argv, 'core.eol'), 'crlf', argv.join(' '));
+    assert.equal(configOverride(argv, 'core.autocrlf'), 'false', argv.join(' '));
+  }
+});
+
+test('the checkout before the task honours the operator safe.directory setting', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const operator = await operatorGitHome(fixture.root, '[safe]\n\tdirectory = *\n');
+  // Stands in for a repository that another account owns (for example on a network drive). Calls
+  // with an explicit --git-dir skip the ownership check.
+  recordSpawns(t, ({ command, argv, options }) => {
+    if (command !== 'git' || argv.some(value => value.startsWith('--git-dir='))) return undefined;
+    return hostSpawn(command, argv, { ...(options as childProcess.SpawnOptions),
+      env: { ...options.env, GIT_TEST_ASSUME_DIFFERENT_OWNER: '1' }, windowsHide: true });
+  });
+  const receipt = await withParentEnvironment(operator, () => executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async () => fixture.providerResult }));
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+});
+
+test('the write-scope check honours the operator global exclude file', async (t) => {
+  for (const location of ['core.excludesFile', 'default location'] as const) {
+    await t.test(location, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      const ignoreFile = resolve(fixture.root, 'operator-ignore');
+      await writeFile(ignoreFile, 'generated/\n');
+      const operator = location === 'core.excludesFile'
+        ? await operatorGitHome(fixture.root, `[core]\n\texcludesFile = ${portablePath(ignoreFile)}\n`)
+        : await operatorGitHome(fixture.root, '', { '.config/git/ignore': 'generated/\n' });
+      const receipt = await withParentEnvironment(operator, () => executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          await mkdir(resolve(workspace, 'generated'), { recursive: true });
+          await writeFile(resolve(workspace, 'generated', 'cache.bin'), 'build output');
+          return fixture.providerResult;
+        } }));
+      assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+    });
+  }
+});
+
+test('ordinary writes to the enrolled repository configuration during a task do not fail it', async (t) => {
+  const fixture = await requiredArtifactFixture(t, []);
+  const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+    providerExecutor: async () => {
+      // What `git push -u`, `git checkout -b x origin/x`, `git remote add` and Git LFS write in the main checkout.
+      for (const argv of [['config', 'branch.feature.remote', 'origin'], ['config', 'branch.feature.merge', 'refs/heads/feature'],
+        ['remote', 'add', 'upstream', 'https://example.invalid/fabric.git'],
+        ['config', 'lfs.https://example.invalid/fabric.git/info/lfs.access', 'basic']]) {
+        assert.equal(spawnSync('git', argv, { cwd: fixture.workspace, windowsHide: true }).status, 0, argv.join(' '));
+      }
+      return fixture.providerResult;
+    } });
+  assert.equal(receipt.status, 'completed', receipt.commandResults.at(-1)?.stderr);
+});
+
+test('a .gitignore the task writes cannot hide files outside the write paths from the write-scope check', async (t) => {
+  const cases: Record<string, { tracked?: Record<string, string>; files: Record<string, string>; status: 'completed' | 'failed' }> = {
+    'self-ignoring folder': { files: { 'docs/.gitignore': '*\n', 'docs/secret.txt': 'hidden' }, status: 'failed' },
+    'root ignore file': { files: { '.gitignore': '*\n', 'notes.txt': 'hidden' }, status: 'failed' },
+    'tool cache in a folder the starting rules ignore': { tracked: { '.gitignore': '.pytest_cache/\n' },
+      files: { '.pytest_cache/.gitignore': '*\n', '.pytest_cache/v/lastfailed': '{}' }, status: 'completed' },
+    'inside the write paths': { files: { 'reports/.gitignore': '*\n', 'reports/out.txt': 'result' }, status: 'completed' },
+  };
+  for (const [name, { tracked, files, status }] of Object.entries(cases)) {
+    await t.test(name, async (child) => {
+      const fixture = await requiredArtifactFixture(child, []);
+      if (tracked) await commitFixtureFiles(fixture.workspace, tracked);
+      const receipt = await executeTask({ ...fixture.input, task: fixture.signed(),
+        providerExecutor: async ({ workspace }) => {
+          for (const [path, content] of Object.entries(files)) {
+            await mkdir(resolve(workspace, path, '..'), { recursive: true });
+            await writeFile(resolve(workspace, path), content);
+          }
+          return fixture.providerResult;
+        } });
+      assert.equal(receipt.status, status, receipt.commandResults.at(-1)?.stderr);
+      if (status === 'failed') assert.match(receipt.commandResults.at(-1)?.stderr || '', /relay_git_isolation_failed.*\.gitignore/);
     });
   }
 });
