@@ -73,3 +73,60 @@ test('the Linux leg prepares the command sandbox, requires it to be usable and p
   assert.match(refusal.run, /sysctl -w user\.max_user_namespaces="\$original"\s*$/);
   assert.doesNotMatch(refusal.run, /\|\|\s*true/);
 });
+
+// The real-sandbox proof also runs on Ubuntu 22.04. Its bubblewrap (0.6) is older than 0.8.0, so
+// the sandbox runs there without --disable-userns and the probe skips the nested-namespace check:
+// a different argument list from ubuntu-latest that must be proved on a real host. The job builds
+// once and runs only the sandbox steps: the same preparation, the real-sandbox file with `usable`,
+// the operator's `relay sandbox status` on the usable and on the restricted host, and the same
+// refusal proof. Removing the job or weakening a step turns this test red.
+test('an Ubuntu 22.04 job proves the real sandbox, the operator status command and the refusal', () => {
+  const job = workflow.jobs['sandbox-ubuntu-2204'];
+  assert.ok(job, 'missing job: sandbox-ubuntu-2204');
+  assert.equal(job.name, 'Command sandbox (ubuntu-22.04)');
+  assert.equal(job['runs-on'], 'ubuntu-22.04');
+  assert.equal(job.strategy, undefined);
+  assert.equal(job['continue-on-error'], undefined);
+  assert.equal(job['timeout-minutes'], 15);
+  const names = ['Check out source', 'Use Node.js 22', 'Install locked dependencies', 'Build packages',
+    'Prepare command sandbox', 'Run real-sandbox tests', 'Check the operator sandbox status',
+    'Prove sandbox refusal on a restricted host'];
+  assert.deepEqual(job.steps.map(item => item.name), names);
+  const step = name => job.steps.find(item => item.name === name);
+  const validateStep = name => validate.steps.find(item => item.name === name);
+  for (const item of job.steps) {
+    assert.equal(item['continue-on-error'], undefined, `${item.name} may not continue on error`);
+    assert.equal(item.if, undefined, `${item.name} always runs`);
+  }
+  // The same pinned actions and runtime as the validation legs.
+  assert.deepEqual(step('Check out source'), validateStep('Check out source'));
+  assert.deepEqual(step('Use Node.js 22'), validateStep('Use Node.js 22'));
+  assert.equal(step('Install locked dependencies').run, 'npm ci');
+  assert.equal(step('Build packages').run, 'npm run build');
+  // The same preparation as ubuntu-latest: default user-namespace settings, reported only.
+  const prepare = step('Prepare command sandbox');
+  assert.equal(prepare.shell, 'bash');
+  assert.equal(prepare.run, validateStep('Prepare command sandbox').run);
+  assert.doesNotMatch(prepare.run, /sysctl/, 'the usable proof does not relax host settings');
+  const real = step('Run real-sandbox tests');
+  assert.deepEqual(real.env, { DHARMA_SANDBOX_EXPECT: 'usable' });
+  assert.equal(real.run, 'node --test packages/task-runner/dist/registeredCommandSandbox.linux.test.js');
+  // The operator command must say usable, exit 0 and leave no Dharma home behind.
+  const status = step('Check the operator sandbox status');
+  assert.equal(status.shell, 'bash');
+  assert.match(status.run, /DHARMA_HOME="\$home" node packages\/cli\/dist\/bin\.js relay sandbox status --json > "\$RUNNER_TEMP\/sandbox-usable\.json"\n/);
+  assert.match(status.run, /s\.usable !== true/);
+  assert.match(status.run, /test ! -e "\$home"/);
+  assert.doesNotMatch(status.run, /\|\|\s*true/);
+  // The same refusal proof as ubuntu-latest, and the operator command must refuse with the reason.
+  const refusal = step('Prove sandbox refusal on a restricted host');
+  assert.equal(refusal.shell, 'bash');
+  assert.match(refusal.run, /sysctl -w user\.max_user_namespaces=0\n/);
+  assert.match(refusal.run, /DHARMA_SANDBOX_EXPECT=refused node --test packages\/task-runner\/dist\/registeredCommandSandbox\.linux\.test\.js\n/);
+  assert.match(refusal.run, /node packages\/cli\/dist\/bin\.js relay sandbox status --json > "\$RUNNER_TEMP\/sandbox-refused\.json" \|\| code=\$\?\n/);
+  assert.match(refusal.run, /test "\$code" = 1\n/);
+  assert.match(refusal.run, /s\.reason !== 'user_namespaces_unavailable'/);
+  assert.match(refusal.run, /test ! -e "\$home"/);
+  assert.match(refusal.run, /sysctl -w user\.max_user_namespaces="\$original"\s*$/);
+  assert.doesNotMatch(refusal.run, /\|\|\s*true/);
+});
