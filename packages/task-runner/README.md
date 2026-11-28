@@ -36,6 +36,18 @@ enforcement acknowledgement: `executed` after complete execution, `unknown`
 after an indeterminate release attempt, or `contained` for a valid non-release.
 Tasks that omit the capability retain the previous behavior and receipt shape.
 
+## Enrol only trusted workspaces
+
+The local relay starts the provider process as the operating-system user that
+runs the relay and does not sandbox it. The provider is a trusted component. It
+reads the workspace's files and instructions in the task worktree, and nothing
+in the relay stops the provider process from reading or changing what that user
+can, including other repositories and credential files in the home directory.
+The Codex provider runs under its own sandbox setting; other providers' own
+tools are outside the relay's boundary. Registered and acceptance commands
+follow separate rules, described elsewhere in this guide. Enrol only workspaces
+whose content you trust a provider to act on as your own operating-system user.
+
 ## Required Artifacts
 
 `acceptance.requiredArtifacts` names workspace-relative regular files that must

@@ -79,6 +79,8 @@ A server loop repeatedly invokes judges or managed agents.
 
 A task modifies the active developer workspace or external path.
 
+**Operator rule:** the local relay starts the provider process as the operating-system user that runs the relay and does not sandbox it. The provider is a trusted component: nothing in the relay stops the provider process from reading or changing what that user can, including other repositories and credential files in the home directory. The Codex provider runs under its own sandbox setting; other providers' own tools are outside the relay's boundary. Registered and acceptance commands follow the separate rules in the task runner package guide. After the provider step and after each acceptance command that runs, the relay runs a write-scope check with Git inside the temporary task worktree. It lists changed tracked files and new files that Git does not ignore, and raises an error if one is outside the signed write paths. It does not see reads, writes outside the task worktree, or writes to files that Git ignores. Enrol only workspaces whose content you trust a provider to act on as your own operating-system user.
+
 **Controls:** canonical path containment, OS sandbox where possible, worktree root enforcement, write interception, command policy, post-task diff audit.
 
 ## Data classification

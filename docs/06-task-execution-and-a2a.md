@@ -126,6 +126,10 @@ export DHARMA_CLAUDE_MODEL=claude-sonnet-5
 
 `DHARMA_CLAUDE_MODEL` is passed as a single validated `claude --model` argument and is included in the execution setup rather than inferred from a mutable Claude default. Provider credentials remain local to the device.
 
+### The provider runs as your user
+
+The local relay starts the provider process as the operating-system user that runs the relay and does not sandbox it. The provider is a trusted component. It reads the workspace's files and instructions in the task worktree, and nothing in the relay stops the provider process from reading or changing what that user can, including other repositories and credential files in the home directory. The Codex provider runs under its own sandbox setting; other providers' own tools are outside the relay's boundary. Registered and acceptance commands follow separate rules, described in the task runner package guide. Enrol only workspaces whose content you trust a provider to act on as your own operating-system user.
+
 ## Command policy
 
 A task does not receive unrestricted shell text. It receives one of:
