@@ -521,7 +521,8 @@ test('task cancellation without artifacts is checked again after final Git inspe
   let inspections = 0;
   const patch = t.mock.method(childProcess, 'spawn', (command: string, argv: readonly string[], options: object) => {
     const child = originalSpawn(command, argv, { ...options, windowsHide: true });
-    if (command === 'git' && gitSubcommand(argv) === 'ls-files' && argv.includes('--exclude-standard')) {
+    // The untracked listing; the ignored-folder listing of the write-scope walk also uses --exclude-standard.
+    if (command === 'git' && gitSubcommand(argv) === 'ls-files' && argv.includes('--exclude-standard') && !argv.includes('--ignored')) {
       inspections++;
       child.once('close', () => controller.abort(new Error('private-cancellation-sentinel')));
     }
