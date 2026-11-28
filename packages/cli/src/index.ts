@@ -10288,8 +10288,8 @@ export async function run(argv: string[], captureContext?: AssignedCaptureComman
   if (command === 'tasks' && subcommand === 'run-once') return runOneTask(flags);
   if (command === 'relay' && subcommand === 'probe') return probeRelayConnection();
   if (command === 'relay' && subcommand === 'stop') {
-    // Refuse any other option before reading pid files: an ignored --dry-run or typo must never signal the relay.
-    if ([...flags.keys()].some(key => !['dry-run', 'json'].includes(key)) || [...flags.values()].some(value => value !== true)) {
+    // Refuse any other option or extra argument before reading pid files: an ignored --dry-run or typo must never signal the relay.
+    if (positional.length !== 2 || [...flags.keys()].some(key => !['dry-run', 'json'].includes(key)) || [...flags.values()].some(value => value !== true)) {
       throw new Error('relay_stop_options_invalid');
     }
     return relayStop({ dryRun: flags.has('dry-run') });
