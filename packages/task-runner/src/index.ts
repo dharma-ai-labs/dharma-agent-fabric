@@ -443,6 +443,8 @@ async function runProcess(command: string, argv: string[], options: {
    * `RegisteredCommandSandboxFailedError` and nothing runs on the host.
    */
   sandbox?: { sandbox: UsableSandbox; worktree: string };
+  /** Text written to the child's standard input (host commands only). */
+  input?: string;
 }): Promise<Omit<CommandResult, 'commandId'>> {
   return new Promise((accept, reject) => {
     const sandbox = options.sandbox;
@@ -461,9 +463,13 @@ async function runProcess(command: string, argv: string[], options: {
         env: options.childEnvironment ?? { ...process.env, DHARMA_TASK_WORKTREE: options.cwd },
         shell: false,
         windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
       });
+    if (!sandbox && options.input !== undefined) {
+      child.stdin?.on('error', () => undefined);
+      child.stdin?.end(options.input);
+    }
     const status: Buffer[] = [];
     if (sandbox) {
       const statusStream = child.stdio[3] as NodeJS.ReadableStream | null | undefined;
@@ -708,8 +714,8 @@ async function assertRepositoryPinned(pinned: PinnedRepository): Promise<void> {
 // pointer and pinned files before and after each call, never looks inside submodule folders, and
 // turns off external diff and text-conversion drivers.
 async function relayGit(repository: string, argv: string[], isolation: RelayGitIsolation,
-  options: { requireCompleteOutput?: boolean; pinned?: PinnedRepository; operator?: boolean } = {}) {
-  const { pinned, requireCompleteOutput, operator } = options;
+  options: { requireCompleteOutput?: boolean; pinned?: PinnedRepository; operator?: boolean; input?: string } = {}) {
+  const { pinned, requireCompleteOutput, operator, input } = options;
   let globalOptions: string[] = [];
   if (pinned) {
     await assertRepositoryPinned(pinned);
@@ -736,6 +742,7 @@ async function relayGit(repository: string, argv: string[], isolation: RelayGitI
     childEnvironment: operator ? operatorGitEnvironment(process.env, process.platform)
       : relayGitEnvironment(process.env, process.platform, isolation),
     ...(requireCompleteOutput ? { requireCompleteOutput } : {}),
+    ...(input === undefined ? {} : { input }),
   });
   if (pinned) await assertRepositoryPinned(pinned);
   return result;
@@ -840,8 +847,9 @@ async function assertIgnoreRulesTrusted(worktree: string, trackedChanges: string
     .filter(folder => !folderWithinPolicy(folder, writePaths));
   if (folders.length === 0) return;
   if (folders.includes('')) throw new RelayGitIsolationError('ignore_rules_changed');
-  const result = await relayGit(worktree, ['check-ignore', '-v', '-z', '--', ...folders], pinned.isolation,
-    { requireCompleteOutput: true, pinned });
+  // `-z` output needs the paths on standard input.
+  const result = await relayGit(worktree, ['check-ignore', '-v', '-z', '--stdin'], pinned.isolation,
+    { requireCompleteOutput: true, pinned, input: folders.map(folder => `${folder}\0`).join('') });
   if (result.exitCode !== 0 && result.exitCode !== 1) throw new Error(`Git operation failed: ${result.stderr.slice(0, 500)}`);
   // Each match is four fields: source file, line number, pattern, path.
   const fields = result.stdout.split('\0');

@@ -95,10 +95,12 @@ export function relayGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.
 /**
  * Builds the environment for the relay's Git calls before any task code runs (the checkout and the
  * reads of the operator's checkout settings): operating-system essentials, so Git reads the
- * operator's system and global configuration as the operator's own checkout does.
+ * operator's system and global configuration as the operator's own checkout does. On Windows it
+ * also passes HOME and XDG_CONFIG_HOME when set, because Git for Windows finds the global
+ * configuration through them before the user profile.
  */
 export function operatorGitEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.Platform): Record<string, string> {
-  return operatingSystemEssentials(source, platform);
+  return operatingSystemEssentials(source, platform, platform === 'win32' ? ['HOME', 'XDG_CONFIG_HOME'] : []);
 }
 
 /**
