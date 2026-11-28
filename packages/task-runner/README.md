@@ -20,17 +20,6 @@ in relay-owned Git worktrees using registered command IDs and canonical
 arguments under explicit path, network, Git, budget, and Skill-pin authority.
 It is not a general remote shell.
 
-## Enrol only trusted workspaces
-
-Registered commands and acceptance commands run the workspace's own scripts and
-tests as the operating-system user that runs the local relay. That code can read
-and change anything that user can, including other repositories, files in the
-home directory, and credential files stored there. Acceptance commands receive
-only the explicit environment described under "Acceptance command environment",
-but they can still read the relay process environment through the operating
-system, so tokens or API keys held there are not protected from them. Enrol only
-workspaces whose code you trust to run as your own operating-system user.
-
 ## Receipt-required tasks
 
 A signed task opts into action-time authorization with
@@ -46,6 +35,18 @@ once under the relay state directory. A gated task receipt includes one HQ
 enforcement acknowledgement: `executed` after complete execution, `unknown`
 after an indeterminate release attempt, or `contained` for a valid non-release.
 Tasks that omit the capability retain the previous behavior and receipt shape.
+
+## Enrol only trusted workspaces
+
+The local relay starts the provider process as the operating-system user that
+runs the relay and does not sandbox it. The provider is a trusted component. It
+reads the workspace's files and instructions in the task worktree, and nothing
+in the relay stops the provider process from reading or changing what that user
+can, including other repositories and credential files in the home directory.
+The Codex provider runs under its own sandbox setting; other providers' own
+tools are outside the relay's boundary. Registered and acceptance commands
+follow separate rules, described elsewhere in this guide. Enrol only workspaces
+whose content you trust a provider to act on as your own operating-system user.
 
 ## Required Artifacts
 

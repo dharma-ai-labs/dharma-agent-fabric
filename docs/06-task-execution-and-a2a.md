@@ -126,6 +126,10 @@ export DHARMA_CLAUDE_MODEL=claude-sonnet-5
 
 `DHARMA_CLAUDE_MODEL` is passed as a single validated `claude --model` argument and is included in the execution setup rather than inferred from a mutable Claude default. Provider credentials remain local to the device.
 
+### The provider runs as your user
+
+The local relay starts the provider process as the operating-system user that runs the relay and does not sandbox it. The provider is a trusted component. It reads the workspace's files and instructions in the task worktree, and nothing in the relay stops the provider process from reading or changing what that user can, including other repositories and credential files in the home directory. The Codex provider runs under its own sandbox setting; other providers' own tools are outside the relay's boundary. Registered and acceptance commands follow separate rules, described in the task runner package guide. Enrol only workspaces whose content you trust a provider to act on as your own operating-system user.
+
 ## Command policy
 
 A task does not receive unrestricted shell text. It receives one of:
@@ -152,10 +156,6 @@ commands:
 The provider may propose a new command, but the relay must request approval or reject it according to policy.
 
 Registered acceptance commands run with an explicit environment: operating-system essentials, the variable names their approved policy entry lists under `environment.inherit`, and the runner-owned names. They do not receive the whole relay environment. This keeps relay variables out of the command's own environment and output; it is not an isolation boundary, because the command runs as the relay user and can still read the relay process environment through the operating system. Relay-internal Git calls run with the same essentials and with `core.fsmonitor` disabled. See the task runner package guide for the per-platform list, the limits on inherited names and the paths that still inherit the relay environment.
-
-### Workspace code runs as your user
-
-Registered commands and acceptance commands, such as `npm test`, run the workspace's own scripts and tests as the operating-system user that runs the local relay. That code can read and change anything that user can, including other repositories, files in the home directory, and credential files stored there. Acceptance commands receive only the explicit environment described above, but they can still read the relay process environment through the operating system, so tokens or API keys held there are not protected from them. Enrol only workspaces whose code you trust to run as your own operating-system user.
 
 ## Network policy
 
